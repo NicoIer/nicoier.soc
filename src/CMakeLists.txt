@@ -2,6 +2,8 @@ add_library(
     soc_core
     OBJECT
         core/soc_context.c
+        core/soc_mesh.c
+        core/soc_pipeline.c
         raster/soc_rasterizer.c
 )
 

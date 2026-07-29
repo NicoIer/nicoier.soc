@@ -9,6 +9,7 @@
 - Public macros and constants use upper snake case with the `SOC_` prefix,
   for example `SOC_ABI_VERSION` and `SOC_RESULT_OK`.
 - Every exported symbol must be declared in `include/soc/soc.h`.
+- Shared public data types are declared in `include/soc/soc_types.h`.
 - ABI functions use `SOC_API` and `SOC_CALL`.
 
 ## Internal C code

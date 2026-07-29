@@ -1,7 +1,7 @@
 #ifndef SOC_H_INCLUDED
 #define SOC_H_INCLUDED
 
-#include <stdint.h>
+#include <soc/soc_types.h>
 
 #if defined(_WIN32)
     #if defined(SOC_STATIC)
@@ -24,28 +24,6 @@
 extern "C" {
 #endif
 
-#define SOC_ABI_VERSION_MAJOR 1u
-#define SOC_ABI_VERSION_MINOR 0u
-#define SOC_ABI_VERSION \
-    ((SOC_ABI_VERSION_MAJOR << 16u) | SOC_ABI_VERSION_MINOR)
-
-typedef int32_t soc_result;
-
-#define SOC_RESULT_OK ((soc_result)0)
-#define SOC_RESULT_INVALID_ARGUMENT ((soc_result)-1)
-#define SOC_RESULT_OUT_OF_MEMORY ((soc_result)-2)
-#define SOC_RESULT_UNSUPPORTED ((soc_result)-3)
-#define SOC_RESULT_INTERNAL_ERROR ((soc_result)-4)
-
-typedef struct soc_context soc_context;
-
-typedef struct soc_config {
-    uint32_t struct_size;
-    uint32_t width;
-    uint32_t height;
-    uint32_t flags;
-} soc_config;
-
 SOC_API uint32_t SOC_CALL soc_get_abi_version(void);
 
 SOC_API soc_result SOC_CALL soc_context_create(
@@ -54,6 +32,56 @@ SOC_API soc_result SOC_CALL soc_context_create(
 );
 
 SOC_API void SOC_CALL soc_context_destroy(soc_context* context);
+
+SOC_API soc_result SOC_CALL soc_context_resize(
+    soc_context* context,
+    uint32_t width,
+    uint32_t height
+);
+
+SOC_API soc_result SOC_CALL soc_mesh_create(
+    soc_context* context,
+    const soc_mesh_desc* desc,
+    soc_mesh** out_mesh
+);
+
+SOC_API soc_result SOC_CALL soc_mesh_destroy(soc_mesh* mesh);
+
+SOC_API soc_result SOC_CALL soc_frame_begin(
+    soc_context* context,
+    const soc_frame_desc* desc
+);
+
+SOC_API soc_result SOC_CALL soc_occluders_submit(
+    soc_context* context,
+    const soc_mesh* mesh,
+    const soc_mat4* object_to_world,
+    uint32_t instance_count
+);
+
+SOC_API soc_result SOC_CALL soc_occluders_finish(soc_context* context);
+
+SOC_API soc_result SOC_CALL soc_visibility_test_aabbs(
+    soc_context* context,
+    const soc_aabb* world_bounds,
+    uint32_t bounds_count,
+    soc_visibility* out_visibility
+);
+
+SOC_API soc_result SOC_CALL soc_frame_end(soc_context* context);
+
+SOC_API soc_result SOC_CALL soc_context_get_stats(
+    const soc_context* context,
+    soc_stats* out_stats
+);
+
+SOC_API soc_result SOC_CALL soc_hiz_level_query(
+    const soc_context* context,
+    uint32_t level,
+    soc_hiz_level_info* out_info,
+    float* out_depth,
+    uint64_t out_depth_count
+);
 
 #ifdef __cplusplus
 }

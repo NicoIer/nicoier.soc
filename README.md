@@ -4,9 +4,10 @@
 culling. Its public surface is a stable C ABI intended for native callers and
 Unity/C# interop.
 
-The project currently contains the buildable library skeleton: ABI versioning,
-an opaque context, internal module boundaries, and ABI smoke tests. Rasterization
-and occlusion algorithms will be added behind this interface.
+The project currently contains a buildable rendering-flow framework: ABI
+versioning, opaque context and mesh handles, frame-state validation, internal
+rasterizer hooks, and ABI tests. Rasterization and occlusion algorithms will be
+added behind this interface.
 
 ## Build
 
@@ -36,4 +37,6 @@ Unity iOS or WebGL builds.
 
 See [docs/NAMING.md](docs/NAMING.md) and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before adding a new module or
-public API.
+public API. Public ABI layouts are documented in
+[docs/TYPES.md](docs/TYPES.md), and the frame state machine is documented in
+[docs/PIPELINE.md](docs/PIPELINE.md).

@@ -13,6 +13,7 @@ static int test_context_lifetime(void)
         .struct_size = sizeof(soc_config),
         .width = 320u,
         .height = 180u,
+        .worker_count = 0u,
         .flags = 0u,
     };
     soc_context* context = NULL;
@@ -34,12 +35,14 @@ static int test_invalid_arguments(void)
         .struct_size = sizeof(soc_config),
         .width = 0u,
         .height = 180u,
+        .worker_count = 0u,
         .flags = 0u,
     };
     const soc_config unsupported_config = {
         .struct_size = sizeof(soc_config),
         .width = 320u,
         .height = 180u,
+        .worker_count = 0u,
         .flags = 1u,
     };
     soc_context* context = NULL;
