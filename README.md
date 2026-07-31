@@ -1,15 +1,14 @@
-# soc
+# soc：基于 CPU Hi-Z 的遮挡剔除库
 
-`soc` is a C17 library for CPU software rasterization and software occlusion
-culling. Its public surface is a stable C ABI intended for native callers and
-Unity/C# interop.
+> [!IMPORTANT]
+> `soc` 指 **Software Occlusion Culling（软件遮挡剔除）**。本项目不是用于输出
+> 图像的通用软光栅器；它使用 CPU 对遮挡物进行仅深度光栅化，目标是在 CPU
+> 上构建 Hi-Z（Hierarchical Z-Buffer，分层深度缓冲）并完成遮挡剔除。
 
-The project currently contains a buildable rendering-flow framework: ABI
-versioning, opaque context and mesh handles, frame-state validation, internal
-rasterizer hooks, and ABI tests. Rasterization and occlusion algorithms will be
-added behind this interface.
+`soc` 是一个使用 C17 编写的 CPU Hi-Z 遮挡剔除库。它提供稳定的 C ABI，
+可供原生程序调用，也支持与 Unity/C# 互操作。
 
-## Build
+## 构建
 
 ```sh
 cmake -S . -B build -DSOC_BUILD_TESTS=ON
@@ -17,26 +16,4 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Set `SOC_BUILD_SHARED=OFF` when a static library is required, such as for some
-Unity iOS or WebGL builds.
-
-## Layout
-
-- `include/soc/`: stable public C ABI
-- `src/abi/`: ABI entry points and boundary validation
-- `src/core/`: context and library orchestration
-- `src/raster/`: CPU rasterization implementation
-- `src/occlusion/`: occlusion and depth hierarchy implementation
-- `src/math/`: internal scalar and SIMD math
-- `src/platform/`: platform, CPU feature, and threading adapters
-- `bindings/csharp/`: managed interop layer
-- `tests/`: unit, integration, and ABI tests
-- `benchmarks/`: performance benchmarks
-- `examples/`: C and Unity integration examples
-- `docs/`: architecture, ABI, and naming rules
-
-See [docs/NAMING.md](docs/NAMING.md) and
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before adding a new module or
-public API. Public ABI layouts are documented in
-[docs/TYPES.md](docs/TYPES.md), and the frame state machine is documented in
-[docs/PIPELINE.md](docs/PIPELINE.md).
+需要静态库时，可设置 `SOC_BUILD_SHARED=OFF`
