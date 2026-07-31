@@ -119,7 +119,16 @@ soc_result soc_occluders_finish_internal(soc_context* context)
         return result;
     }
 
-    context->stats.hiz_level_count = context->rasterizer.hiz_level_count;
+    result = soc_hiz_build(
+        &context->depth_pyramid,
+        context->rasterizer.frame.depth_direction
+    );
+    if (result != SOC_RESULT_OK) {
+        return result;
+    }
+
+    context->stats.hiz_level_count =
+        context->depth_pyramid.level_count;
     context->state = SOC_CONTEXT_STATE_QUERY_READY;
     return SOC_RESULT_OK;
 }
@@ -195,8 +204,8 @@ soc_result soc_hiz_level_query_internal(
         return SOC_RESULT_INVALID_STATE;
     }
 
-    return soc_rasterizer_query_hiz_level(
-        &context->rasterizer,
+    return soc_hiz_query(
+        &context->depth_pyramid,
         level,
         out_info,
         out_depth,

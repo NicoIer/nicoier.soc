@@ -3,6 +3,7 @@
 
 #include <soc/soc.h>
 
+#include "occlusion/soc_hiz.h"
 #include "raster/soc_rasterizer.h"
 
 typedef enum soc_context_state {
@@ -12,6 +13,7 @@ typedef enum soc_context_state {
 } soc_context_state;
 
 struct soc_context {
+    soc_hiz depth_pyramid;
     soc_rasterizer rasterizer;
     soc_mesh* meshes;
     soc_context_state state;

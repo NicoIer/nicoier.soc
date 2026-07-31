@@ -893,6 +893,98 @@ static int test_clipped_oversized_triangle(void)
     return 0;
 }
 
+static int test_fullscreen_hiz_levels(
+    soc_depth_direction depth_direction,
+    float expected_depth
+)
+{
+    const uint16_t indices[] = {0u, 1u, 2u};
+    const soc_mat4 identity = identity_matrix();
+    soc_frame_desc frame_desc = make_frame_desc(depth_direction);
+    float positions[9];
+    soc_context* context = NULL;
+    soc_mesh* mesh = NULL;
+    uint32_t expected_width = TEST_WIDTH;
+    uint32_t expected_height = TEST_HEIGHT;
+    uint32_t level;
+
+    make_oversized_triangle(expected_depth, positions);
+    CHECK_RESULT(
+        create_context(TEST_WIDTH, TEST_HEIGHT, &context),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        create_triangle_mesh(
+            context,
+            positions,
+            indices,
+            SOC_MESH_FLAG_TWO_SIDED,
+            &mesh
+        ),
+        SOC_RESULT_OK
+    );
+
+    CHECK_RESULT(soc_frame_begin(context, &frame_desc), SOC_RESULT_OK);
+    CHECK_RESULT(
+        soc_occluders_submit(context, mesh, &identity, 1u),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(soc_occluders_finish(context), SOC_RESULT_OK);
+
+    for (level = 0u; level < 4u; ++level) {
+        soc_hiz_level_info info = {
+            .struct_size = sizeof(soc_hiz_level_info),
+        };
+        float depth[TEST_PIXEL_COUNT];
+        const uint32_t expected_count =
+            expected_width * expected_height;
+        uint32_t index;
+
+        for (index = 0u; index < TEST_PIXEL_COUNT; ++index) {
+            depth[index] = DEPTH_SENTINEL;
+        }
+        CHECK_RESULT(
+            soc_hiz_level_query(
+                context,
+                level,
+                &info,
+                depth,
+                TEST_PIXEL_COUNT
+            ),
+            SOC_RESULT_OK
+        );
+        CHECK(info.level == level);
+        CHECK(info.width == expected_width);
+        CHECK(info.height == expected_height);
+        CHECK(info.required_element_count == expected_count);
+        for (index = 0u; index < expected_count; ++index) {
+            CHECK(depth_equal(depth[index], expected_depth));
+        }
+        for (index = expected_count; index < TEST_PIXEL_COUNT; ++index) {
+            CHECK(depth_equal(depth[index], DEPTH_SENTINEL));
+        }
+
+        expected_width = expected_width / 2u + expected_width % 2u;
+        expected_height = expected_height / 2u + expected_height % 2u;
+    }
+
+    CHECK_RESULT(soc_frame_end(context), SOC_RESULT_OK);
+    CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
+    soc_context_destroy(context);
+    return 0;
+}
+
+static int test_hiz_pipeline_integration(void)
+{
+    if (test_fullscreen_hiz_levels(SOC_DEPTH_FORWARD, 0.40f) != 0) {
+        return 1;
+    }
+    if (test_fullscreen_hiz_levels(SOC_DEPTH_REVERSED, 0.60f) != 0) {
+        return 1;
+    }
+    return 0;
+}
+
 static int test_zero_to_one_near_plane_clipping(void)
 {
     const float positions[] = {
@@ -963,6 +1055,7 @@ static int test_resize_and_empty_frame_clear(void)
     soc_context* context = NULL;
     soc_mesh* mesh = NULL;
     soc_mesh* meshes[1];
+    const soc_frame_desc frame_desc = make_frame_desc(SOC_DEPTH_FORWARD);
     frame_capture drawn;
     frame_capture cleared;
     uint32_t pixel;
@@ -1002,6 +1095,55 @@ static int test_resize_and_empty_frame_clear(void)
         CHECK(depth_equal(cleared.depth[pixel], DEPTH_SENTINEL));
     }
 
+    CHECK_RESULT(soc_frame_begin(context, &frame_desc), SOC_RESULT_OK);
+    CHECK_RESULT(soc_occluders_finish(context), SOC_RESULT_OK);
+    {
+        uint32_t expected_width = 5u;
+        uint32_t expected_height = 3u;
+        uint32_t level;
+
+        for (level = 0u; level < 4u; ++level) {
+            soc_hiz_level_info info = {
+                .struct_size = sizeof(soc_hiz_level_info),
+            };
+            float depth[TEST_PIXEL_COUNT];
+            const uint32_t expected_count =
+                expected_width * expected_height;
+
+            for (pixel = 0u; pixel < TEST_PIXEL_COUNT; ++pixel) {
+                depth[pixel] = DEPTH_SENTINEL;
+            }
+            CHECK_RESULT(
+                soc_hiz_level_query(
+                    context,
+                    level,
+                    &info,
+                    depth,
+                    TEST_PIXEL_COUNT
+                ),
+                SOC_RESULT_OK
+            );
+            CHECK(info.level == level);
+            CHECK(info.width == expected_width);
+            CHECK(info.height == expected_height);
+            CHECK(info.required_element_count == expected_count);
+            for (pixel = 0u; pixel < expected_count; ++pixel) {
+                CHECK(depth_equal(depth[pixel], 1.0f));
+            }
+            for (pixel = expected_count;
+                 pixel < TEST_PIXEL_COUNT;
+                 ++pixel) {
+                CHECK(depth_equal(depth[pixel], DEPTH_SENTINEL));
+            }
+
+            expected_width =
+                expected_width / 2u + expected_width % 2u;
+            expected_height =
+                expected_height / 2u + expected_height % 2u;
+        }
+    }
+    CHECK_RESULT(soc_frame_end(context), SOC_RESULT_OK);
+
     CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
     soc_context_destroy(context);
     return 0;
@@ -1031,6 +1173,9 @@ int main(void)
         return 1;
     }
     if (test_clipped_oversized_triangle() != 0) {
+        return 1;
+    }
+    if (test_hiz_pipeline_integration() != 0) {
         return 1;
     }
     if (test_zero_to_one_near_plane_clipping() != 0) {

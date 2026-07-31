@@ -73,7 +73,10 @@ SOC_API soc_result SOC_CALL soc_occluders_submit(
     uint32_t instance_count
 );
 
-/* Ends occluder recording. Derived Hi-Z Levels are not currently built. */
+/*
+ * Ends occluder recording and synchronously builds every derived Hi-Z Level
+ * before making the frame query-ready.
+ */
 SOC_API soc_result SOC_CALL soc_occluders_finish(soc_context* context);
 
 /* Currently writes SOC_VISIBILITY_UNKNOWN for every requested AABB. */
@@ -92,8 +95,9 @@ SOC_API soc_result SOC_CALL soc_context_get_stats(
 );
 
 /*
- * Copies a depth Level into caller storage. Level 0 contains rasterized depth;
- * higher Levels currently contain clear-depth placeholders.
+ * Copies a depth Level into caller storage. Level 0 contains rasterized depth.
+ * Each higher Level has ceil(previous / 2) dimensions and reduces only valid
+ * children: maximum depth for forward Z, minimum depth for reversed Z.
  */
 SOC_API soc_result SOC_CALL soc_hiz_level_query(
     const soc_context* context,

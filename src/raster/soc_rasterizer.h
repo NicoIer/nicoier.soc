@@ -3,11 +3,13 @@
 
 #include <soc/soc.h>
 
+#include <stddef.h>
+
 typedef struct soc_rasterizer {
     uint32_t width;
     uint32_t height;
-    uint32_t hiz_level_count;
     size_t depth_element_count;
+    /* Borrowed Level 0 storage owned by the context's depth pyramid. */
     float* depth;
     uint64_t clipped_triangle_count;
     uint64_t rasterized_triangle_count;
@@ -19,7 +21,9 @@ typedef struct soc_rasterizer {
 soc_result soc_rasterizer_initialize(
     soc_rasterizer* rasterizer,
     uint32_t width,
-    uint32_t height
+    uint32_t height,
+    float* depth,
+    size_t depth_element_count
 );
 
 void soc_rasterizer_shutdown(soc_rasterizer* rasterizer);
@@ -27,7 +31,9 @@ void soc_rasterizer_shutdown(soc_rasterizer* rasterizer);
 soc_result soc_rasterizer_resize(
     soc_rasterizer* rasterizer,
     uint32_t width,
-    uint32_t height
+    uint32_t height,
+    float* depth,
+    size_t depth_element_count
 );
 
 soc_result soc_rasterizer_begin_frame(
@@ -52,13 +58,5 @@ soc_result soc_rasterizer_test_aabbs(
 );
 
 soc_result soc_rasterizer_end_frame(soc_rasterizer* rasterizer);
-
-soc_result soc_rasterizer_query_hiz_level(
-    const soc_rasterizer* rasterizer,
-    uint32_t level,
-    soc_hiz_level_info* out_info,
-    float* out_depth,
-    uint64_t out_depth_count
-);
 
 #endif

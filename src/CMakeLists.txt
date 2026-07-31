@@ -4,6 +4,7 @@ add_library(
         core/soc_context.c
         core/soc_mesh.c
         core/soc_pipeline.c
+        occlusion/soc_hiz.c
         raster/soc_rasterizer.c
 )
 

@@ -51,9 +51,10 @@ soc_frame_end
 ```
 
 乱序调用会返回 `SOC_RESULT_INVALID_STATE`。提交遮挡物时，会同步对三角形执行
-变换、齐次裁剪、面剔除和标量光栅化，并将结果写入第 0 层级的深度图像。此时尚未
-构建派生 Hi-Z 层级，每个被测试的 AABB 结果仍为
-`SOC_VISIBILITY_UNKNOWN`。
+变换、齐次裁剪、面剔除和标量光栅化，并将结果写入第 0 层级的深度图像。
+`soc_occluders_finish()` 会同步构建全部派生 Hi-Z 层级；仅在构建成功完成后，
+上下文才进入可查询状态。投影 AABB 测试尚未实现，因此每个被测试的 AABB 结果
+仍为 `SOC_VISIBILITY_UNKNOWN`。
 
 ## Hi-Z 图像查询
 
@@ -62,8 +63,11 @@ soc_frame_end
 `out_depth_count = 0`；返回的
 `soc_hiz_level_info.required_element_count` 给出所需的元素数量。
 
-第 0 层级包含经标量光栅化得到的深度图像。更高层级目前会返回其逻辑尺寸，
-并以清除深度占位值填充对应层级的数据。
+第 0 层级包含经标量光栅化得到的深度图像。若某层尺寸为 `w x h`，下一层尺寸为
+`ceil(w / 2) x ceil(h / 2)`，直至 `1 x 1`。每个派生元素归约上一层对应
+`2 x 2` 区域内实际存在的子项：正向 Z 取最大值，反向 Z 取最小值。对于
+非二次幂（NPOT）尺寸的右侧和底部边界，不存在的子项不会参与归约，也不会以
+清除深度补齐。
 
 仅在 `soc_occluders_finish()` 之后、`soc_frame_end()` 之前查询才有效。
 目标缓冲区过小时会返回 `SOC_RESULT_BUFFER_TOO_SMALL`，但仍会返回层级

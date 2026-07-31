@@ -32,12 +32,25 @@ soc_result soc_context_create_internal(
         return SOC_RESULT_OUT_OF_MEMORY;
     }
 
-    soc_result result = soc_rasterizer_initialize(
-        &context->rasterizer,
+    soc_result result = soc_hiz_initialize(
+        &context->depth_pyramid,
         config->width,
         config->height
     );
     if (result != SOC_RESULT_OK) {
+        free(context);
+        return result;
+    }
+
+    result = soc_rasterizer_initialize(
+        &context->rasterizer,
+        config->width,
+        config->height,
+        soc_hiz_level_data(&context->depth_pyramid, 0u),
+        context->depth_pyramid.levels[0].element_count
+    );
+    if (result != SOC_RESULT_OK) {
+        soc_hiz_shutdown(&context->depth_pyramid);
         free(context);
         return result;
     }
@@ -56,6 +69,7 @@ void soc_context_destroy_internal(soc_context* context)
 
     soc_mesh_destroy_all_internal(context);
     soc_rasterizer_shutdown(&context->rasterizer);
+    soc_hiz_shutdown(&context->depth_pyramid);
     free(context);
 }
 
@@ -65,6 +79,9 @@ soc_result soc_context_resize_internal(
     uint32_t height
 )
 {
+    soc_hiz replacement;
+    soc_result result;
+
     if (context == NULL || width == 0u || height == 0u) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
@@ -72,7 +89,31 @@ soc_result soc_context_resize_internal(
         return SOC_RESULT_INVALID_STATE;
     }
 
-    return soc_rasterizer_resize(&context->rasterizer, width, height);
+    if (context->rasterizer.width == width &&
+        context->rasterizer.height == height) {
+        return SOC_RESULT_OK;
+    }
+
+    result = soc_hiz_initialize(&replacement, width, height);
+    if (result != SOC_RESULT_OK) {
+        return result;
+    }
+
+    result = soc_rasterizer_resize(
+        &context->rasterizer,
+        width,
+        height,
+        soc_hiz_level_data(&replacement, 0u),
+        replacement.levels[0].element_count
+    );
+    if (result != SOC_RESULT_OK) {
+        soc_hiz_shutdown(&replacement);
+        return result;
+    }
+
+    soc_hiz_shutdown(&context->depth_pyramid);
+    context->depth_pyramid = replacement;
+    return SOC_RESULT_OK;
 }
 
 soc_result soc_context_get_stats_internal(

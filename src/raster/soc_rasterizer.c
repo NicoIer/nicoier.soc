@@ -5,7 +5,6 @@
 #include <float.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 
 #define SOC_CLIP_PLANE_COUNT 6u
@@ -36,44 +35,6 @@ static soc_bool checked_size_multiply(
 
     *out_result = left * right;
     return SOC_TRUE;
-}
-
-static soc_result allocate_depth_buffer(
-    uint32_t width,
-    uint32_t height,
-    float** out_depth,
-    size_t* out_element_count
-)
-{
-    float* depth;
-    size_t element_count;
-    size_t byte_count;
-
-    if (out_depth == NULL ||
-        out_element_count == NULL ||
-        width == 0u ||
-        height == 0u ||
-        !checked_size_multiply(
-            (size_t)width,
-            (size_t)height,
-            &element_count
-        ) ||
-        !checked_size_multiply(
-            element_count,
-            sizeof(float),
-            &byte_count
-        )) {
-        return SOC_RESULT_INVALID_ARGUMENT;
-    }
-
-    depth = malloc(byte_count);
-    if (depth == NULL) {
-        return SOC_RESULT_OUT_OF_MEMORY;
-    }
-
-    *out_depth = depth;
-    *out_element_count = element_count;
-    return SOC_RESULT_OK;
 }
 
 static soc_bool finite_double(double value)
@@ -576,72 +537,33 @@ static soc_bool rasterize_triangle(
     return SOC_TRUE;
 }
 
-static uint32_t halve_ceil(uint32_t value)
-{
-    return value / 2u + value % 2u;
-}
-
-static uint32_t calculate_hiz_level_count(uint32_t width, uint32_t height)
-{
-    uint32_t level_count = 1u;
-
-    while (width > 1u || height > 1u) {
-        width = halve_ceil(width);
-        height = halve_ceil(height);
-        ++level_count;
-    }
-
-    return level_count;
-}
-
-static void calculate_hiz_level_dimensions(
-    const soc_rasterizer* rasterizer,
-    uint32_t level,
-    uint32_t* out_width,
-    uint32_t* out_height
-)
-{
-    uint32_t width = rasterizer->width;
-    uint32_t height = rasterizer->height;
-    uint32_t current_level;
-
-    for (current_level = 0u; current_level < level; ++current_level) {
-        width = halve_ceil(width);
-        height = halve_ceil(height);
-    }
-
-    *out_width = width;
-    *out_height = height;
-}
-
 soc_result soc_rasterizer_initialize(
     soc_rasterizer* rasterizer,
     uint32_t width,
-    uint32_t height
+    uint32_t height,
+    float* depth,
+    size_t depth_element_count
 )
 {
-    float* depth;
-    size_t depth_element_count;
-    soc_result result;
+    size_t required_element_count;
 
-    if (rasterizer == NULL || width == 0u || height == 0u) {
+    if (rasterizer == NULL ||
+        width == 0u ||
+        height == 0u ||
+        depth == NULL ||
+        !checked_size_multiply(
+            (size_t)width,
+            (size_t)height,
+            &required_element_count
+        ) ||
+        depth_element_count < required_element_count) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 
-    result = allocate_depth_buffer(
-        width,
-        height,
-        &depth,
-        &depth_element_count
-    );
-    if (result != SOC_RESULT_OK) {
-        return result;
-    }
-
+    memset(rasterizer, 0, sizeof(*rasterizer));
     rasterizer->width = width;
     rasterizer->height = height;
-    rasterizer->hiz_level_count = calculate_hiz_level_count(width, height);
-    rasterizer->depth_element_count = depth_element_count;
+    rasterizer->depth_element_count = required_element_count;
     rasterizer->depth = depth;
     rasterizer->clipped_triangle_count = 0u;
     rasterizer->rasterized_triangle_count = 0u;
@@ -657,49 +579,39 @@ void soc_rasterizer_shutdown(soc_rasterizer* rasterizer)
         return;
     }
 
-    free(rasterizer->depth);
     memset(rasterizer, 0, sizeof(*rasterizer));
 }
 
 soc_result soc_rasterizer_resize(
     soc_rasterizer* rasterizer,
     uint32_t width,
-    uint32_t height
+    uint32_t height,
+    float* depth,
+    size_t depth_element_count
 )
 {
-    float* depth;
-    size_t depth_element_count;
-    soc_result result;
+    size_t required_element_count;
 
     if (rasterizer == NULL ||
         rasterizer->initialized != SOC_TRUE ||
         width == 0u ||
-        height == 0u) {
+        height == 0u ||
+        depth == NULL ||
+        !checked_size_multiply(
+            (size_t)width,
+            (size_t)height,
+            &required_element_count
+        ) ||
+        depth_element_count < required_element_count) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
     if (rasterizer->frame_active == SOC_TRUE) {
         return SOC_RESULT_INVALID_STATE;
     }
 
-    if (rasterizer->width == width && rasterizer->height == height) {
-        return SOC_RESULT_OK;
-    }
-
-    result = allocate_depth_buffer(
-        width,
-        height,
-        &depth,
-        &depth_element_count
-    );
-    if (result != SOC_RESULT_OK) {
-        return result;
-    }
-
-    free(rasterizer->depth);
     rasterizer->width = width;
     rasterizer->height = height;
-    rasterizer->hiz_level_count = calculate_hiz_level_count(width, height);
-    rasterizer->depth_element_count = depth_element_count;
+    rasterizer->depth_element_count = required_element_count;
     rasterizer->depth = depth;
     return SOC_RESULT_OK;
 }
@@ -830,7 +742,6 @@ soc_result soc_rasterizer_finish_occluders(soc_rasterizer* rasterizer)
         return SOC_RESULT_INVALID_STATE;
     }
 
-    /* Framework only: the Hi-Z hierarchy will be built here. */
     return SOC_RESULT_OK;
 }
 
@@ -868,65 +779,5 @@ soc_result soc_rasterizer_end_frame(soc_rasterizer* rasterizer)
     }
 
     rasterizer->frame_active = SOC_FALSE;
-    return SOC_RESULT_OK;
-}
-
-soc_result soc_rasterizer_query_hiz_level(
-    const soc_rasterizer* rasterizer,
-    uint32_t level,
-    soc_hiz_level_info* out_info,
-    float* out_depth,
-    uint64_t out_depth_count
-)
-{
-    uint32_t width;
-    uint32_t height;
-    uint64_t required_count;
-    uint64_t index;
-    float clear_depth;
-
-    if (rasterizer == NULL ||
-        rasterizer->initialized != SOC_TRUE ||
-        rasterizer->frame_active != SOC_TRUE ||
-        out_info == NULL ||
-        out_info->struct_size < SOC_HIZ_LEVEL_INFO_SIZE_V1) {
-        return SOC_RESULT_INVALID_ARGUMENT;
-    }
-    if (level >= rasterizer->hiz_level_count) {
-        return SOC_RESULT_INVALID_ARGUMENT;
-    }
-
-    calculate_hiz_level_dimensions(rasterizer, level, &width, &height);
-    required_count = (uint64_t)width * height;
-
-    out_info->level = level;
-    out_info->width = width;
-    out_info->height = height;
-    out_info->required_element_count = required_count;
-
-    if (out_depth == NULL) {
-        return out_depth_count == 0u
-            ? SOC_RESULT_OK
-            : SOC_RESULT_INVALID_ARGUMENT;
-    }
-    if (out_depth_count < required_count) {
-        return SOC_RESULT_BUFFER_TOO_SMALL;
-    }
-
-    if (level == 0u) {
-        memcpy(
-            out_depth,
-            rasterizer->depth,
-            rasterizer->depth_element_count * sizeof(float)
-        );
-    } else {
-        clear_depth = rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
-            ? 0.0f
-            : 1.0f;
-        for (index = 0u; index < required_count; ++index) {
-            out_depth[index] = clear_depth;
-        }
-    }
-
     return SOC_RESULT_OK;
 }

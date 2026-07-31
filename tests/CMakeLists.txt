@@ -38,6 +38,19 @@ soc_enable_warnings(soc_test_depth)
 
 add_test(NAME soc.depth COMMAND soc_test_depth)
 
+add_executable(soc_test_hiz test_hiz.c)
+target_link_libraries(soc_test_hiz PRIVATE soc_core)
+target_include_directories(
+    soc_test_hiz
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src"
+)
+target_compile_features(soc_test_hiz PRIVATE c_std_17)
+soc_enable_warnings(soc_test_hiz)
+
+add_test(NAME soc.hiz COMMAND soc_test_hiz)
+
 if(TARGET soc_cli)
     add_test(
         NAME soc.cli
