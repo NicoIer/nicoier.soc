@@ -17,3 +17,21 @@ ctest --test-dir build --output-on-failure
 ```
 
 需要静态库时，可设置 `SOC_BUILD_SHARED=OFF`
+
+## soc_cli 调试工具
+
+`soc_cli` 可将 OBJ 遮挡物的 Level 0 深度输出为灰度 PNG，方便检查相机、
+裁剪和深度光栅结果：
+
+```sh
+./build/tools/soc_cli --input model.obj --output depth.png \
+  --width 1280 --height 720 --fov 60
+```
+
+未指定相机时，工具会根据 OBJ 包围盒自动取景。完整参数和格式限制见
+[docs/CLI.md](docs/CLI.md)。
+
+
+## 参考
+
+https://www.intel.com/content/www/us/en/developer/articles/technical/masked-software-occlusion-culling.html

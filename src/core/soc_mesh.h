@@ -10,6 +10,8 @@ struct soc_mesh {
     uint32_t vertex_count;
     uint32_t index_count;
     soc_index_type index_type;
+    float* positions_xyz;
+    void* indices;
 };
 
 soc_result soc_mesh_create_internal(

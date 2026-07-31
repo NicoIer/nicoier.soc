@@ -96,6 +96,10 @@ soc_result soc_occluders_submit_internal(
 
     context->stats.input_triangle_count +=
         (uint64_t)(mesh->index_count / 3u) * instance_count;
+    context->stats.clipped_triangle_count =
+        context->rasterizer.clipped_triangle_count;
+    context->stats.rasterized_triangle_count =
+        context->rasterizer.rasterized_triangle_count;
     return SOC_RESULT_OK;
 }
 

@@ -151,7 +151,8 @@ static int run_pipeline(void)
     }
     if (stats.hiz_level_count != 10u ||
         stats.input_triangle_count != 1u ||
-        stats.rasterized_triangle_count != 0u ||
+        stats.clipped_triangle_count != 0u ||
+        stats.rasterized_triangle_count != 1u ||
         stats.tested_aabb_count != 1u ||
         stats.occluded_aabb_count != 0u) {
         return 1;

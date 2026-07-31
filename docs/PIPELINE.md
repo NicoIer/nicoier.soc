@@ -1,6 +1,6 @@
-# Rendering-flow framework
+# 渲染流程框架
 
-The public frame API is synchronous and stateful:
+公共帧 API 是同步且有状态的：
 
 ```text
 IDLE
@@ -9,54 +9,61 @@ IDLE
   v
 RECORDING_OCCLUDERS
   |
-  | soc_occluders_submit (zero or more)
+  | soc_occluders_submit（零次或多次）
   | soc_occluders_finish
   v
 QUERY_READY
   |
-  | soc_visibility_test_aabbs (zero or more)
-  | soc_hiz_level_query (zero or more)
+  | soc_visibility_test_aabbs（零次或多次）
+  | soc_hiz_level_query（零次或多次）
   | soc_frame_end
   v
 IDLE
 ```
 
-Context resize and mesh creation or destruction are allowed only in `IDLE`.
-Destroying the context is always allowed and releases its attached meshes.
+仅允许在 `IDLE` 状态下调整上下文大小，以及创建或销毁网格。
+上下文可随时销毁，销毁时会释放其关联的网格。
+创建网格时，会同步将位置和索引快照到上下文自有的存储空间，
+因此提交帧时绝不会读取调用方的原始缓冲区。
 
-## Current framework behavior
+## 当前框架行为
 
-- `soc_frame_begin` validates and stores the frame description.
-- `soc_occluders_submit` validates ownership and records input triangle counts.
-- `soc_occluders_finish` calls the future Hi-Z construction hook.
-- `soc_visibility_test_aabbs` writes `SOC_VISIBILITY_UNKNOWN` for every result.
-- `soc_hiz_level_query` reports logical Level dimensions and returns a clear
-  depth image until depth storage is implemented.
-- `soc_frame_end` returns the context to `IDLE`.
-- Statistics report submitted triangles, tested AABBs, and the logical Hi-Z
-  Level count; rasterized and occluded counts remain zero.
+- `soc_frame_begin` 验证帧描述并清空第 0 层级。
+- `soc_occluders_submit` 对每个实例执行变换，在齐次裁剪体中裁剪三角形，
+  并依据正面绕序设置执行背面剔除，或按网格启用双面处理，再以标量方式将深度
+  光栅化到第 0 层级。
+- `soc_occluders_finish` 结束记录；Hi-Z 派生层级的构建仍是后续步骤。
+- `soc_visibility_test_aabbs` 将每项结果写为 `SOC_VISIBILITY_UNKNOWN`。
+- `soc_hiz_level_query` 返回第 0 层级真实的光栅化深度。更高层级会报告
+  逻辑尺寸，并以清除深度占位值填充对应层级的数据。
+- `soc_frame_end` 将上下文恢复为 `IDLE` 状态。
 
-This fail-open behavior allows the ABI, Unity integration, ownership, and call
-ordering to be tested before the rasterization implementation exists.
+在深度层级结构和投影 AABB 测试实现之前，可见性仍采用默认放行策略。
 
-## Future implementation hooks
+统计信息会记录提交的源三角形、因齐次裁剪而发生变化或被拒绝的源三角形，
+以及通过面朝向与退化检查的裁剪后扇形剖分三角形。光栅化三角形的计数并不
+意味着该三角形曾在任一采样点的深度测试中胜出。
 
-The internal rasterizer already exposes hooks for:
+## 光栅化范围
 
-1. frame initialization and depth clearing;
-2. occluder transformation, clipping, binning, and depth writes;
-3. Hi-Z hierarchy construction;
-4. projected-AABB visibility testing;
-5. frame cleanup.
+当前用于保证正确性的标量路径提供以下功能：
 
-These hooks are internal and can change without changing the public ABI.
+1. 帧初始化和深度清除；
+2. 逐实例执行从对象空间到裁剪空间的变换；
+3. 齐次三角形裁剪；
+4. 根据正面绕序执行背面剔除，并支持按网格启用双面处理；
+5. 正向 Z 或反向 Z 深度光栅化；
+6. 帧清理。
 
-## Hi-Z Level query
+Hi-Z 派生层级的构建和投影 AABB 可见性测试仍是后续的内部阶段。经过优化的
+SIMD、分块和多线程路径必须保持标量路径的可观测行为。
 
-The query is valid only in `QUERY_READY`, after `soc_occluders_finish()` and
-before `soc_frame_end()`.
+## Hi-Z 层级查询
 
-First query metadata without a destination:
+查询仅在 `QUERY_READY` 状态下有效，且必须位于 `soc_occluders_finish()`
+之后、`soc_frame_end()` 之前。
+
+首先在不提供目标缓冲区的情况下查询元数据：
 
 ```c
 soc_hiz_level_info info = {
@@ -66,7 +73,7 @@ soc_hiz_level_info info = {
 soc_hiz_level_query(context, level, &info, NULL, 0u);
 ```
 
-Then allocate `info.required_element_count` floats and query again:
+然后分配可容纳 `info.required_element_count` 个 `float` 的空间，并再次查询：
 
 ```c
 soc_hiz_level_query(
@@ -78,7 +85,7 @@ soc_hiz_level_query(
 );
 ```
 
-Depth data is tightly packed and row-major. Level 0 uses the context
-resolution; each following Level halves both dimensions with upward rounding,
-until `1 x 1`. Forward-Z clear depth is `1.0`, and reversed-Z clear depth is
-`0.0`.
+深度数据采用紧密排列，并以行主序存储。第 0 层级使用上下文分辨率，
+其中包含以标量方式光栅化的深度图像。此后的每个层级都会将两个维度减半并
+向上取整，直至 `1 x 1`；在 Hi-Z 构建实现之前，这些更高层级仅包含清除深度。
+正向 Z 的清除深度为 `1.0`，反向 Z 的清除深度为 `0.0`。

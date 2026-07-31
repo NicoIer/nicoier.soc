@@ -1,7 +1,6 @@
-# Architecture
+# 架构
 
-The library keeps the public ABI thin and independent from rasterization,
-occlusion, and platform implementation details.
+本库保持公共 ABI 精简，并使其独立于光栅化、遮挡和平台实现细节。
 
 ```text
 Unity / C#
@@ -22,20 +21,18 @@ src/core
                    +--------> src/platform
 ```
 
-## Dependency rules
+## 依赖规则
 
-- `abi` validates external data and forwards work to `core`.
-- `core` owns the opaque context and coordinates library subsystems.
-- `occlusion` owns visibility policy and may consume rasterized depth data.
-- `raster` owns clipping, triangle setup, depth testing, and raster storage.
-- `math` and `platform` are internal leaf modules.
-- Internal modules never depend on C# or Unity APIs.
-- Public callers never include headers from `src/`.
+- `abi` 验证外部数据，并将工作转发给 `core`。
+- `core` 拥有不透明上下文、不可变的原生网格快照，并负责库的整体协调。
+- `occlusion` 负责可见性策略，并且可以使用光栅化后的深度数据。
+- `raster` 使用原生网格快照，并负责裁剪、三角形设置、深度测试和光栅存储。
+- `math` 和 `platform` 是内部叶子模块。
+- 内部模块绝不依赖 C# 或 Unity API。
+- 公共 API 的使用方绝不包含来自 `src/` 的头文件。
 
-The initial scalar implementation is the correctness reference. SIMD,
-multithreaded, tiled, and hierarchical paths are added as internal
-optimizations and must not require ABI changes.
+第 0 层级的标量深度光栅化器是正确性参考实现。SIMD、多线程、分块和分层路径
+均为内部优化，不得要求变更 ABI。
 
-Before public geometry submission APIs are added, the project must document
-matrix layout, handedness, winding order, clip-space depth range, and
-reversed-Z behavior.
+公共的矩阵布局、坐标系手性、绕序、裁剪空间深度范围和深度方向约定记录于
+`docs/TYPES.md`。

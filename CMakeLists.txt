@@ -2,25 +2,30 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
     soc
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "CPU software rasterization and occlusion culling library"
     LANGUAGES C
 )
 
 option(SOC_BUILD_SHARED "Build soc as a shared library" ON)
 option(SOC_BUILD_TESTS "Build soc tests" ${PROJECT_IS_TOP_LEVEL})
+option(SOC_BUILD_TOOLS "Build soc debugging tools" ${PROJECT_IS_TOP_LEVEL})
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(SocWarnings)
+include(GNUInstallDirs)
 
 add_subdirectory(src)
+
+if(SOC_BUILD_TOOLS)
+    add_subdirectory(tools)
+endif()
 
 if(SOC_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
 
-include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 set(SOC_CMAKE_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/soc")
@@ -44,6 +49,13 @@ install(
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
+
+if(SOC_BUILD_TOOLS)
+    install(
+        TARGETS soc_cli
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+    )
+endif()
 
 install(
     DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/"

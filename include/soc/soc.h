@@ -39,6 +39,15 @@ SOC_API soc_result SOC_CALL soc_context_resize(
     uint32_t height
 );
 
+/*
+ * Synchronously validates and copies the described positions and indices into
+ * an immutable native-owned mesh. No caller pointer is retained on success, so
+ * the source buffers may be released when the call returns. On failure,
+ * *out_mesh is null and no partial mesh is attached to the context.
+ *
+ * soc_mesh_desc V1 has no buffer-size fields. The caller must keep sufficiently
+ * large input buffers valid and unmodified for the duration of this call.
+ */
 SOC_API soc_result SOC_CALL soc_mesh_create(
     soc_context* context,
     const soc_mesh_desc* desc,
@@ -47,11 +56,16 @@ SOC_API soc_result SOC_CALL soc_mesh_create(
 
 SOC_API soc_result SOC_CALL soc_mesh_destroy(soc_mesh* mesh);
 
+/* Begins a frame and clears its Level 0 depth image. */
 SOC_API soc_result SOC_CALL soc_frame_begin(
     soc_context* context,
     const soc_frame_desc* desc
 );
 
+/*
+ * Synchronously transforms, homogeneously clips, face culls, and
+ * scalar-rasterizes each mesh instance into the Level 0 depth image.
+ */
 SOC_API soc_result SOC_CALL soc_occluders_submit(
     soc_context* context,
     const soc_mesh* mesh,
@@ -59,8 +73,10 @@ SOC_API soc_result SOC_CALL soc_occluders_submit(
     uint32_t instance_count
 );
 
+/* Ends occluder recording. Derived Hi-Z Levels are not currently built. */
 SOC_API soc_result SOC_CALL soc_occluders_finish(soc_context* context);
 
+/* Currently writes SOC_VISIBILITY_UNKNOWN for every requested AABB. */
 SOC_API soc_result SOC_CALL soc_visibility_test_aabbs(
     soc_context* context,
     const soc_aabb* world_bounds,
@@ -75,6 +91,10 @@ SOC_API soc_result SOC_CALL soc_context_get_stats(
     soc_stats* out_stats
 );
 
+/*
+ * Copies a depth Level into caller storage. Level 0 contains rasterized depth;
+ * higher Levels currently contain clear-depth placeholders.
+ */
 SOC_API soc_result SOC_CALL soc_hiz_level_query(
     const soc_context* context,
     uint32_t level,

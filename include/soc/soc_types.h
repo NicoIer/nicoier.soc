@@ -74,16 +74,22 @@ typedef uint32_t soc_index_type;
 
 typedef uint32_t soc_clip_depth_range;
 
+/* Homogeneous clip-space Z is [0, w] or [-w, w], respectively. */
 #define SOC_CLIP_DEPTH_ZERO_TO_ONE ((soc_clip_depth_range)0u)
 #define SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE ((soc_clip_depth_range)1u)
 
 typedef uint32_t soc_depth_direction;
 
+/*
+ * Forward-Z clears to 1 and keeps smaller depth; reversed-Z clears to 0 and
+ * keeps larger depth.
+ */
 #define SOC_DEPTH_FORWARD ((soc_depth_direction)0u)
 #define SOC_DEPTH_REVERSED ((soc_depth_direction)1u)
 
 typedef uint32_t soc_front_face;
 
+/* Winding is evaluated in NDC XY with positive Y up, before viewport Y flip. */
 #define SOC_FRONT_FACE_CCW ((soc_front_face)0u)
 #define SOC_FRONT_FACE_CW ((soc_front_face)1u)
 
@@ -115,8 +121,16 @@ typedef struct soc_frame_desc {
     ((uint32_t)(offsetof(soc_frame_desc, flags) + sizeof(uint32_t)))
 
 #define SOC_MESH_FLAG_NONE 0u
+/* Disable face culling for this mesh. */
 #define SOC_MESH_FLAG_TWO_SIDED (1u << 0u)
 
+/*
+ * Version 1 describes borrowed, read-only mesh input. Vertices are
+ * vertex_stride-byte records with three consecutive float position components
+ * at position_offset. Indices are tightly packed elements selected by
+ * index_type. V1 has no buffer-size fields; callers must provide complete
+ * readable ranges for the duration of soc_mesh_create().
+ */
 typedef struct soc_mesh_desc {
     uint32_t struct_size;
     uint32_t flags;
@@ -138,8 +152,11 @@ typedef struct soc_stats {
     uint32_t struct_size;
     uint32_t hiz_level_count;
 
+    /* Submitted source triangles, including all instances. */
     uint64_t input_triangle_count;
+    /* Source triangles changed or rejected by homogeneous clipping. */
     uint64_t clipped_triangle_count;
+    /* Post-clip triangles that survive face and degeneracy checks. */
     uint64_t rasterized_triangle_count;
     uint64_t tested_aabb_count;
     uint64_t occluded_aabb_count;

@@ -7,6 +7,10 @@ typedef struct soc_rasterizer {
     uint32_t width;
     uint32_t height;
     uint32_t hiz_level_count;
+    size_t depth_element_count;
+    float* depth;
+    uint64_t clipped_triangle_count;
+    uint64_t rasterized_triangle_count;
     soc_bool initialized;
     soc_bool frame_active;
     soc_frame_desc frame;

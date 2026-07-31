@@ -1,75 +1,79 @@
-# ABI policy
+# ABI 策略
 
-The public ABI is declared in `include/soc/soc.h`, with shared data layouts in
-`include/soc/soc_types.h`. Public symbols and ABI-visible data layouts are
-compatibility commitments once the project reaches its first stable release.
+公共 ABI 声明于 `include/soc/soc.h`，共享数据布局则位于
+`include/soc/soc_types.h`。项目发布首个稳定版本后，公共符号和 ABI
+可见的数据布局即构成兼容性承诺。
 
-## Versioning
+## 版本管理
 
-`soc_get_abi_version()` returns `SOC_ABI_VERSION`. The high 16 bits contain the
-major version and the low 16 bits contain the minor version.
+`soc_get_abi_version()` 返回 `SOC_ABI_VERSION`。高 16 位表示主版本号，
+低 16 位表示次版本号。
 
-- A major-version change may remove or reinterpret ABI elements.
-- A minor-version change may add functions, result codes, flags, or optional
-  struct fields while preserving existing behavior.
-- The native library package version is separate from the ABI version.
+- 主版本变更可以移除或重新解释 ABI 元素。
+- 次版本变更可以添加函数、结果码、标志或可选的结构体字段，但必须保持现有行为。
+- 原生库的软件包版本与 ABI 版本相互独立。
 
-## Context lifetime
+## 上下文生命周期
 
-`soc_context_create()` creates an opaque context. A successful call transfers
-ownership of that context to the caller. `soc_context_destroy()` releases it
-and accepts a null pointer.
+`soc_context_create()` 创建一个不透明上下文。调用成功后，该上下文的所有权
+转移给调用方。`soc_context_destroy()` 释放该上下文，并且接受空指针。
 
-Callers initialize `soc_config.struct_size` to `sizeof(soc_config)`. Version 1
-requires at least `SOC_CONFIG_SIZE_V1` bytes. A native library may accept a
-larger structure from a newer caller but must reject a structure too small for
-the fields it reads.
+调用方将 `soc_config.struct_size` 初始化为 `sizeof(soc_config)`。版本 1
+要求至少提供 `SOC_CONFIG_SIZE_V1` 字节。原生库可以接受来自较新调用方的
+更大结构体，但如果结构体小到不足以包含原生库需要读取的字段，则必须拒绝。
 
-## Mesh lifetime
+## 网格生命周期
 
-`soc_mesh_create()` creates an opaque mesh owned by its context.
-`soc_mesh_destroy()` releases it. Destroying a context also releases any meshes
-that remain attached to it. Mesh creation and destruction are allowed only
-while the context is idle.
+`soc_mesh_create()` 创建一个由其上下文拥有的不透明网格。
+`soc_mesh_destroy()` 释放该网格。销毁上下文时，也会释放仍附属于它的所有
+网格。只有上下文处于空闲状态时，才允许创建和销毁网格。
 
-The current framework validates mesh metadata but does not yet copy or consume
-vertex and index payloads. Required data will be copied into native-owned
-storage when rasterization is implemented; callers retain ownership of their
-input buffers.
+`soc_mesh_create()` 会同步验证所描述的 XYZ 坐标和索引流，并将其复制到
+原生代码拥有的存储空间中。在调用期间，描述符和输入缓冲区是借用的只读输入。
+成功返回后，库不会保留任何指向调用方内存的指针，因此调用方可以立即重用、
+修改、释放这些缓冲区或解除其固定，而不会改变网格快照。
 
-## Frame lifetime
+创建操作具有原子性。失败时，`*out_mesh` 保持为空，此前已分配的所有原生
+内存都会被释放，且上下文保持不变。版本 1 的 `soc_mesh_desc` 不含缓冲区
+大小字段，因此调用方必须提供足够大的可读缓冲区，并且不得在
+`soc_mesh_create()` 执行期间并发修改这些缓冲区。
 
-Calls follow this order:
+## 帧生命周期
+
+调用遵循以下顺序：
 
 ```text
 soc_frame_begin
-soc_occluders_submit (zero or more calls)
+soc_occluders_submit（零次或多次调用）
 soc_occluders_finish
-soc_visibility_test_aabbs (zero or more calls)
+soc_visibility_test_aabbs（零次或多次调用）
 soc_frame_end
 ```
 
-Out-of-order calls return `SOC_RESULT_INVALID_STATE`. The framework currently
-performs no rasterization, builds no Hi-Z levels, and returns
-`SOC_VISIBILITY_UNKNOWN` for every tested AABB.
+乱序调用会返回 `SOC_RESULT_INVALID_STATE`。提交遮挡物时，会同步对三角形执行
+变换、齐次裁剪、面剔除和标量光栅化，并将结果写入第 0 层级的深度图像。此时尚未
+构建派生 Hi-Z 层级，每个被测试的 AABB 结果仍为
+`SOC_VISIBILITY_UNKNOWN`。
 
-## Hi-Z image query
+## Hi-Z 图像查询
 
-`soc_hiz_level_query()` copies a selected Level into caller-owned `float`
-storage. It never exposes an internal depth pointer. A metadata-only call uses
-`out_depth = NULL` and `out_depth_count = 0`; the returned
-`soc_hiz_level_info.required_element_count` gives the required element count.
+`soc_hiz_level_query()` 将选定层级的深度数据复制到调用方拥有的 `float` 存储空间。
+它绝不会暴露内部深度指针。只查询元数据的调用应使用 `out_depth = NULL` 和
+`out_depth_count = 0`；返回的
+`soc_hiz_level_info.required_element_count` 给出所需的元素数量。
 
-The query is valid only after `soc_occluders_finish()` and before
-`soc_frame_end()`. An undersized destination returns
-`SOC_RESULT_BUFFER_TOO_SMALL` while still returning Level metadata.
+第 0 层级包含经标量光栅化得到的深度图像。更高层级目前会返回其逻辑尺寸，
+并以清除深度占位值填充对应层级的数据。
 
-## Compatibility constraints
+仅在 `soc_occluders_finish()` 之后、`soc_frame_end()` 之前查询才有效。
+目标缓冲区过小时会返回 `SOC_RESULT_BUFFER_TOO_SMALL`，但仍会返回层级
+元数据。
 
-- Exported functions use the C calling convention represented by `SOC_CALL`.
-- C# declarations use the native library base name `soc`.
-- No exception, allocator-specific object, or internal pointer crosses the ABI.
-- Input memory remains caller-owned for the duration of a call unless a
-  function explicitly documents a different lifetime.
-- New flags default to disabled, and all reserved data is initialized to zero.
-- Batch APIs are preferred over per-object calls for managed/native interop.
+## 兼容性约束
+
+- 导出函数使用由 `SOC_CALL` 表示的 C 调用约定。
+- C# 声明使用原生库基本名称 `soc`。
+- 任何异常、分配器专用对象或内部指针都不会跨越 ABI。
+- 除非函数明确记录了不同的生命周期，否则输入内存在调用期间始终由调用方拥有。
+- 新标志默认禁用，所有保留数据均初始化为零。
+- 对于托管代码与原生代码互操作，优先使用批处理 API，而非逐对象调用。
