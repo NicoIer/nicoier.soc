@@ -1,0 +1,220 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "release-library",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/platform/${presetName}",
+      "installDir": "${sourceDir}/build/install/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SOC_BUILD_SHARED": true,
+        "SOC_BUILD_TESTS": false,
+        "SOC_BUILD_TOOLS": false,
+        "SOC_BUILD_BENCHMARKS": false
+      }
+    },
+    {
+      "name": "android-library",
+      "hidden": true,
+      "inherits": "release-library",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/android.cmake",
+      "cacheVariables": {
+        "ANDROID_PLATFORM": "android-21",
+        "ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES": true
+      }
+    },
+    {
+      "name": "android-armeabi-v7a",
+      "displayName": "Android armeabi-v7a",
+      "inherits": "android-library",
+      "cacheVariables": {
+        "ANDROID_ABI": "armeabi-v7a"
+      }
+    },
+    {
+      "name": "android-arm64-v8a",
+      "displayName": "Android arm64-v8a",
+      "inherits": "android-library",
+      "cacheVariables": {
+        "ANDROID_ABI": "arm64-v8a"
+      }
+    },
+    {
+      "name": "android-x86",
+      "displayName": "Android x86",
+      "inherits": "android-library",
+      "cacheVariables": {
+        "ANDROID_ABI": "x86"
+      }
+    },
+    {
+      "name": "android-x86_64",
+      "displayName": "Android x86_64",
+      "inherits": "android-library",
+      "cacheVariables": {
+        "ANDROID_ABI": "x86_64"
+      }
+    },
+    {
+      "name": "linux-x86_64",
+      "displayName": "Linux x86_64 (Zig)",
+      "inherits": "release-library",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/zig-linux-x86_64.cmake",
+      "environment": {
+        "ZIG_GLOBAL_CACHE_DIR": "${sourceDir}/build/.zig-cache"
+      }
+    },
+    {
+      "name": "linux-aarch64",
+      "displayName": "Linux AArch64 (Zig)",
+      "inherits": "release-library",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/zig-linux-aarch64.cmake",
+      "environment": {
+        "ZIG_GLOBAL_CACHE_DIR": "${sourceDir}/build/.zig-cache"
+      }
+    },
+    {
+      "name": "macos-universal",
+      "displayName": "macOS Universal 2",
+      "inherits": "release-library",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0"
+      }
+    },
+    {
+      "name": "ios-device-arm64",
+      "displayName": "iOS device arm64",
+      "inherits": "release-library",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "iOS",
+        "CMAKE_OSX_SYSROOT": "iphoneos",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0",
+        "SOC_BUILD_SHARED": false
+      }
+    },
+    {
+      "name": "ios-simulator-universal",
+      "displayName": "iOS Simulator Universal",
+      "inherits": "release-library",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "iOS",
+        "CMAKE_OSX_SYSROOT": "iphonesimulator",
+        "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0",
+        "SOC_BUILD_SHARED": false
+      }
+    },
+    {
+      "name": "windows-mingw-x86_64",
+      "displayName": "Windows x86_64 (MinGW-w64)",
+      "inherits": "release-library",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/mingw-w64-x86_64.cmake"
+    },
+    {
+      "name": "windows-msvc-x64",
+      "displayName": "Windows x64 (Visual Studio 2022)",
+      "inherits": "release-library",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": null
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "android-armeabi-v7a",
+      "configurePreset": "android-armeabi-v7a"
+    },
+    {
+      "name": "android-arm64-v8a",
+      "configurePreset": "android-arm64-v8a"
+    },
+    {
+      "name": "android-x86",
+      "configurePreset": "android-x86"
+    },
+    {
+      "name": "android-x86_64",
+      "configurePreset": "android-x86_64"
+    },
+    {
+      "name": "linux-x86_64",
+      "configurePreset": "linux-x86_64"
+    },
+    {
+      "name": "linux-aarch64",
+      "configurePreset": "linux-aarch64"
+    },
+    {
+      "name": "macos-universal",
+      "configurePreset": "macos-universal",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "ios-device-arm64",
+      "configurePreset": "ios-device-arm64",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "ios-simulator-universal",
+      "configurePreset": "ios-simulator-universal",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "windows-mingw-x86_64",
+      "configurePreset": "windows-mingw-x86_64"
+    },
+    {
+      "name": "windows-msvc-x64",
+      "configurePreset": "windows-msvc-x64",
+      "configuration": "Release",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    }
+  ]
+}

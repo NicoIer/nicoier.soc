@@ -49,7 +49,7 @@ target_include_directories(
     soc
     PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
-        "$<INSTALL_INTERFACE:include>"
+        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
 )
@@ -63,6 +63,12 @@ set_target_properties(
         C_VISIBILITY_PRESET hidden
         OUTPUT_NAME soc
 )
+
+if(WIN32 AND SOC_BUILD_SHARED)
+    # MinGW otherwise prefixes the runtime DLL with "lib", unlike MSVC.
+    # Keeping the runtime name soc.dll matches DllImport("soc").
+    set_target_properties(soc PROPERTIES PREFIX "")
+endif()
 
 if(SOC_BUILD_SHARED)
     set_target_properties(

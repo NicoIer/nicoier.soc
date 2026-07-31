@@ -7,15 +7,50 @@ project(
     LANGUAGES C
 )
 
-option(SOC_BUILD_SHARED "Build soc as a shared library" ON)
-option(SOC_BUILD_TESTS "Build soc tests" ${PROJECT_IS_TOP_LEVEL})
-option(SOC_BUILD_TOOLS "Build soc debugging tools" ${PROJECT_IS_TOP_LEVEL})
+set(SOC_BUILD_SHARED_DEFAULT ON)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(SOC_BUILD_SHARED_DEFAULT OFF)
+endif()
+
+set(SOC_BUILD_HOST_TARGETS_DEFAULT "${PROJECT_IS_TOP_LEVEL}")
+if(CMAKE_CROSSCOMPILING)
+    set(SOC_BUILD_HOST_TARGETS_DEFAULT OFF)
+endif()
+
+option(
+    SOC_BUILD_SHARED
+    "Build soc as a shared library"
+    "${SOC_BUILD_SHARED_DEFAULT}"
+)
+option(
+    SOC_BUILD_TESTS
+    "Build soc tests"
+    "${SOC_BUILD_HOST_TARGETS_DEFAULT}"
+)
+option(
+    SOC_BUILD_TOOLS
+    "Build soc debugging tools"
+    "${SOC_BUILD_HOST_TARGETS_DEFAULT}"
+)
+option(SOC_BUILD_BENCHMARKS "Build soc performance benchmarks" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(SocWarnings)
 include(GNUInstallDirs)
 
+# Keep DLLs and the executables which load them in the same directory. This
+# also makes the native MSVC test configuration work without editing PATH.
+if(WIN32
+        AND PROJECT_IS_TOP_LEVEL
+        AND NOT CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()
+
 add_subdirectory(src)
+
+if(SOC_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
+endif()
 
 if(SOC_BUILD_TOOLS)
     add_subdirectory(tools)

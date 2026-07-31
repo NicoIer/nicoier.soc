@@ -18,6 +18,16 @@ ctest --test-dir build --output-on-failure
 
 需要静态库时，可设置 `SOC_BUILD_SHARED=OFF`
 
+Linux、Android、macOS、iOS 和 Windows 的交叉编译 preset、工具链要求及
+产物说明见 [跨平台构建](docs/BUILDING.md)。
+
+## 性能基准
+
+benchmark 默认不构建。使用
+`-DSOC_BUILD_BENCHMARKS=ON -DCMAKE_BUILD_TYPE=Release` 启用独立的
+`soc_bench` 目标；工作负载、采样方法和结果比较方式见
+[benchmarks/README.md](benchmarks/README.md)。
+
 ## soc_cli 调试工具
 
 `soc_cli` 可将 OBJ 遮挡物的 Level 0 深度输出为灰度 PNG，方便检查相机、
