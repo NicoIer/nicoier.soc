@@ -53,8 +53,18 @@ soc_frame_end
 乱序调用会返回 `SOC_RESULT_INVALID_STATE`。提交遮挡物时，会同步对三角形执行
 变换、齐次裁剪、面剔除和标量光栅化，并将结果写入第 0 层级的深度图像。
 `soc_occluders_finish()` 会同步构建全部派生 Hi-Z 层级；仅在构建成功完成后，
-上下文才进入可查询状态。投影 AABB 测试尚未实现，因此每个被测试的 AABB 结果
-仍为 `SOC_VISIBILITY_UNKNOWN`。
+上下文才进入可查询状态。
+
+`soc_visibility_test_aabbs()` 会同步将有效且可投影的世界空间 AABB 映射到屏幕，
+保守选择覆盖其投影矩形的 Hi-Z 层级，并写入每项结果。只有能够严格证明整个投影
+都位于遮挡深度之后时才返回 `SOC_VISIBILITY_OCCLUDED`；未获此证明的有效投影返回
+`SOC_VISIBILITY_VISIBLE`。次序非法、包含非有限值、变换结果非有限、横跨近平
+裁剪平面或因其他原因无法安全投影的 AABB 返回 `SOC_VISIBILITY_UNKNOWN`，从而
+保持 fail-open。该行为同时支持两种 `soc_clip_depth_range` 和正向/反向 Z。
+
+成功的非空查询按 `bounds_count` 增加当前帧的
+`soc_stats.tested_aabb_count`，并按其中的 `SOC_VISIBILITY_OCCLUDED` 结果数增加
+`soc_stats.occluded_aabb_count`。这些统计在 `soc_frame_begin()` 时清零。
 
 ## Hi-Z 图像查询
 

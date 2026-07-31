@@ -45,7 +45,27 @@ C# 绑定必须按照此约定复制 Unity 矩阵，而不能依赖托管结构�
 
 `SOC_VISIBILITY_UNKNOWN` 的值为零，因此以零初始化的结果缓冲区会默认放行。只有当对象的
 结果恰好为 `SOC_VISIBILITY_OCCLUDED` 时，调用方才剔除该对象；`UNKNOWN` 和 `VISIBLE`
-都会被渲染。当前的 AABB 查询始终返回 `UNKNOWN`。
+都会被渲染。
+
+`soc_aabb.min` 和 `soc_aabb.max` 表示世界空间包围盒。对于分量有限且每个
+`min` 分量都不大于对应 `max` 分量的 AABB，查询会使用当前帧的
+`clip_from_world` 变换其八个角点，将可安全投影的包围盒保守地映射到屏幕矩形，
+并选择能够覆盖该矩形的 Hi-Z 层级。只有所选覆盖范围内的深度能够严格证明整个
+投影包围盒都位于遮挡深度之后时，结果才是 `SOC_VISIBILITY_OCCLUDED`：
+
+- 正向 Z 要求包围盒最靠近相机的深度严格大于覆盖范围的遮挡深度；
+- 反向 Z 要求包围盒最靠近相机的深度严格小于覆盖范围的遮挡深度。
+
+严格比较使深度相等时保持可见。`SOC_CLIP_DEPTH_ZERO_TO_ONE` 和
+`SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE` 均受支持；后一种范围在比较前映射到内部的
+`[0, 1]` 深度范围。
+
+次序非法的 AABB、任何非有限输入或变换结果、横跨近平裁剪平面，或其他无法安全
+投影的情况都会返回 `SOC_VISIBILITY_UNKNOWN`，不会据此剔除。其余能够安全投影但
+无法满足严格遮挡证明的 AABB 返回 `SOC_VISIBILITY_VISIBLE`。
+
+每帧的 `soc_stats.tested_aabb_count` 累计成功查询所包含的 AABB 数量，
+`occluded_aabb_count` 则累计其中返回 `SOC_VISIBILITY_OCCLUDED` 的数量。
 
 ## 描述符约定
 

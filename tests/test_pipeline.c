@@ -143,7 +143,7 @@ static int run_pipeline(void)
         SOC_RESULT_OK) {
         return 1;
     }
-    if (visibility != SOC_VISIBILITY_UNKNOWN) {
+    if (visibility != SOC_VISIBILITY_VISIBLE) {
         return 1;
     }
     if (soc_context_get_stats(context, &stats) != SOC_RESULT_OK) {

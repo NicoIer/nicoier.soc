@@ -50,13 +50,6 @@ soc_result soc_rasterizer_submit_occluders(
 
 soc_result soc_rasterizer_finish_occluders(soc_rasterizer* rasterizer);
 
-soc_result soc_rasterizer_test_aabbs(
-    soc_rasterizer* rasterizer,
-    const soc_aabb* world_bounds,
-    uint32_t bounds_count,
-    soc_visibility* out_visibility
-);
-
 soc_result soc_rasterizer_end_frame(soc_rasterizer* rasterizer);
 
 #endif

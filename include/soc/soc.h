@@ -79,7 +79,16 @@ SOC_API soc_result SOC_CALL soc_occluders_submit(
  */
 SOC_API soc_result SOC_CALL soc_occluders_finish(soc_context* context);
 
-/* Currently writes SOC_VISIBILITY_UNKNOWN for every requested AABB. */
+/*
+ * Conservatively projects world-space AABBs and tests them against Hi-Z.
+ * SOC_VISIBILITY_OCCLUDED is written only when the selected Hi-Z coverage
+ * strictly proves the complete projected bounds to be behind occluder depth.
+ * Invalid, non-finite, near-plane-crossing, or otherwise unprojectable bounds
+ * produce SOC_VISIBILITY_UNKNOWN (fail-open); other bounds produce
+ * SOC_VISIBILITY_VISIBLE. The frame's clip depth range and depth direction are
+ * honored. Successful tests contribute to tested_aabb_count, and proven
+ * occlusions also contribute to occluded_aabb_count.
+ */
 SOC_API soc_result SOC_CALL soc_visibility_test_aabbs(
     soc_context* context,
     const soc_aabb* world_bounds,

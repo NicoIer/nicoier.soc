@@ -38,6 +38,13 @@ soc_enable_warnings(soc_test_depth)
 
 add_test(NAME soc.depth COMMAND soc_test_depth)
 
+add_executable(soc_test_visibility test_visibility.c)
+target_link_libraries(soc_test_visibility PRIVATE soc::soc)
+target_compile_features(soc_test_visibility PRIVATE c_std_17)
+soc_enable_warnings(soc_test_visibility)
+
+add_test(NAME soc.visibility COMMAND soc_test_visibility)
+
 add_executable(soc_test_hiz test_hiz.c)
 target_link_libraries(soc_test_hiz PRIVATE soc_core)
 target_include_directories(

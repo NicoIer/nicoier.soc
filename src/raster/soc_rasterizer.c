@@ -745,33 +745,6 @@ soc_result soc_rasterizer_finish_occluders(soc_rasterizer* rasterizer)
     return SOC_RESULT_OK;
 }
 
-soc_result soc_rasterizer_test_aabbs(
-    soc_rasterizer* rasterizer,
-    const soc_aabb* world_bounds,
-    uint32_t bounds_count,
-    soc_visibility* out_visibility
-)
-{
-    uint32_t index;
-
-    if (rasterizer == NULL ||
-        rasterizer->frame_active != SOC_TRUE ||
-        world_bounds == NULL ||
-        out_visibility == NULL ||
-        bounds_count == 0u) {
-        return SOC_RESULT_INVALID_ARGUMENT;
-    }
-
-    /*
-     * Framework only: UNKNOWN is fail-open and prevents false occlusion until
-     * projection and Hi-Z testing are implemented.
-     */
-    for (index = 0u; index < bounds_count; ++index) {
-        out_visibility[index] = SOC_VISIBILITY_UNKNOWN;
-    }
-    return SOC_RESULT_OK;
-}
-
 soc_result soc_rasterizer_end_frame(soc_rasterizer* rasterizer)
 {
     if (rasterizer == NULL || rasterizer->frame_active != SOC_TRUE) {

@@ -2,6 +2,7 @@
 
 #include "core/soc_context.h"
 #include "core/soc_mesh.h"
+#include "occlusion/soc_visibility.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -140,6 +141,7 @@ soc_result soc_visibility_test_aabbs_internal(
     soc_visibility* out_visibility
 )
 {
+    uint64_t occluded_count;
     soc_result result;
 
     if (context == NULL) {
@@ -155,17 +157,20 @@ soc_result soc_visibility_test_aabbs_internal(
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 
-    result = soc_rasterizer_test_aabbs(
-        &context->rasterizer,
+    result = soc_occlusion_test_aabbs(
+        &context->depth_pyramid,
+        &context->rasterizer.frame,
         world_bounds,
         bounds_count,
-        out_visibility
+        out_visibility,
+        &occluded_count
     );
     if (result != SOC_RESULT_OK) {
         return result;
     }
 
     context->stats.tested_aabb_count += bounds_count;
+    context->stats.occluded_aabb_count += occluded_count;
     return SOC_RESULT_OK;
 }
 
