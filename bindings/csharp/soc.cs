@@ -1,12 +1,28 @@
+using System;
 using System.Runtime.InteropServices;
 
 namespace soc
 {
+    [AttributeUsage(AttributeTargets.All, AllowMultiple = true, Inherited = false)]
+    internal sealed class NativeTypeNameAttribute : Attribute
+    {
+        public NativeTypeNameAttribute(string name)
+        {
+            Name = name;
+        }
+
+        public string Name { get; }
+    }
+
     internal partial struct soc_context
     {
     }
 
     internal partial struct soc_mesh
+    {
+    }
+
+    internal partial struct soc_snapshot
     {
     }
 
@@ -93,6 +109,42 @@ namespace soc
         public uint flags;
     }
 
+    internal unsafe partial struct soc_occluder_group
+    {
+        [NativeTypeName("const soc_mesh *")]
+        public soc_mesh* mesh;
+
+        [NativeTypeName("const soc_mat4 *")]
+        public soc_mat4* object_to_world;
+
+        [NativeTypeName("uint32_t")]
+        public uint instance_count;
+
+        [NativeTypeName("uint32_t")]
+        public uint flags;
+    }
+
+    internal unsafe partial struct soc_occlusion_build_desc
+    {
+        [NativeTypeName("uint32_t")]
+        public uint struct_size;
+
+        [NativeTypeName("uint32_t")]
+        public uint flags;
+
+        [NativeTypeName("const soc_frame_desc *")]
+        public soc_frame_desc* frame;
+
+        [NativeTypeName("const soc_occluder_group *")]
+        public soc_occluder_group* groups;
+
+        [NativeTypeName("uint32_t")]
+        public uint group_count;
+
+        [NativeTypeName("uint32_t")]
+        public uint group_stride;
+    }
+
     internal unsafe partial struct soc_mesh_desc
     {
         [NativeTypeName("uint32_t")]
@@ -123,7 +175,7 @@ namespace soc
         public uint index_type;
     }
 
-    internal partial struct soc_stats
+    internal partial struct soc_build_stats
     {
         [NativeTypeName("uint32_t")]
         public uint struct_size;
@@ -139,12 +191,27 @@ namespace soc
 
         [NativeTypeName("uint64_t")]
         public ulong rasterized_triangle_count;
+    }
+
+    internal partial struct soc_query_stats
+    {
+        [NativeTypeName("uint32_t")]
+        public uint struct_size;
+
+        [NativeTypeName("uint32_t")]
+        public uint reserved;
 
         [NativeTypeName("uint64_t")]
         public ulong tested_aabb_count;
 
         [NativeTypeName("uint64_t")]
+        public ulong visible_aabb_count;
+
+        [NativeTypeName("uint64_t")]
         public ulong occluded_aabb_count;
+
+        [NativeTypeName("uint64_t")]
+        public ulong unknown_aabb_count;
     }
 
     internal partial struct soc_hiz_level_info
@@ -192,40 +259,31 @@ namespace soc
 
         [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         [return: NativeTypeName("soc_result")]
-        public static extern int soc_frame_begin(soc_context* context, [NativeTypeName("const soc_frame_desc *")] soc_frame_desc* desc);
+        public static extern int soc_occlusion_build(soc_context* context, [NativeTypeName("const soc_occlusion_build_desc *")] soc_occlusion_build_desc* desc, soc_snapshot** out_snapshot);
+
+        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        public static extern void soc_snapshot_destroy(soc_snapshot* snapshot);
 
         [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         [return: NativeTypeName("soc_result")]
-        public static extern int soc_occluders_submit(soc_context* context, [NativeTypeName("const soc_mesh *")] soc_mesh* mesh, [NativeTypeName("const soc_mat4 *")] soc_mat4* object_to_world, [NativeTypeName("uint32_t")] uint instance_count);
+        public static extern int soc_snapshot_test_aabbs([NativeTypeName("const soc_snapshot *")] soc_snapshot* snapshot, [NativeTypeName("const soc_aabb *")] soc_aabb* world_bounds, [NativeTypeName("uint32_t")] uint bounds_count, [NativeTypeName("soc_visibility *")] byte* out_visibility, soc_query_stats* out_stats);
 
         [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         [return: NativeTypeName("soc_result")]
-        public static extern int soc_occluders_finish(soc_context* context);
+        public static extern int soc_snapshot_get_build_stats([NativeTypeName("const soc_snapshot *")] soc_snapshot* snapshot, soc_build_stats* out_stats);
 
         [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         [return: NativeTypeName("soc_result")]
-        public static extern int soc_visibility_test_aabbs(soc_context* context, [NativeTypeName("const soc_aabb *")] soc_aabb* world_bounds, [NativeTypeName("uint32_t")] uint bounds_count, [NativeTypeName("soc_visibility *")] byte* out_visibility);
+        public static extern int soc_snapshot_hiz_level_query([NativeTypeName("const soc_snapshot *")] soc_snapshot* snapshot, [NativeTypeName("uint32_t")] uint level, soc_hiz_level_info* out_info, float* out_depth, [NativeTypeName("uint64_t")] ulong out_depth_count);
 
-        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-        [return: NativeTypeName("soc_result")]
-        public static extern int soc_frame_end(soc_context* context);
-
-        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-        [return: NativeTypeName("soc_result")]
-        public static extern int soc_context_get_stats([NativeTypeName("const soc_context *")] soc_context* context, soc_stats* out_stats);
-
-        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-        [return: NativeTypeName("soc_result")]
-        public static extern int soc_hiz_level_query([NativeTypeName("const soc_context *")] soc_context* context, [NativeTypeName("uint32_t")] uint level, soc_hiz_level_info* out_info, float* out_depth, [NativeTypeName("uint64_t")] ulong out_depth_count);
-
-        [NativeTypeName("#define SOC_ABI_VERSION_MAJOR 1u")]
-        public const uint SOC_ABI_VERSION_MAJOR = 1U;
+        [NativeTypeName("#define SOC_ABI_VERSION_MAJOR 2u")]
+        public const uint SOC_ABI_VERSION_MAJOR = 2U;
 
         [NativeTypeName("#define SOC_ABI_VERSION_MINOR 0u")]
         public const uint SOC_ABI_VERSION_MINOR = 0U;
 
         [NativeTypeName("#define SOC_ABI_VERSION ((SOC_ABI_VERSION_MAJOR << 16u) | SOC_ABI_VERSION_MINOR)")]
-        public const uint SOC_ABI_VERSION = ((1U << 16) | 0U);
+        public const uint SOC_ABI_VERSION = ((2U << 16) | 0U);
 
         [NativeTypeName("#define SOC_FALSE ((soc_bool)0u)")]
         public const byte SOC_FALSE = ((byte)(0U));
@@ -299,6 +357,18 @@ namespace soc
         [NativeTypeName("#define SOC_FRAME_DESC_SIZE_V1 ((uint32_t)(offsetof(soc_frame_desc, flags) + sizeof(uint32_t)))")]
         public static readonly uint SOC_FRAME_DESC_SIZE_V1 = ((uint)(Marshal.OffsetOf<soc_frame_desc>("flags") + 4));
 
+        [NativeTypeName("#define SOC_OCCLUDER_GROUP_FLAG_NONE 0u")]
+        public const uint SOC_OCCLUDER_GROUP_FLAG_NONE = 0U;
+
+        [NativeTypeName("#define SOC_OCCLUDER_GROUP_SIZE_V1 ((uint32_t)(offsetof(soc_occluder_group, flags) + sizeof(uint32_t)))")]
+        public static readonly uint SOC_OCCLUDER_GROUP_SIZE_V1 = ((uint)(Marshal.OffsetOf<soc_occluder_group>("flags") + 4));
+
+        [NativeTypeName("#define SOC_OCCLUSION_BUILD_FLAG_NONE 0u")]
+        public const uint SOC_OCCLUSION_BUILD_FLAG_NONE = 0U;
+
+        [NativeTypeName("#define SOC_OCCLUSION_BUILD_DESC_SIZE_V1 ((uint32_t)(offsetof(soc_occlusion_build_desc, group_stride) + sizeof(uint32_t)))")]
+        public static readonly uint SOC_OCCLUSION_BUILD_DESC_SIZE_V1 = ((uint)(Marshal.OffsetOf<soc_occlusion_build_desc>("group_stride") + 4));
+
         [NativeTypeName("#define SOC_MESH_FLAG_NONE 0u")]
         public const uint SOC_MESH_FLAG_NONE = 0U;
 
@@ -308,8 +378,11 @@ namespace soc
         [NativeTypeName("#define SOC_MESH_DESC_SIZE_V1 ((uint32_t)(offsetof(soc_mesh_desc, index_type) + sizeof(soc_index_type)))")]
         public static readonly uint SOC_MESH_DESC_SIZE_V1 = ((uint)(Marshal.OffsetOf<soc_mesh_desc>("index_type") + 4));
 
-        [NativeTypeName("#define SOC_STATS_SIZE_V1 ((uint32_t)(offsetof(soc_stats, occluded_aabb_count) + sizeof(uint64_t)))")]
-        public static readonly uint SOC_STATS_SIZE_V1 = ((uint)(Marshal.OffsetOf<soc_stats>("occluded_aabb_count") + 8));
+        [NativeTypeName("#define SOC_BUILD_STATS_SIZE_V1 ((uint32_t)(offsetof(soc_build_stats, rasterized_triangle_count) + sizeof(uint64_t)))")]
+        public static readonly uint SOC_BUILD_STATS_SIZE_V1 = ((uint)(Marshal.OffsetOf<soc_build_stats>("rasterized_triangle_count") + 8));
+
+        [NativeTypeName("#define SOC_QUERY_STATS_SIZE_V1 ((uint32_t)(offsetof(soc_query_stats, unknown_aabb_count) + sizeof(uint64_t)))")]
+        public static readonly uint SOC_QUERY_STATS_SIZE_V1 = ((uint)(Marshal.OffsetOf<soc_query_stats>("unknown_aabb_count") + 8));
 
         [NativeTypeName("#define SOC_HIZ_LEVEL_INFO_SIZE_V1 ((uint32_t)(offsetof(soc_hiz_level_info, required_element_count) + \\\n        sizeof(uint64_t)))")]
         public static readonly uint SOC_HIZ_LEVEL_INFO_SIZE_V1 = ((uint)(Marshal.OffsetOf<soc_hiz_level_info>("required_element_count") + 8));

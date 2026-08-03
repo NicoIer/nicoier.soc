@@ -53,7 +53,7 @@ typedef struct options {
 } options;
 
 typedef struct validation_result {
-    soc_stats stats;
+    soc_build_stats stats;
     uint64_t drawn_pixel_count;
     uint64_t checksum;
 } validation_result;
@@ -65,8 +65,9 @@ static void print_usage(FILE* stream, const char* executable)
         "Usage: %s --input benchmark.obj [--samples N] [--sample-ms N]\n"
         "\n"
         "The OBJ must contain the '# SOC benchmark OBJ v1' metadata header.\n"
-        "Only soc_occluders_submit is timed; parsing, mesh creation, clear,\n"
-        "Hi-Z construction, readback, and validation are outside timing.\n",
+        "Each timed operation builds a complete immutable snapshot, including\n"
+        "Level 0 clear, rasterization, and Hi-Z construction. Parsing, mesh and\n"
+        "context creation, readback, validation, and destruction are outside timing.\n",
         executable
     );
 }
@@ -420,7 +421,33 @@ static soc_mat4 identity_matrix(void)
     return matrix;
 }
 
-static int run_submit(
+static soc_result build_snapshot(
+    soc_context* context,
+    const soc_mesh* mesh,
+    const soc_frame_desc* frame_desc,
+    const soc_mat4* object_to_world,
+    soc_snapshot** out_snapshot
+)
+{
+    const soc_occluder_group group = {
+        .mesh = mesh,
+        .object_to_world = object_to_world,
+        .instance_count = 1u,
+        .flags = SOC_OCCLUDER_GROUP_FLAG_NONE,
+    };
+    const soc_occlusion_build_desc build_desc = {
+        .struct_size = sizeof(soc_occlusion_build_desc),
+        .flags = SOC_OCCLUSION_BUILD_FLAG_NONE,
+        .frame = frame_desc,
+        .groups = &group,
+        .group_count = 1u,
+        .group_stride = sizeof(soc_occluder_group),
+    };
+
+    return soc_occlusion_build(context, &build_desc, out_snapshot);
+}
+
+static int run_snapshot_build(
     soc_context* context,
     const soc_mesh* mesh,
     const soc_frame_desc* frame_desc,
@@ -428,23 +455,21 @@ static int run_submit(
     uint64_t* out_elapsed_ns
 )
 {
+    soc_snapshot* snapshot = NULL;
     soc_result result;
     uint64_t begin;
     uint64_t end;
 
-    result = soc_frame_begin(context, frame_desc);
-    if (result != SOC_RESULT_OK) {
-        return 0;
-    }
     begin = timer_now_ns();
-    result = soc_occluders_submit(context, mesh, object_to_world, 1u);
+    result = build_snapshot(
+        context,
+        mesh,
+        frame_desc,
+        object_to_world,
+        &snapshot
+    );
     end = timer_now_ns();
-    if (result == SOC_RESULT_OK) {
-        result = soc_occluders_finish(context);
-    }
-    if (result == SOC_RESULT_OK) {
-        result = soc_frame_end(context);
-    }
+    soc_snapshot_destroy(snapshot);
     if (result != SOC_RESULT_OK ||
         begin == UINT64_MAX ||
         end == UINT64_MAX ||
@@ -472,7 +497,7 @@ static int run_series(
     do {
         uint64_t elapsed_ns;
 
-        if (!run_submit(
+        if (!run_snapshot_build(
                 context,
                 mesh,
                 frame_desc,
@@ -515,6 +540,7 @@ static int capture_validation(
 )
 {
     soc_hiz_level_info info = {.struct_size = sizeof(info)};
+    soc_snapshot* snapshot = NULL;
     float* depth = NULL;
     const float clear_depth =
         frame_desc->depth_direction == SOC_DEPTH_REVERSED ? 0.0f : 1.0f;
@@ -528,19 +554,22 @@ static int capture_validation(
     if (depth == NULL) {
         return 0;
     }
-    result = soc_frame_begin(context, frame_desc);
+    result = build_snapshot(
+        context,
+        mesh,
+        frame_desc,
+        object_to_world,
+        &snapshot
+    );
     if (result == SOC_RESULT_OK) {
-        result = soc_occluders_submit(context, mesh, object_to_world, 1u);
+        result = soc_snapshot_get_build_stats(
+            snapshot,
+            &out_validation->stats
+        );
     }
     if (result == SOC_RESULT_OK) {
-        result = soc_occluders_finish(context);
-    }
-    if (result == SOC_RESULT_OK) {
-        result = soc_context_get_stats(context, &out_validation->stats);
-    }
-    if (result == SOC_RESULT_OK) {
-        result = soc_hiz_level_query(
-            context,
+        result = soc_snapshot_hiz_level_query(
+            snapshot,
             0u,
             &info,
             depth,
@@ -561,9 +590,7 @@ static int capture_validation(
     } else if (result == SOC_RESULT_OK) {
         result = SOC_RESULT_INTERNAL_ERROR;
     }
-    if (result == SOC_RESULT_OK) {
-        result = soc_frame_end(context);
-    }
+    soc_snapshot_destroy(snapshot);
     free(depth);
     return result == SOC_RESULT_OK;
 }

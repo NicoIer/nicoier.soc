@@ -56,28 +56,22 @@ SOC_API soc_result SOC_CALL soc_mesh_create(
 
 SOC_API soc_result SOC_CALL soc_mesh_destroy(soc_mesh* mesh);
 
-/* Begins a frame and clears its Level 0 depth image. */
-SOC_API soc_result SOC_CALL soc_frame_begin(
+/*
+ * Synchronously consumes the complete occluder input and publishes an immutable
+ * snapshot containing Level 0 depth, derived Hi-Z levels, and build statistics.
+ * No caller-owned frame, group, or transform pointer is retained after this
+ * call.
+ * A successful snapshot no longer references its source meshes or context and
+ * may outlive both.
+ */
+SOC_API soc_result SOC_CALL soc_occlusion_build(
     soc_context* context,
-    const soc_frame_desc* desc
+    const soc_occlusion_build_desc* desc,
+    soc_snapshot** out_snapshot
 );
 
-/*
- * Synchronously transforms, homogeneously clips, face culls, and
- * scalar-rasterizes each mesh instance into the Level 0 depth image.
- */
-SOC_API soc_result SOC_CALL soc_occluders_submit(
-    soc_context* context,
-    const soc_mesh* mesh,
-    const soc_mat4* object_to_world,
-    uint32_t instance_count
-);
-
-/*
- * Ends occluder recording and synchronously builds every derived Hi-Z Level
- * before making the frame query-ready.
- */
-SOC_API soc_result SOC_CALL soc_occluders_finish(soc_context* context);
+/* Accepts null and releases all storage owned by the snapshot. */
+SOC_API void SOC_CALL soc_snapshot_destroy(soc_snapshot* snapshot);
 
 /*
  * Conservatively projects world-space AABBs and tests them against Hi-Z.
@@ -86,21 +80,20 @@ SOC_API soc_result SOC_CALL soc_occluders_finish(soc_context* context);
  * Invalid, non-finite, near-plane-crossing, or otherwise unprojectable bounds
  * produce SOC_VISIBILITY_UNKNOWN (fail-open); other bounds produce
  * SOC_VISIBILITY_VISIBLE. The frame's clip depth range and depth direction are
- * honored. Successful tests contribute to tested_aabb_count, and proven
- * occlusions also contribute to occluded_aabb_count.
+ * honored. When out_stats is non-null it receives counters for this call only;
+ * the snapshot itself is never mutated by a query.
  */
-SOC_API soc_result SOC_CALL soc_visibility_test_aabbs(
-    soc_context* context,
+SOC_API soc_result SOC_CALL soc_snapshot_test_aabbs(
+    const soc_snapshot* snapshot,
     const soc_aabb* world_bounds,
     uint32_t bounds_count,
-    soc_visibility* out_visibility
+    soc_visibility* out_visibility,
+    soc_query_stats* out_stats
 );
 
-SOC_API soc_result SOC_CALL soc_frame_end(soc_context* context);
-
-SOC_API soc_result SOC_CALL soc_context_get_stats(
-    const soc_context* context,
-    soc_stats* out_stats
+SOC_API soc_result SOC_CALL soc_snapshot_get_build_stats(
+    const soc_snapshot* snapshot,
+    soc_build_stats* out_stats
 );
 
 /*
@@ -108,8 +101,8 @@ SOC_API soc_result SOC_CALL soc_context_get_stats(
  * Each higher Level has ceil(previous / 2) dimensions and reduces only valid
  * children: maximum depth for forward Z, minimum depth for reversed Z.
  */
-SOC_API soc_result SOC_CALL soc_hiz_level_query(
-    const soc_context* context,
+SOC_API soc_result SOC_CALL soc_snapshot_hiz_level_query(
+    const soc_snapshot* snapshot,
     uint32_t level,
     soc_hiz_level_info* out_info,
     float* out_depth,

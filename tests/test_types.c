@@ -24,8 +24,20 @@ _Static_assert(
     "soc_mesh_desc V1 layout is too small"
 );
 _Static_assert(
-    sizeof(soc_stats) == SOC_STATS_SIZE_V1,
-    "soc_stats V1 layout changed"
+    SOC_OCCLUDER_GROUP_SIZE_V1 <= sizeof(soc_occluder_group),
+    "soc_occluder_group V1 layout is too small"
+);
+_Static_assert(
+    SOC_OCCLUSION_BUILD_DESC_SIZE_V1 <= sizeof(soc_occlusion_build_desc),
+    "soc_occlusion_build_desc V1 layout is too small"
+);
+_Static_assert(
+    sizeof(soc_build_stats) == SOC_BUILD_STATS_SIZE_V1,
+    "soc_build_stats V1 layout changed"
+);
+_Static_assert(
+    sizeof(soc_query_stats) == SOC_QUERY_STATS_SIZE_V1,
+    "soc_query_stats V1 layout changed"
 );
 _Static_assert(
     sizeof(soc_hiz_level_info) == SOC_HIZ_LEVEL_INFO_SIZE_V1,

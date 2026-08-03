@@ -1,8 +1,8 @@
 # Benchmarks
 
 `soc_bench` 是面向优化回归的、无第三方依赖的 C17 benchmark。它通过公开
-`soc` C ABI 测量同步单线程参考实现，覆盖整帧以及 clear、遮挡物提交、Hi-Z
-构建和 AABB 查询等阶段。正确性仍由 `tests/` 负责；同时启用 benchmark 和
+`soc` C ABI 测量同步单线程参考实现，覆盖完整 snapshot build、AABB 查询、
+Hi-Z 读回以及资源生命周期。正确性仍由 `tests/` 负责；同时启用 benchmark 和
 tests 时，CTest 会注册 `soc.bench.validate`，只运行确定性的 `--validate-only`
 校验。性能采样不会加入 CTest，也不会成为跨机器的性能硬门禁。
 
@@ -41,13 +41,13 @@ Xcode 或 Ninja Multi-Config 的可执行文件通常位于
 ./build-bench/benchmarks/soc_bench --list
 ```
 
-### 真实 OBJ 深度提交基准
+### 真实 OBJ snapshot build 基准
 
 `soc_obj_bench` 读取带有 `# SOC benchmark OBJ v1` 元数据头的 OBJ，使用文件中
 记录的分辨率、裁剪深度范围、深度方向、正面绕序、双面标志和
-`camera_clip_from_world_col_major`。OBJ 解析、mesh/context 创建、Level 0 清除、
-Hi-Z 构建、深度读回和结果校验均位于计时区外；每个 operation 只计量
-`soc_occluders_submit()`，并在每轮使用重新清除的深度缓冲区。
+`camera_clip_from_world_col_major`。OBJ 解析、mesh/context 创建、深度读回、
+结果校验和 snapshot 销毁均位于计时区外；每个 operation 计量一次完整的
+`soc_occlusion_build()`，包含 snapshot 分配、Level 0 清除、光栅化和 Hi-Z 构建。
 
 在 macOS 上，从仓库根目录复制执行以下一段 Shell，即可用 `test002.obj` 完成
 Release 静态构建和性能测试：
@@ -66,7 +66,7 @@ cmake --build build-bench-obj \
   --input examples/test002.obj
 ```
 
-默认执行 15 个样本，每个样本累计至少 200 ms 的 submit 时间；可通过
+默认执行 15 个样本，每个样本累计至少 200 ms 的 snapshot build 时间；可通过
 `--samples N --sample-ms N` 调整。输出包含 median、P95、MAD、min/max，以及
 输入/裁剪/光栅化三角形计数、写入深度的像素数和 Level 0 checksum。Linux 和
 Windows 使用相同命令，但应省略 `SOC_APPLE_SDK_PATH` 这一行；多配置生成器的
@@ -88,22 +88,26 @@ Windows 使用相同命令，但应省略 `SOC_APPLE_SDK_PATH` 这一行；多�
 
 `soc_bench` 的内置场景都在内存中确定性生成，不依赖 OBJ、trace 或网络资源：
 
-- 空帧 clear 和 Hi-Z：多种 POT/NPOT 分辨率以及 forward/reversed Z。
-- geometry：16,384 个小三角形的视锥内、近平面裁剪、背面和退化路径。
-- fill：全屏覆盖，以及 1/4/16 层的 near-to-far 与 far-to-near overdraw。
-- instance：固定 128 三角形网格的 1/16/256 实例扩展。
+- 空 snapshot build：多种 POT/NPOT 分辨率以及 forward/reversed Z；原 clear/Hi-Z
+  case 现在都计量公开 API 可观察的完整空 snapshot 构建。
+- geometry snapshot build：16,384 个小三角形的视锥内、近平面裁剪、背面和退化路径。
+- fill snapshot build：全屏覆盖，以及 1/4/16 层的 near-to-far 与 far-to-near overdraw。
+- instance snapshot build：固定 128 三角形网格的 1/16/256 实例扩展。
 - query：每轮 65,536 个 AABB，分别以 1/64/4096/65536 批量调用，并覆盖
   全遮挡、全可见、60/25/10/5 的遮挡/可见/屏外/unknown 混合及大小投影。
 - end-to-end：320×180、640×360 和 1280×720 三档代表性整帧。
 - full suite 额外覆盖四种裁剪深度/深度方向组合、context create/resize、
   uint16/uint32 与不同 stride 的 mesh create，以及 Level 0/顶层 Hi-Z readback。
 
-context/mesh 创建、resize 和读回会分配或复制内存，因此与稳态帧分开报告。
-`soc_hiz_level_query` 不计入普通帧和阶段耗时。
+context/mesh 创建、resize 和读回会分配或复制内存，因此与 snapshot build 分开报告。
+`soc_snapshot_hiz_level_query` 不计入普通 snapshot build 耗时。
 
 ## 测量与校验
 
-输入生成、内存预触碰、资源分配、结果校验和验证用深度读回都在计时区外。
+输入生成、内存预触碰、context/mesh 资源分配、结果校验和验证用深度读回都在
+计时区外；snapshot 及其深度金字塔的分配属于 `soc_occlusion_build()`，计入 build case。
+`soc_occlusion_build_desc.frame` 是调用方持有的只读指针；这些 benchmark 会让对应的
+`soc_frame_desc` 至少存活到同步 `soc_occlusion_build()` 返回。
 每个性能 case 先预热至少 5 次和 250 ms，再自动标定迭代次数，使每个样本的计时
 负载至少达到 `--sample-ms`。只读 query/readback 阶段会在每轮预热或样本内复用
 同一个已构建的 Hi-Z 帧，避免计时外的重复建帧支配墙钟时间。默认保留全部 15
@@ -112,10 +116,10 @@ context/mesh 创建、resize 和读回会分配或复制内存，因此与稳态
 - median、P95、MAD、min 和 max；
 - 每个样本的有效 operation 次数；
 - 阶段吞吐所需的分辨率、三角形、实例与查询数量；
-- `soc_stats`、visibility 分布和确定性 checksum。
+- `soc_build_stats`、`soc_query_stats`、visibility 分布和确定性 checksum。
 
 若 `MAD / median > 3%`，结果会在 stderr 和 JSON 中标记为 noisy。每个 case
-在采样前后都检查返回码、统计量、可见性分布及 checksum；Hi-Z 阶段还会在
+在采样前后都检查返回码、统计量、可见性分布及 checksum；snapshot build case 还会在
 计时外读回并散列全部层级。校验失败时进程返回非零。P95 采用 nearest-rank；
 默认 15 个样本时它等于 max，仅作为诊断数据。
 

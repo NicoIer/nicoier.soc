@@ -420,6 +420,7 @@ soc_result soc_occlusion_test_aabbs(
         hiz->levels[0].height == 0u ||
         frame == NULL ||
         out_occluded_count == NULL ||
+        (size_t)bounds_count > SIZE_MAX / sizeof(*world_bounds) ||
         (frame->clip_depth_range != SOC_CLIP_DEPTH_ZERO_TO_ONE &&
             frame->clip_depth_range !=
                 SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) ||

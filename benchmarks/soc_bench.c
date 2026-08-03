@@ -163,7 +163,8 @@ typedef struct bench_result {
     uint64_t min_ns;
     uint64_t max_ns;
     soc_bool noisy;
-    soc_stats stats;
+    soc_build_stats build_stats;
+    soc_query_stats query_stats;
     uint64_t visible;
     uint64_t occluded;
     uint64_t unknown;
@@ -175,6 +176,7 @@ typedef struct workload {
     uint64_t seed;
     soc_context* context;
     soc_mesh* mesh;
+    soc_snapshot* snapshot;
     soc_frame_desc frame_desc;
     soc_mat4* transforms;
     soc_aabb* bounds;
@@ -186,21 +188,21 @@ typedef struct workload {
     void* mesh_indices;
     uint32_t mesh_vertex_count;
     uint32_t mesh_index_count;
-    soc_stats stats;
+    soc_build_stats build_stats;
+    soc_query_stats query_stats;
     uint64_t visible;
     uint64_t occluded;
     uint64_t unknown;
     uint64_t checksum;
-    soc_bool frame_active;
     soc_bool capture_results;
 } workload;
 
 static const bench_case g_cases[] = {
-    {.name = "frame.clear.64x64", .description = "Clear a smoke Level 0",
+    {.name = "frame.clear.64x64", .description = "Build an empty smoke snapshot",
      .kind = BENCH_CLEAR, .tier = 0u, .width = 64u, .height = 64u},
-    {.name = "hiz.build.64x64", .description = "Build a smoke Hi-Z pyramid",
+    {.name = "hiz.build.64x64", .description = "Build an empty smoke snapshot and Hi-Z",
      .kind = BENCH_HIZ, .tier = 0u, .width = 64u, .height = 64u},
-    {.name = "geometry.inside.32", .description = "Submit smoke in-frustum geometry",
+    {.name = "geometry.inside.32", .description = "Build a snapshot from smoke in-frustum geometry",
      .kind = BENCH_GEOMETRY, .tier = 0u, .width = 64u, .height = 64u,
      .triangle_count = 32u, .instance_count = 1u},
     {.name = "query.batch.smoke.64", .description = "Query one small occluded batch",
@@ -212,35 +214,35 @@ static const bench_case g_cases[] = {
      .triangle_count = 64u, .instance_count = 1u, .query_count = 64u,
      .query_batch_size = 64u, .query_pattern = QUERY_MIXED},
 
-    {.name = "frame.clear.320x180", .description = "Clear a 180p Level 0",
+    {.name = "frame.clear.320x180", .description = "Build an empty 180p snapshot",
      .kind = BENCH_CLEAR, .tier = 1u, .width = 320u, .height = 180u},
-    {.name = "frame.clear.640x360", .description = "Clear a 360p Level 0",
+    {.name = "frame.clear.640x360", .description = "Build an empty 360p snapshot",
      .kind = BENCH_CLEAR, .tier = 1u, .width = 640u, .height = 360u},
-    {.name = "frame.clear.1280x720", .description = "Clear a 720p Level 0",
+    {.name = "frame.clear.1280x720", .description = "Build an empty 720p snapshot",
      .kind = BENCH_CLEAR, .tier = 1u, .width = 1280u, .height = 720u},
-    {.name = "frame.clear.npot.1279x719", .description = "Clear an odd NPOT Level 0",
+    {.name = "frame.clear.npot.1279x719", .description = "Build an empty odd NPOT snapshot",
      .kind = BENCH_CLEAR, .tier = 1u, .width = 1279u, .height = 719u},
     {.name = "frame.clear.reversed.640x360",
-     .description = "Clear a reversed-Z 360p Level 0",
+     .description = "Build an empty reversed-Z 360p snapshot",
      .kind = BENCH_CLEAR, .tier = 1u, .width = 640u, .height = 360u,
      .depth_direction = SOC_DEPTH_REVERSED},
 
-    {.name = "hiz.build.320x180", .description = "Build a 180p Hi-Z pyramid",
+    {.name = "hiz.build.320x180", .description = "Build an empty 180p snapshot and Hi-Z",
      .kind = BENCH_HIZ, .tier = 1u, .width = 320u, .height = 180u},
-    {.name = "hiz.build.640x360", .description = "Build a 360p Hi-Z pyramid",
+    {.name = "hiz.build.640x360", .description = "Build an empty 360p snapshot and Hi-Z",
      .kind = BENCH_HIZ, .tier = 1u, .width = 640u, .height = 360u},
-    {.name = "hiz.build.1280x720", .description = "Build a 720p Hi-Z pyramid",
+    {.name = "hiz.build.1280x720", .description = "Build an empty 720p snapshot and Hi-Z",
      .kind = BENCH_HIZ, .tier = 1u, .width = 1280u, .height = 720u},
     {.name = "hiz.build.npot.1279x719",
-     .description = "Build an odd NPOT Hi-Z pyramid",
+     .description = "Build an empty odd NPOT snapshot and Hi-Z",
      .kind = BENCH_HIZ, .tier = 1u, .width = 1279u, .height = 719u},
     {.name = "hiz.build.reversed.640x360",
-     .description = "Build a reversed-Z 360p pyramid",
+     .description = "Build an empty reversed-Z 360p snapshot and Hi-Z",
      .kind = BENCH_HIZ, .tier = 1u, .width = 640u, .height = 360u,
      .depth_direction = SOC_DEPTH_REVERSED},
 
     {.name = "geometry.inside.16384",
-     .description = "Submit 16384 small in-frustum triangles",
+     .description = "Build a snapshot from 16384 in-frustum triangles",
      .kind = BENCH_GEOMETRY, .tier = 1u, .width = 640u, .height = 360u,
      .triangle_count = 16384u, .instance_count = 1u},
     {.name = "geometry.near_clip.16384",
@@ -283,13 +285,13 @@ static const bench_case g_cases[] = {
      .kind = BENCH_OVERDRAW, .tier = 1u, .width = 640u, .height = 360u,
      .triangle_count = 1u, .instance_count = 16u, .reverse_order = SOC_TRUE},
 
-    {.name = "submit.instances.1", .description = "Submit one small instance",
+    {.name = "snapshot.instances.1", .description = "Build a snapshot with one small instance",
      .kind = BENCH_INSTANCE, .tier = 1u, .width = 640u, .height = 360u,
      .triangle_count = 128u, .instance_count = 1u},
-    {.name = "submit.instances.16", .description = "Submit sixteen small instances",
+    {.name = "snapshot.instances.16", .description = "Build a snapshot with sixteen small instances",
      .kind = BENCH_INSTANCE, .tier = 1u, .width = 640u, .height = 360u,
      .triangle_count = 128u, .instance_count = 16u},
-    {.name = "submit.instances.256", .description = "Submit 256 small instances",
+    {.name = "snapshot.instances.256", .description = "Build a snapshot with 256 small instances",
      .kind = BENCH_INSTANCE, .tier = 1u, .width = 640u, .height = 360u,
      .triangle_count = 128u, .instance_count = 256u},
 
@@ -1031,6 +1033,41 @@ static soc_result create_benchmark_mesh(workload* work)
     return soc_mesh_create(work->context, &desc, &work->mesh);
 }
 
+static soc_result workload_build_snapshot(workload* work)
+{
+    const soc_mat4 identity = identity_matrix();
+    soc_occluder_group group;
+    soc_occlusion_build_desc desc;
+
+    if (work == NULL || work->context == NULL || work->snapshot != NULL) {
+        return SOC_RESULT_INVALID_STATE;
+    }
+
+    memset(&group, 0, sizeof(group));
+    memset(&desc, 0, sizeof(desc));
+    desc.struct_size = sizeof(desc);
+    desc.flags = SOC_OCCLUSION_BUILD_FLAG_NONE;
+    desc.frame = &work->frame_desc;
+    desc.group_stride = sizeof(group);
+
+    if (work->mesh != NULL) {
+        group.mesh = work->mesh;
+        if (work->definition->kind == BENCH_OVERDRAW ||
+            work->definition->kind == BENCH_INSTANCE) {
+            group.object_to_world = work->transforms;
+            group.instance_count = work->definition->instance_count;
+        } else {
+            group.object_to_world = &identity;
+            group.instance_count = 1u;
+        }
+        group.flags = SOC_OCCLUDER_GROUP_FLAG_NONE;
+        desc.groups = &group;
+        desc.group_count = 1u;
+    }
+
+    return soc_occlusion_build(work->context, &desc, &work->snapshot);
+}
+
 static int workload_initialize(
     workload* work,
     const bench_case* definition,
@@ -1043,7 +1080,8 @@ static int workload_initialize(
     work->frame_desc = default_frame_desc();
     work->frame_desc.clip_depth_range = definition->clip_depth_range;
     work->frame_desc.depth_direction = definition->depth_direction;
-    work->stats.struct_size = sizeof(work->stats);
+    work->build_stats.struct_size = sizeof(work->build_stats);
+    work->query_stats.struct_size = sizeof(work->query_stats);
 
     if (definition->kind == BENCH_CONTEXT_CREATE) {
         return 0;
@@ -1128,9 +1166,7 @@ static int workload_initialize(
 
 static void workload_destroy(workload* work)
 {
-    if (work->frame_active && work->context != NULL) {
-        (void)soc_frame_end(work->context);
-    }
+    soc_snapshot_destroy(work->snapshot);
     if (work->mesh != NULL) {
         (void)soc_mesh_destroy(work->mesh);
     }
@@ -1148,48 +1184,34 @@ static int workload_prepare(workload* work)
 {
     soc_result result;
     const bench_kind kind = work->definition->kind;
-    const soc_mat4 identity = identity_matrix();
 
     work->visible = 0u;
     work->occluded = 0u;
     work->unknown = 0u;
     work->checksum = 0u;
-    memset(&work->stats, 0, sizeof(work->stats));
-    work->stats.struct_size = sizeof(work->stats);
+    memset(&work->build_stats, 0, sizeof(work->build_stats));
+    work->build_stats.struct_size = sizeof(work->build_stats);
+    memset(&work->query_stats, 0, sizeof(work->query_stats));
+    work->query_stats.struct_size = sizeof(work->query_stats);
 
-    if (kind == BENCH_CLEAR || kind == BENCH_E2E ||
-        kind == BENCH_CONTEXT_CREATE ||
-        kind == BENCH_CONTEXT_RESIZE ||
-        kind == BENCH_MESH_CREATE) {
+    if (kind != BENCH_QUERY && kind != BENCH_READBACK) {
         return 0;
     }
 
-    result = soc_frame_begin(work->context, &work->frame_desc);
+    result = workload_build_snapshot(work);
     if (result != SOC_RESULT_OK) {
-        fprintf(stderr, "%s: frame begin failed (%d)\n",
+        fprintf(stderr, "%s: snapshot setup failed (%d)\n",
             work->definition->name, (int)result);
         return 1;
     }
-    work->frame_active = SOC_TRUE;
-
-    if (kind == BENCH_QUERY || kind == BENCH_READBACK) {
-        result = soc_occluders_submit(
-            work->context,
-            work->mesh,
-            &identity,
-            1u
-        );
-        if (result == SOC_RESULT_OK) {
-            result = soc_occluders_finish(work->context);
-        }
-        if (result == SOC_RESULT_OK && kind == BENCH_READBACK) {
-            result = soc_context_get_stats(work->context, &work->stats);
-        }
-        if (result != SOC_RESULT_OK) {
-            fprintf(stderr, "%s: frame setup failed (%d)\n",
-                work->definition->name, (int)result);
-            return 1;
-        }
+    result = soc_snapshot_get_build_stats(
+        work->snapshot,
+        &work->build_stats
+    );
+    if (result != SOC_RESULT_OK) {
+        fprintf(stderr, "%s: snapshot stats failed (%d)\n",
+            work->definition->name, (int)result);
+        return 1;
     }
     return 0;
 }
@@ -1210,16 +1232,28 @@ static soc_result run_query_batches(workload* work)
         const uint32_t remaining = count - offset;
         const uint32_t batch =
             remaining < batch_size ? remaining : batch_size;
-        const soc_result result = soc_visibility_test_aabbs(
-            work->context,
+        soc_query_stats batch_stats = {
+            .struct_size = sizeof(soc_query_stats)
+        };
+        const soc_result result = soc_snapshot_test_aabbs(
+            work->snapshot,
             work->bounds + offset,
             batch,
-            work->visibility + offset
+            work->visibility + offset,
+            &batch_stats
         );
 
         if (result != SOC_RESULT_OK) {
             return result;
         }
+        work->query_stats.tested_aabb_count +=
+            batch_stats.tested_aabb_count;
+        work->query_stats.visible_aabb_count +=
+            batch_stats.visible_aabb_count;
+        work->query_stats.occluded_aabb_count +=
+            batch_stats.occluded_aabb_count;
+        work->query_stats.unknown_aabb_count +=
+            batch_stats.unknown_aabb_count;
         offset += batch;
     }
     return SOC_RESULT_OK;
@@ -1228,62 +1262,24 @@ static soc_result run_query_batches(workload* work)
 static int workload_run_timed(workload* work)
 {
     const bench_case* definition = work->definition;
-    const soc_mat4 identity = identity_matrix();
     soc_result result = SOC_RESULT_OK;
 
     switch (definition->kind) {
     case BENCH_CLEAR:
-        result = soc_frame_begin(work->context, &work->frame_desc);
-        if (result == SOC_RESULT_OK) {
-            work->frame_active = SOC_TRUE;
-        }
-        break;
     case BENCH_HIZ:
-        result = soc_occluders_finish(work->context);
-        break;
     case BENCH_GEOMETRY:
     case BENCH_FILL:
-        result = soc_occluders_submit(
-            work->context,
-            work->mesh,
-            &identity,
-            1u
-        );
-        break;
     case BENCH_OVERDRAW:
     case BENCH_INSTANCE:
-        result = soc_occluders_submit(
-            work->context,
-            work->mesh,
-            work->transforms,
-            definition->instance_count
-        );
+        result = workload_build_snapshot(work);
         break;
     case BENCH_QUERY:
         result = run_query_batches(work);
         break;
     case BENCH_E2E:
-        result = soc_frame_begin(work->context, &work->frame_desc);
-        if (result == SOC_RESULT_OK) {
-            work->frame_active = SOC_TRUE;
-            result = soc_occluders_submit(
-                work->context,
-                work->mesh,
-                &identity,
-                1u
-            );
-        }
-        if (result == SOC_RESULT_OK) {
-            result = soc_occluders_finish(work->context);
-        }
+        result = workload_build_snapshot(work);
         if (result == SOC_RESULT_OK) {
             result = run_query_batches(work);
-        }
-        if (result == SOC_RESULT_OK) {
-            result = soc_frame_end(work->context);
-            if (result == SOC_RESULT_OK) {
-                work->frame_active = SOC_FALSE;
-            }
         }
         break;
     case BENCH_CONTEXT_CREATE: {
@@ -1312,7 +1308,7 @@ static int workload_run_timed(workload* work)
     case BENCH_READBACK: {
         const uint32_t level =
             definition->readback_level == UINT32_MAX
-            ? work->stats.hiz_level_count - 1u
+            ? work->build_stats.hiz_level_count - 1u
             : definition->readback_level;
         const uint32_t repeat_count =
             definition->repeat_count == 0u ? 1u : definition->repeat_count;
@@ -1323,8 +1319,8 @@ static int workload_run_timed(workload* work)
                 .struct_size = sizeof(soc_hiz_level_info)
             };
 
-            result = soc_hiz_level_query(
-                work->context,
+            result = soc_snapshot_hiz_level_query(
+                work->snapshot,
                 level,
                 &info,
                 work->depth,
@@ -1388,15 +1384,15 @@ static soc_result capture_depth_pyramid(workload* work)
     uint64_t hash = UINT64_C(14695981039346656037);
     uint32_t level;
 
-    for (level = 0u; level < work->stats.hiz_level_count; ++level) {
+    for (level = 0u; level < work->build_stats.hiz_level_count; ++level) {
         soc_hiz_level_info info = {
             .struct_size = sizeof(soc_hiz_level_info)
         };
         soc_result result;
         uint64_t index;
 
-        result = soc_hiz_level_query(
-            work->context,
+        result = soc_snapshot_hiz_level_query(
+            work->snapshot,
             level,
             &info,
             work->depth,
@@ -1418,7 +1414,7 @@ static soc_result capture_depth_pyramid(workload* work)
              info.required_element_count != work->depth_count)) {
             return SOC_RESULT_INTERNAL_ERROR;
         }
-        if (level + 1u == work->stats.hiz_level_count &&
+        if (level + 1u == work->build_stats.hiz_level_count &&
             (info.width != 1u || info.height != 1u)) {
             return SOC_RESULT_INTERNAL_ERROR;
         }
@@ -1479,12 +1475,11 @@ static int workload_finish(workload* work)
         return 0;
     }
 
-    if (kind == BENCH_CLEAR || kind == BENCH_GEOMETRY || kind == BENCH_FILL ||
-        kind == BENCH_OVERDRAW || kind == BENCH_INSTANCE) {
-        result = soc_occluders_finish(work->context);
-    }
     if (result == SOC_RESULT_OK) {
-        result = soc_context_get_stats(work->context, &work->stats);
+        result = soc_snapshot_get_build_stats(
+            work->snapshot,
+            &work->build_stats
+        );
     }
     if (result == SOC_RESULT_OK && work->capture_results &&
         (kind == BENCH_QUERY || kind == BENCH_E2E)) {
@@ -1496,16 +1491,10 @@ static int workload_finish(workload* work)
         work->depth != NULL) {
         result = capture_depth_pyramid(work);
     }
-    if (work->frame_active) {
-        const soc_result end_result = soc_frame_end(work->context);
-
-        work->frame_active = SOC_FALSE;
-        if (result == SOC_RESULT_OK) {
-            result = end_result;
-        }
-    }
+    soc_snapshot_destroy(work->snapshot);
+    work->snapshot = NULL;
     if (result != SOC_RESULT_OK) {
-        fprintf(stderr, "%s: frame cleanup failed (%d)\n",
+        fprintf(stderr, "%s: snapshot cleanup failed (%d)\n",
             work->definition->name, (int)result);
         return 1;
     }
@@ -1519,7 +1508,7 @@ static int workload_validate(const workload* work)
     if (definition->kind != BENCH_CONTEXT_CREATE &&
         definition->kind != BENCH_CONTEXT_RESIZE &&
         definition->kind != BENCH_MESH_CREATE &&
-        work->stats.hiz_level_count == 0u) {
+        work->build_stats.hiz_level_count == 0u) {
         fprintf(stderr, "%s: validation failed: no Hi-Z levels\n",
             definition->name);
         return 1;
@@ -1527,33 +1516,33 @@ static int workload_validate(const workload* work)
     switch (definition->kind) {
     case BENCH_CLEAR:
     case BENCH_HIZ:
-        if (work->stats.input_triangle_count != 0u) {
+        if (work->build_stats.input_triangle_count != 0u) {
             return 1;
         }
         break;
     case BENCH_GEOMETRY:
-        if (work->stats.input_triangle_count !=
+        if (work->build_stats.input_triangle_count !=
             definition->triangle_count) {
             fprintf(stderr, "%s: geometry counters failed validation\n",
                 definition->name);
             return 1;
         }
         if (definition->geometry_pattern == GEOMETRY_NEAR_CLIP &&
-            (work->stats.clipped_triangle_count == 0u ||
-             work->stats.rasterized_triangle_count == 0u)) {
+            (work->build_stats.clipped_triangle_count == 0u ||
+             work->build_stats.rasterized_triangle_count == 0u)) {
             fprintf(stderr, "%s: near clipping was not exercised\n",
                 definition->name);
             return 1;
         }
         if ((definition->geometry_pattern == GEOMETRY_BACKFACE ||
              definition->geometry_pattern == GEOMETRY_DEGENERATE) &&
-            work->stats.rasterized_triangle_count != 0u) {
+            work->build_stats.rasterized_triangle_count != 0u) {
             fprintf(stderr, "%s: rejected geometry was rasterized\n",
                 definition->name);
             return 1;
         }
         if (definition->geometry_pattern == GEOMETRY_INSIDE &&
-            work->stats.rasterized_triangle_count == 0u) {
+            work->build_stats.rasterized_triangle_count == 0u) {
             fprintf(stderr, "%s: in-frustum geometry was not rasterized\n",
                 definition->name);
             return 1;
@@ -1562,7 +1551,7 @@ static int workload_validate(const workload* work)
     case BENCH_FILL:
     case BENCH_E2E:
     case BENCH_READBACK:
-        if (work->stats.input_triangle_count !=
+        if (work->build_stats.input_triangle_count !=
             definition->triangle_count) {
             fprintf(stderr, "%s: triangle count failed validation\n",
                 definition->name);
@@ -1571,7 +1560,7 @@ static int workload_validate(const workload* work)
         break;
     case BENCH_OVERDRAW:
     case BENCH_INSTANCE:
-        if (work->stats.input_triangle_count !=
+        if (work->build_stats.input_triangle_count !=
             (uint64_t)definition->triangle_count *
                 definition->instance_count) {
             fprintf(stderr, "%s: instance count failed validation\n",
@@ -1593,7 +1582,7 @@ static int workload_validate(const workload* work)
     if (definition->query_count != 0u) {
         if (work->visible + work->occluded + work->unknown !=
             definition->query_count ||
-            work->stats.tested_aabb_count != definition->query_count) {
+            work->query_stats.tested_aabb_count != definition->query_count) {
             fprintf(stderr, "%s: query counters failed validation\n",
                 definition->name);
             return 1;
@@ -1797,17 +1786,18 @@ static int result_matches_workload(
     const workload* work
 )
 {
-    return result->stats.hiz_level_count == work->stats.hiz_level_count &&
-        result->stats.input_triangle_count ==
-            work->stats.input_triangle_count &&
-        result->stats.clipped_triangle_count ==
-            work->stats.clipped_triangle_count &&
-        result->stats.rasterized_triangle_count ==
-            work->stats.rasterized_triangle_count &&
-        result->stats.tested_aabb_count ==
-            work->stats.tested_aabb_count &&
-        result->stats.occluded_aabb_count ==
-            work->stats.occluded_aabb_count &&
+    return result->build_stats.hiz_level_count ==
+            work->build_stats.hiz_level_count &&
+        result->build_stats.input_triangle_count ==
+            work->build_stats.input_triangle_count &&
+        result->build_stats.clipped_triangle_count ==
+            work->build_stats.clipped_triangle_count &&
+        result->build_stats.rasterized_triangle_count ==
+            work->build_stats.rasterized_triangle_count &&
+        result->query_stats.tested_aabb_count ==
+            work->query_stats.tested_aabb_count &&
+        result->query_stats.occluded_aabb_count ==
+            work->query_stats.occluded_aabb_count &&
         result->visible == work->visible &&
         result->occluded == work->occluded &&
         result->unknown == work->unknown &&
@@ -1826,7 +1816,8 @@ static int benchmark_case_run(
 
     memset(result, 0, sizeof(*result));
     result->definition = definition;
-    result->stats.struct_size = sizeof(result->stats);
+    result->build_stats.struct_size = sizeof(result->build_stats);
+    result->query_stats.struct_size = sizeof(result->query_stats);
 
     if (workload_initialize(&work, definition, opts->seed) != 0) {
         workload_destroy(&work);
@@ -1839,7 +1830,8 @@ static int benchmark_case_run(
         workload_destroy(&work);
         return 1;
     }
-    result->stats = work.stats;
+    result->build_stats = work.build_stats;
+    result->query_stats = work.query_stats;
     result->visible = work.visible;
     result->occluded = work.occluded;
     result->unknown = work.unknown;
@@ -2441,12 +2433,12 @@ static int write_json(
             "},\n      \"visibility\":{\"visible\":%" PRIu64
             ",\"occluded\":%" PRIu64 ",\"unknown\":%" PRIu64
             "},\n      \"checksum\":\"%016" PRIx64 "\"\n    }",
-            result->stats.hiz_level_count,
-            result->stats.input_triangle_count,
-            result->stats.clipped_triangle_count,
-            result->stats.rasterized_triangle_count,
-            result->stats.tested_aabb_count,
-            result->stats.occluded_aabb_count,
+            result->build_stats.hiz_level_count,
+            result->build_stats.input_triangle_count,
+            result->build_stats.clipped_triangle_count,
+            result->build_stats.rasterized_triangle_count,
+            result->query_stats.tested_aabb_count,
+            result->query_stats.occluded_aabb_count,
             result->visible, result->occluded, result->unknown,
             result->checksum) < 0) {
             return 1;

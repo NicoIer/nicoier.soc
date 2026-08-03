@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define TEST_WIDTH 8u
@@ -45,7 +46,7 @@
 
 typedef struct frame_capture {
     soc_hiz_level_info level;
-    soc_stats stats;
+    soc_build_stats stats;
     float depth[TEST_PIXEL_COUNT];
 } frame_capture;
 
@@ -165,6 +166,9 @@ static soc_result capture_frame_with_desc(
 )
 {
     const soc_mat4 identity = identity_matrix();
+    soc_occluder_group* groups = NULL;
+    soc_occlusion_build_desc build_desc;
+    soc_snapshot* snapshot = NULL;
     soc_result result;
     uint32_t submission_index;
     uint32_t pixel;
@@ -176,9 +180,11 @@ static soc_result capture_frame_with_desc(
         out_capture->depth[pixel] = DEPTH_SENTINEL;
     }
 
-    result = soc_frame_begin(context, frame_desc);
-    if (result != SOC_RESULT_OK) {
-        return result;
+    if (submission_count != 0u) {
+        groups = calloc(submission_count, sizeof(*groups));
+        if (groups == NULL) {
+            return SOC_RESULT_OUT_OF_MEMORY;
+        }
     }
 
     for (submission_index = 0u;
@@ -191,39 +197,47 @@ static soc_result capture_frame_with_desc(
             ? 1u
             : instance_counts[submission_index];
 
-        result = soc_occluders_submit(
-            context,
-            meshes[submission_index],
-            object_to_world,
-            instance_count
-        );
-        if (result != SOC_RESULT_OK) {
-            return result;
-        }
+        groups[submission_index].mesh = meshes[submission_index];
+        groups[submission_index].object_to_world = object_to_world;
+        groups[submission_index].instance_count = instance_count;
+        groups[submission_index].flags = SOC_OCCLUDER_GROUP_FLAG_NONE;
     }
 
-    result = soc_occluders_finish(context);
+    build_desc.struct_size = sizeof(build_desc);
+    build_desc.flags = SOC_OCCLUSION_BUILD_FLAG_NONE;
+    build_desc.frame = frame_desc;
+    build_desc.groups = groups;
+    build_desc.group_count = submission_count;
+    build_desc.group_stride = submission_count == 0u
+        ? 0u
+        : sizeof(*groups);
+
+    result = soc_occlusion_build(context, &build_desc, &snapshot);
+    free(groups);
     if (result != SOC_RESULT_OK) {
         return result;
     }
 
-    result = soc_hiz_level_query(
-        context,
+    result = soc_snapshot_hiz_level_query(
+        snapshot,
         0u,
         &out_capture->level,
         out_capture->depth,
         TEST_PIXEL_COUNT
     );
     if (result != SOC_RESULT_OK) {
+        soc_snapshot_destroy(snapshot);
         return result;
     }
 
-    result = soc_context_get_stats(context, &out_capture->stats);
+    result = soc_snapshot_get_build_stats(snapshot, &out_capture->stats);
     if (result != SOC_RESULT_OK) {
+        soc_snapshot_destroy(snapshot);
         return result;
     }
 
-    return soc_frame_end(context);
+    soc_snapshot_destroy(snapshot);
+    return SOC_RESULT_OK;
 }
 
 static soc_result capture_frame(
@@ -280,24 +294,20 @@ static int check_stats(
     uint64_t rasterized_triangles
 )
 {
-    const soc_stats* stats = &capture->stats;
+    const soc_build_stats* stats = &capture->stats;
 
     if (stats->hiz_level_count != hiz_level_count ||
         stats->input_triangle_count != input_triangles ||
         stats->clipped_triangle_count != clipped_triangles ||
-        stats->rasterized_triangle_count != rasterized_triangles ||
-        stats->tested_aabb_count != 0u ||
-        stats->occluded_aabb_count != 0u) {
+        stats->rasterized_triangle_count != rasterized_triangles) {
         fprintf(
             stderr,
             "unexpected stats: hiz=%u, input=%llu, clipped=%llu, "
-            "rasterized=%llu, tested=%llu, occluded=%llu\n",
+            "rasterized=%llu\n",
             stats->hiz_level_count,
             (unsigned long long)stats->input_triangle_count,
             (unsigned long long)stats->clipped_triangle_count,
-            (unsigned long long)stats->rasterized_triangle_count,
-            (unsigned long long)stats->tested_aabb_count,
-            (unsigned long long)stats->occluded_aabb_count
+            (unsigned long long)stats->rasterized_triangle_count
         );
         return 1;
     }
@@ -901,9 +911,12 @@ static int test_fullscreen_hiz_levels(
     const uint16_t indices[] = {0u, 1u, 2u};
     const soc_mat4 identity = identity_matrix();
     soc_frame_desc frame_desc = make_frame_desc(depth_direction);
+    soc_occluder_group group;
+    soc_occlusion_build_desc build_desc;
     float positions[9];
     soc_context* context = NULL;
     soc_mesh* mesh = NULL;
+    soc_snapshot* snapshot = NULL;
     uint32_t expected_width = TEST_WIDTH;
     uint32_t expected_height = TEST_HEIGHT;
     uint32_t level;
@@ -924,12 +937,20 @@ static int test_fullscreen_hiz_levels(
         SOC_RESULT_OK
     );
 
-    CHECK_RESULT(soc_frame_begin(context, &frame_desc), SOC_RESULT_OK);
+    group.mesh = mesh;
+    group.object_to_world = &identity;
+    group.instance_count = 1u;
+    group.flags = SOC_OCCLUDER_GROUP_FLAG_NONE;
+    build_desc.struct_size = sizeof(build_desc);
+    build_desc.flags = SOC_OCCLUSION_BUILD_FLAG_NONE;
+    build_desc.frame = &frame_desc;
+    build_desc.groups = &group;
+    build_desc.group_count = 1u;
+    build_desc.group_stride = sizeof(group);
     CHECK_RESULT(
-        soc_occluders_submit(context, mesh, &identity, 1u),
+        soc_occlusion_build(context, &build_desc, &snapshot),
         SOC_RESULT_OK
     );
-    CHECK_RESULT(soc_occluders_finish(context), SOC_RESULT_OK);
 
     for (level = 0u; level < 4u; ++level) {
         soc_hiz_level_info info = {
@@ -944,8 +965,8 @@ static int test_fullscreen_hiz_levels(
             depth[index] = DEPTH_SENTINEL;
         }
         CHECK_RESULT(
-            soc_hiz_level_query(
-                context,
+            soc_snapshot_hiz_level_query(
+                snapshot,
                 level,
                 &info,
                 depth,
@@ -968,7 +989,7 @@ static int test_fullscreen_hiz_levels(
         expected_height = expected_height / 2u + expected_height % 2u;
     }
 
-    CHECK_RESULT(soc_frame_end(context), SOC_RESULT_OK);
+    soc_snapshot_destroy(snapshot);
     CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
     soc_context_destroy(context);
     return 0;
@@ -1055,6 +1076,7 @@ static int test_resize_and_empty_frame_clear(void)
     soc_context* context = NULL;
     soc_mesh* mesh = NULL;
     soc_mesh* meshes[1];
+    soc_snapshot* snapshot = NULL;
     const soc_frame_desc frame_desc = make_frame_desc(SOC_DEPTH_FORWARD);
     frame_capture drawn;
     frame_capture cleared;
@@ -1095,8 +1117,20 @@ static int test_resize_and_empty_frame_clear(void)
         CHECK(depth_equal(cleared.depth[pixel], DEPTH_SENTINEL));
     }
 
-    CHECK_RESULT(soc_frame_begin(context, &frame_desc), SOC_RESULT_OK);
-    CHECK_RESULT(soc_occluders_finish(context), SOC_RESULT_OK);
+    {
+        const soc_occlusion_build_desc build_desc = {
+            .struct_size = sizeof(soc_occlusion_build_desc),
+            .flags = SOC_OCCLUSION_BUILD_FLAG_NONE,
+            .frame = &frame_desc,
+            .groups = NULL,
+            .group_count = 0u,
+            .group_stride = 0u,
+        };
+        CHECK_RESULT(
+            soc_occlusion_build(context, &build_desc, &snapshot),
+            SOC_RESULT_OK
+        );
+    }
     {
         uint32_t expected_width = 5u;
         uint32_t expected_height = 3u;
@@ -1114,8 +1148,8 @@ static int test_resize_and_empty_frame_clear(void)
                 depth[pixel] = DEPTH_SENTINEL;
             }
             CHECK_RESULT(
-                soc_hiz_level_query(
-                    context,
+                soc_snapshot_hiz_level_query(
+                    snapshot,
                     level,
                     &info,
                     depth,
@@ -1142,7 +1176,7 @@ static int test_resize_and_empty_frame_clear(void)
                 expected_height / 2u + expected_height % 2u;
         }
     }
-    CHECK_RESULT(soc_frame_end(context), SOC_RESULT_OK);
+    soc_snapshot_destroy(snapshot);
 
     CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
     soc_context_destroy(context);

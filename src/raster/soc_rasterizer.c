@@ -654,6 +654,7 @@ soc_result soc_rasterizer_submit_occluders(
     uint32_t instance_count
 )
 {
+    size_t transform_byte_count;
     uint32_t instance;
 
     if (rasterizer == NULL ||
@@ -662,7 +663,12 @@ soc_result soc_rasterizer_submit_occluders(
         mesh->positions_xyz == NULL ||
         mesh->indices == NULL ||
         object_to_world == NULL ||
-        instance_count == 0u) {
+        instance_count == 0u ||
+        !checked_size_multiply(
+            (size_t)instance_count,
+            sizeof(*object_to_world),
+            &transform_byte_count
+        )) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 

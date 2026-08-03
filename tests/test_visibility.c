@@ -160,40 +160,78 @@ static int check_visibility(
 }
 
 static int check_query_stats(
-    const soc_context* context,
+    const soc_query_stats* stats,
     uint64_t tested,
-    uint64_t occluded
+    uint64_t visible,
+    uint64_t occluded,
+    uint64_t unknown
 )
 {
-    soc_stats stats = {
-        .struct_size = sizeof(soc_stats),
-    };
-
-    CHECK_RESULT(soc_context_get_stats(context, &stats), SOC_RESULT_OK);
-    if (stats.tested_aabb_count != tested ||
-        stats.occluded_aabb_count != occluded) {
+    if (stats->tested_aabb_count != tested ||
+        stats->visible_aabb_count != visible ||
+        stats->occluded_aabb_count != occluded ||
+        stats->unknown_aabb_count != unknown) {
         fprintf(
             stderr,
-            "query stats were tested=%llu, occluded=%llu; "
-            "expected tested=%llu, occluded=%llu\n",
-            (unsigned long long)stats.tested_aabb_count,
-            (unsigned long long)stats.occluded_aabb_count,
+            "query stats were tested=%llu, visible=%llu, occluded=%llu, "
+            "unknown=%llu; expected tested=%llu, visible=%llu, "
+            "occluded=%llu, unknown=%llu\n",
+            (unsigned long long)stats->tested_aabb_count,
+            (unsigned long long)stats->visible_aabb_count,
+            (unsigned long long)stats->occluded_aabb_count,
+            (unsigned long long)stats->unknown_aabb_count,
             (unsigned long long)tested,
-            (unsigned long long)occluded
+            (unsigned long long)visible,
+            (unsigned long long)occluded,
+            (unsigned long long)unknown
         );
         return 1;
     }
     return 0;
 }
 
-static int begin_empty_frame(
+static soc_result build_empty_snapshot(
     soc_context* context,
-    const soc_frame_desc* frame_desc
+    const soc_frame_desc* frame_desc,
+    soc_snapshot** out_snapshot
 )
 {
-    CHECK_RESULT(soc_frame_begin(context, frame_desc), SOC_RESULT_OK);
-    CHECK_RESULT(soc_occluders_finish(context), SOC_RESULT_OK);
-    return 0;
+    const soc_occlusion_build_desc build_desc = {
+        .struct_size = sizeof(soc_occlusion_build_desc),
+        .flags = SOC_OCCLUSION_BUILD_FLAG_NONE,
+        .frame = frame_desc,
+        .groups = NULL,
+        .group_count = 0u,
+        .group_stride = 0u,
+    };
+
+    return soc_occlusion_build(context, &build_desc, out_snapshot);
+}
+
+static soc_result build_single_group_snapshot(
+    soc_context* context,
+    const soc_frame_desc* frame_desc,
+    const soc_mesh* mesh,
+    const soc_mat4* object_to_world,
+    soc_snapshot** out_snapshot
+)
+{
+    const soc_occluder_group group = {
+        .mesh = mesh,
+        .object_to_world = object_to_world,
+        .instance_count = 1u,
+        .flags = SOC_OCCLUDER_GROUP_FLAG_NONE,
+    };
+    const soc_occlusion_build_desc build_desc = {
+        .struct_size = sizeof(soc_occlusion_build_desc),
+        .flags = SOC_OCCLUSION_BUILD_FLAG_NONE,
+        .frame = frame_desc,
+        .groups = &group,
+        .group_count = 1u,
+        .group_stride = sizeof(group),
+    };
+
+    return soc_occlusion_build(context, &build_desc, out_snapshot);
 }
 
 static int test_empty_frame_and_fail_open_inputs(void)
@@ -226,7 +264,11 @@ static int test_empty_frame_and_fail_open_inputs(void)
         make_aabb(-0.1f, -0.1f, 0.9f, 0.1f, 0.1f, 1.1f);
     soc_visibility w_zero_visibility = SOC_VISIBILITY_OCCLUDED;
     soc_visibility reversed_near_visibility = SOC_VISIBILITY_OCCLUDED;
+    soc_query_stats query_stats = {
+        .struct_size = sizeof(soc_query_stats),
+    };
     soc_context* context = NULL;
+    soc_snapshot* snapshot = NULL;
     size_t index;
 
     bounds[2].min.x = NAN;
@@ -236,28 +278,32 @@ static int test_empty_frame_and_fail_open_inputs(void)
     }
 
     CHECK_RESULT(create_context(7u, 5u, &context), SOC_RESULT_OK);
-    CHECK(begin_empty_frame(context, &frame_desc) == 0);
-
     CHECK_RESULT(
-        soc_visibility_test_aabbs(context, NULL, 0u, NULL),
+        build_empty_snapshot(context, &frame_desc, &snapshot),
         SOC_RESULT_OK
     );
-    CHECK(check_query_stats(context, 0u, 0u) == 0);
+
     CHECK_RESULT(
-        soc_visibility_test_aabbs(context, NULL, 1u, actual),
+        soc_snapshot_test_aabbs(snapshot, NULL, 0u, NULL, &query_stats),
+        SOC_RESULT_OK
+    );
+    CHECK(check_query_stats(&query_stats, 0u, 0u, 0u, 0u) == 0);
+    CHECK_RESULT(
+        soc_snapshot_test_aabbs(snapshot, NULL, 1u, actual, &query_stats),
         SOC_RESULT_INVALID_ARGUMENT
     );
     CHECK_RESULT(
-        soc_visibility_test_aabbs(context, bounds, 1u, NULL),
+        soc_snapshot_test_aabbs(snapshot, bounds, 1u, NULL, &query_stats),
         SOC_RESULT_INVALID_ARGUMENT
     );
-    CHECK(check_query_stats(context, 0u, 0u) == 0);
+    CHECK(check_query_stats(&query_stats, 0u, 0u, 0u, 0u) == 0);
     CHECK_RESULT(
-        soc_visibility_test_aabbs(
-            context,
+        soc_snapshot_test_aabbs(
+            snapshot,
             bounds,
             (uint32_t)ARRAY_COUNT(bounds),
-            actual
+            actual,
+            &query_stats
         ),
         SOC_RESULT_OK
     );
@@ -266,42 +312,58 @@ static int test_empty_frame_and_fail_open_inputs(void)
         expected,
         ARRAY_COUNT(expected)
     ) == 0);
-    CHECK(check_query_stats(context, ARRAY_COUNT(bounds), 0u) == 0);
-    CHECK_RESULT(soc_frame_end(context), SOC_RESULT_OK);
+    CHECK(check_query_stats(
+        &query_stats,
+        ARRAY_COUNT(bounds),
+        3u,
+        0u,
+        5u
+    ) == 0);
+    soc_snapshot_destroy(snapshot);
+    snapshot = NULL;
 
     /*
      * A finite, ordered AABB is still fail-open when its homogeneous
      * projection cannot produce a positive W.
      */
     frame_desc.clip_from_world.col3.w = 0.0f;
-    CHECK(begin_empty_frame(context, &frame_desc) == 0);
     CHECK_RESULT(
-        soc_visibility_test_aabbs(
-            context,
+        build_empty_snapshot(context, &frame_desc, &snapshot),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        soc_snapshot_test_aabbs(
+            snapshot,
             &finite_bounds,
             1u,
-            &w_zero_visibility
+            &w_zero_visibility,
+            &query_stats
         ),
         SOC_RESULT_OK
     );
     CHECK(w_zero_visibility == SOC_VISIBILITY_UNKNOWN);
-    CHECK(check_query_stats(context, 1u, 0u) == 0);
-    CHECK_RESULT(soc_frame_end(context), SOC_RESULT_OK);
+    CHECK(check_query_stats(&query_stats, 1u, 0u, 0u, 1u) == 0);
+    soc_snapshot_destroy(snapshot);
+    snapshot = NULL;
 
     frame_desc = make_frame_desc(SOC_DEPTH_REVERSED);
-    CHECK(begin_empty_frame(context, &frame_desc) == 0);
     CHECK_RESULT(
-        soc_visibility_test_aabbs(
-            context,
+        build_empty_snapshot(context, &frame_desc, &snapshot),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        soc_snapshot_test_aabbs(
+            snapshot,
             &reversed_near_crossing,
             1u,
-            &reversed_near_visibility
+            &reversed_near_visibility,
+            &query_stats
         ),
         SOC_RESULT_OK
     );
     CHECK(reversed_near_visibility == SOC_VISIBILITY_UNKNOWN);
-    CHECK(check_query_stats(context, 1u, 0u) == 0);
-    CHECK_RESULT(soc_frame_end(context), SOC_RESULT_OK);
+    CHECK(check_query_stats(&query_stats, 1u, 0u, 0u, 1u) == 0);
+    soc_snapshot_destroy(snapshot);
 
     soc_context_destroy(context);
     return 0;
@@ -336,8 +398,15 @@ static int test_fullscreen_depth_direction(
     };
     soc_visibility first_actual[ARRAY_COUNT(first_batch)] = {0};
     soc_visibility second_actual[ARRAY_COUNT(second_batch)] = {0};
+    soc_query_stats first_stats = {
+        .struct_size = sizeof(soc_query_stats),
+    };
+    soc_query_stats second_stats = {
+        .struct_size = sizeof(soc_query_stats),
+    };
     soc_context* context = NULL;
     soc_mesh* mesh = NULL;
+    soc_snapshot* snapshot = NULL;
 
     frame_desc.clip_depth_range = clip_depth_range;
     if (clip_depth_range == SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE &&
@@ -380,19 +449,24 @@ static int test_fullscreen_depth_direction(
         create_triangle_mesh(context, positions, &mesh),
         SOC_RESULT_OK
     );
-    CHECK_RESULT(soc_frame_begin(context, &frame_desc), SOC_RESULT_OK);
     CHECK_RESULT(
-        soc_occluders_submit(context, mesh, &identity, 1u),
+        build_single_group_snapshot(
+            context,
+            &frame_desc,
+            mesh,
+            &identity,
+            &snapshot
+        ),
         SOC_RESULT_OK
     );
-    CHECK_RESULT(soc_occluders_finish(context), SOC_RESULT_OK);
 
     CHECK_RESULT(
-        soc_visibility_test_aabbs(
-            context,
+        soc_snapshot_test_aabbs(
+            snapshot,
             first_batch,
             (uint32_t)ARRAY_COUNT(first_batch),
-            first_actual
+            first_actual,
+            &first_stats
         ),
         SOC_RESULT_OK
     );
@@ -401,14 +475,15 @@ static int test_fullscreen_depth_direction(
         first_expected,
         ARRAY_COUNT(first_expected)
     ) == 0);
-    CHECK(check_query_stats(context, 3u, 1u) == 0);
+    CHECK(check_query_stats(&first_stats, 3u, 2u, 1u, 0u) == 0);
 
     CHECK_RESULT(
-        soc_visibility_test_aabbs(
-            context,
+        soc_snapshot_test_aabbs(
+            snapshot,
             second_batch,
             (uint32_t)ARRAY_COUNT(second_batch),
-            second_actual
+            second_actual,
+            &second_stats
         ),
         SOC_RESULT_OK
     );
@@ -417,12 +492,9 @@ static int test_fullscreen_depth_direction(
         second_expected,
         ARRAY_COUNT(second_expected)
     ) == 0);
-    CHECK(check_query_stats(context, 5u, 2u) == 0);
+    CHECK(check_query_stats(&second_stats, 2u, 1u, 1u, 0u) == 0);
 
-    CHECK_RESULT(soc_frame_end(context), SOC_RESULT_OK);
-    CHECK(begin_empty_frame(context, &frame_desc) == 0);
-    CHECK(check_query_stats(context, 0u, 0u) == 0);
-    CHECK_RESULT(soc_frame_end(context), SOC_RESULT_OK);
+    soc_snapshot_destroy(snapshot);
     CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
     soc_context_destroy(context);
     return 0;
@@ -496,26 +568,35 @@ static int test_perspective_projection(void)
         SOC_VISIBILITY_UNKNOWN,
     };
     soc_visibility actual[ARRAY_COUNT(bounds)] = {0};
+    soc_query_stats query_stats = {
+        .struct_size = sizeof(soc_query_stats),
+    };
     soc_context* context = NULL;
     soc_mesh* mesh = NULL;
+    soc_snapshot* snapshot = NULL;
 
     CHECK_RESULT(create_context(9u, 6u, &context), SOC_RESULT_OK);
     CHECK_RESULT(
         create_triangle_mesh(context, positions, &mesh),
         SOC_RESULT_OK
     );
-    CHECK_RESULT(soc_frame_begin(context, &frame_desc), SOC_RESULT_OK);
     CHECK_RESULT(
-        soc_occluders_submit(context, mesh, &identity, 1u),
+        build_single_group_snapshot(
+            context,
+            &frame_desc,
+            mesh,
+            &identity,
+            &snapshot
+        ),
         SOC_RESULT_OK
     );
-    CHECK_RESULT(soc_occluders_finish(context), SOC_RESULT_OK);
     CHECK_RESULT(
-        soc_visibility_test_aabbs(
-            context,
+        soc_snapshot_test_aabbs(
+            snapshot,
             bounds,
             (uint32_t)ARRAY_COUNT(bounds),
-            actual
+            actual,
+            &query_stats
         ),
         SOC_RESULT_OK
     );
@@ -524,9 +605,15 @@ static int test_perspective_projection(void)
         expected,
         ARRAY_COUNT(expected)
     ) == 0);
-    CHECK(check_query_stats(context, ARRAY_COUNT(bounds), 1u) == 0);
+    CHECK(check_query_stats(
+        &query_stats,
+        ARRAY_COUNT(bounds),
+        2u,
+        1u,
+        1u
+    ) == 0);
 
-    CHECK_RESULT(soc_frame_end(context), SOC_RESULT_OK);
+    soc_snapshot_destroy(snapshot);
     CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
     soc_context_destroy(context);
     return 0;
@@ -566,26 +653,35 @@ static int test_partial_coverage_and_offscreen_are_conservative(void)
         SOC_VISIBILITY_VISIBLE,
     };
     soc_visibility actual[ARRAY_COUNT(bounds)] = {0};
+    soc_query_stats query_stats = {
+        .struct_size = sizeof(soc_query_stats),
+    };
     soc_context* context = NULL;
     soc_mesh* mesh = NULL;
+    soc_snapshot* snapshot = NULL;
 
     CHECK_RESULT(create_context(7u, 5u, &context), SOC_RESULT_OK);
     CHECK_RESULT(
         create_triangle_mesh(context, positions, &mesh),
         SOC_RESULT_OK
     );
-    CHECK_RESULT(soc_frame_begin(context, &frame_desc), SOC_RESULT_OK);
     CHECK_RESULT(
-        soc_occluders_submit(context, mesh, &identity, 1u),
+        build_single_group_snapshot(
+            context,
+            &frame_desc,
+            mesh,
+            &identity,
+            &snapshot
+        ),
         SOC_RESULT_OK
     );
-    CHECK_RESULT(soc_occluders_finish(context), SOC_RESULT_OK);
     CHECK_RESULT(
-        soc_visibility_test_aabbs(
-            context,
+        soc_snapshot_test_aabbs(
+            snapshot,
             bounds,
             (uint32_t)ARRAY_COUNT(bounds),
-            actual
+            actual,
+            &query_stats
         ),
         SOC_RESULT_OK
     );
@@ -594,9 +690,15 @@ static int test_partial_coverage_and_offscreen_are_conservative(void)
         expected,
         ARRAY_COUNT(expected)
     ) == 0);
-    CHECK(check_query_stats(context, ARRAY_COUNT(bounds), 1u) == 0);
+    CHECK(check_query_stats(
+        &query_stats,
+        ARRAY_COUNT(bounds),
+        3u,
+        1u,
+        0u
+    ) == 0);
 
-    CHECK_RESULT(soc_frame_end(context), SOC_RESULT_OK);
+    soc_snapshot_destroy(snapshot);
     CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
     soc_context_destroy(context);
     return 0;

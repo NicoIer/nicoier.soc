@@ -166,10 +166,6 @@ soc_result soc_mesh_create_internal(
     if (context == NULL) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
-    if (context->state != SOC_CONTEXT_STATE_IDLE) {
-        return SOC_RESULT_INVALID_STATE;
-    }
-
     result = validate_mesh_desc(desc);
     if (result != SOC_RESULT_OK) {
         return result;
@@ -249,10 +245,6 @@ soc_result soc_mesh_destroy_internal(soc_mesh* mesh)
     if (context == NULL) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
-    if (context->state != SOC_CONTEXT_STATE_IDLE) {
-        return SOC_RESULT_INVALID_STATE;
-    }
-
     link = &context->meshes;
     while (*link != NULL && *link != mesh) {
         link = &(*link)->next;

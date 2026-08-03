@@ -861,6 +861,7 @@ static int render(
     soc_cli_obj object;
     soc_context* context = NULL;
     soc_mesh* mesh = NULL;
+    soc_snapshot* snapshot = NULL;
     float* depth = NULL;
     unsigned char* pixels = NULL;
     size_t pixel_count;
@@ -868,8 +869,10 @@ static int render(
     soc_config config;
     soc_mesh_desc mesh_desc;
     soc_frame_desc frame_desc;
+    soc_occluder_group group;
+    soc_occlusion_build_desc build_desc;
     soc_hiz_level_info level_info;
-    soc_stats stats;
+    soc_build_stats stats;
     const soc_mat4 object_to_world = identity_matrix();
     uint64_t drawn_pixel_count = 0u;
     int success = 0;
@@ -963,26 +966,23 @@ static int render(
         .front_face = options->front_face,
         .flags = SOC_FRAME_FLAG_NONE,
     };
+    group = (soc_occluder_group){
+        .mesh = mesh,
+        .object_to_world = &object_to_world,
+        .instance_count = 1u,
+        .flags = SOC_OCCLUDER_GROUP_FLAG_NONE,
+    };
+    build_desc = (soc_occlusion_build_desc){
+        .struct_size = sizeof(soc_occlusion_build_desc),
+        .flags = SOC_OCCLUSION_BUILD_FLAG_NONE,
+        .frame = &frame_desc,
+        .groups = &group,
+        .group_count = 1u,
+        .group_stride = sizeof(soc_occluder_group),
+    };
     if (!check_result(
-            soc_frame_begin(context, &frame_desc),
-            "soc_frame_begin",
-            error,
-            error_capacity
-        ) ||
-        !check_result(
-            soc_occluders_submit(
-                context,
-                mesh,
-                &object_to_world,
-                1u
-            ),
-            "soc_occluders_submit",
-            error,
-            error_capacity
-        ) ||
-        !check_result(
-            soc_occluders_finish(context),
-            "soc_occluders_finish",
+            soc_occlusion_build(context, &build_desc, &snapshot),
+            "soc_occlusion_build",
             error,
             error_capacity
         )) {
@@ -992,14 +992,14 @@ static int render(
     memset(&level_info, 0, sizeof(level_info));
     level_info.struct_size = sizeof(level_info);
     if (!check_result(
-            soc_hiz_level_query(
-                context,
+            soc_snapshot_hiz_level_query(
+                snapshot,
                 0u,
                 &level_info,
                 depth,
                 (uint64_t)pixel_count
             ),
-            "soc_hiz_level_query",
+            "soc_snapshot_hiz_level_query",
             error,
             error_capacity
         )) {
@@ -1009,14 +1009,8 @@ static int render(
     memset(&stats, 0, sizeof(stats));
     stats.struct_size = sizeof(stats);
     if (!check_result(
-            soc_context_get_stats(context, &stats),
-            "soc_context_get_stats",
-            error,
-            error_capacity
-        ) ||
-        !check_result(
-            soc_frame_end(context),
-            "soc_frame_end",
+            soc_snapshot_get_build_stats(snapshot, &stats),
+            "soc_snapshot_get_build_stats",
             error,
             error_capacity
         )) {
@@ -1074,6 +1068,7 @@ static int render(
     success = 1;
 
 cleanup:
+    soc_snapshot_destroy(snapshot);
     if (mesh != NULL) {
         (void)soc_mesh_destroy(mesh);
     }

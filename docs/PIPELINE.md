@@ -1,110 +1,108 @@
-# 渲染流程框架
+# 遮挡构建与查询流程
 
-公共帧 API 是同步且有状态的：
+ABI 2 不再把一个可变 context 暴露为逐步推进的帧状态机。调用方通过借用的 frame
+描述符指针和完整 occluder groups 一次提交全部输入，库同步生成一个不可变 snapshot：
 
 ```text
-IDLE
-  |
-  | soc_frame_begin
-  v
-RECORDING_OCCLUDERS
-  |
-  | soc_occluders_submit（零次或多次）
-  | soc_occluders_finish
-  v
-QUERY_READY
-  |
-  | soc_visibility_test_aabbs（零次或多次）
-  | soc_hiz_level_query（零次或多次）
-  | soc_frame_end
-  v
-IDLE
+context + frame + all occluder groups
+                  |
+                  | soc_occlusion_build
+                  v
+          immutable soc_snapshot
+             /        |        \
+            v         v         v
+  test AABBs   get build stats   query Hi-Z
+            \         |         /
+                  read-only
+                     |
+                     v
+          soc_snapshot_destroy
 ```
 
-仅允许在 `IDLE` 状态下调整上下文大小，以及创建或销毁网格。
-上下文可随时销毁，销毁时会释放其关联的网格。
-创建网格时，会同步将位置和索引快照到上下文自有的存储空间，
-因此提交帧时绝不会读取调用方的原始缓冲区。
+## 当前实现
 
-## 当前框架行为
+`soc_occlusion_build()` 当前按以下顺序同步执行：
 
-- `soc_frame_begin` 验证帧描述并清空第 0 层级。
-- `soc_occluders_submit` 对每个实例执行变换，在齐次裁剪体中裁剪三角形，
-  并依据正面绕序设置执行背面剔除，或按网格启用双面处理，再以标量方式将深度
-  光栅化到第 0 层级。
-- `soc_occluders_finish` 结束记录，并同步构建全部 Hi-Z 派生层级；只有构建完成后，
-  上下文才进入 `QUERY_READY`。
-- `soc_visibility_test_aabbs` 投影有效的世界空间 AABB，保守选择 Hi-Z 层级，并仅在
-  严格证明完整投影位于遮挡深度之后时将结果写为 `SOC_VISIBILITY_OCCLUDED`。
-- `soc_hiz_level_query` 返回第 0 层级的光栅化深度，或由它实际归约得到的任一
-  Hi-Z 派生层级。
-- `soc_frame_end` 将上下文恢复为 `IDLE` 状态。
+1. 验证 build、frame、group stride、mesh owner 和计数；
+2. 按 context 当前尺寸为候选 snapshot 分配完整深度金字塔；
+3. 根据正向或反向 Z 清除 Level 0；
+4. 依次处理所有非空 group 和实例；
+5. 执行对象到世界、世界到裁剪空间的变换；
+6. 在齐次裁剪体中裁剪三角形；
+7. 执行背面和退化剔除，并以标量方式写入 Level 0 深度；
+8. 同步构建全部派生 Hi-Z 层级；
+9. 冻结 frame 与 build stats，并发布 snapshot。
 
-可见性查询采用保守的默认放行策略：非法、非有限、横跨近平面或无法可靠投影的
-AABB 返回 `SOC_VISIBILITY_UNKNOWN`；可投影但无法严格证明被遮挡的 AABB 返回
-`SOC_VISIBILITY_VISIBLE`。调用方只应剔除恰好返回
-`SOC_VISIBILITY_OCCLUDED` 的对象。
+这仍是同步、单线程、双精度中间计算的标量正确性路径。一次性 build 和 snapshot
+所有权为未来的 SIMD、分块、多线程或异步构建提供稳定边界，但 ABI 2 的当前实现
+尚未执行这些优化。
 
-统计信息会记录提交的源三角形、因齐次裁剪而发生变化或被拒绝的源三角形，
-以及通过面朝向与退化检查的裁剪后扇形剖分三角形。光栅化三角形的计数并不
-意味着该三角形曾在任一采样点的深度测试中胜出。统计还会记录成功查询的
-AABB 总数以及其中被严格证明遮挡的数量；这些计数随每帧开始而清零。
+## Occluder groups
 
-## 光栅化范围
+每个 `soc_occluder_group` 将一个不可变 mesh 与连续的 `object_to_world` 矩阵数组
+配对。`soc_occlusion_build_desc` 的 group 数组代表本次 build 的完整遮挡物输入，
+因此调用方应在一次调用中提供所有 group，而不是逐对象调用库。
 
-当前用于保证正确性的标量路径提供以下功能：
+`group_count == 0` 会构建一个只有清除深度的有效 snapshot。单个 group 的
+`instance_count == 0` 也是合法 no-op，其 mesh 和 transform 指针可以为空。
+非空 group 的 mesh 必须属于执行 build 的 context。
 
-1. 帧初始化和深度清除；
-2. 逐实例执行从对象空间到裁剪空间的变换；
-3. 齐次三角形裁剪；
-4. 根据正面绕序执行背面剔除，并支持按网格启用双面处理；
-5. 正向 Z 或反向 Z 深度光栅化；
-6. 在结束遮挡物记录时同步构建完整的 Hi-Z 深度金字塔；
-7. 使用投影 AABB 和 Hi-Z 执行保守遮挡判定；
-8. 帧清理。
+frame 描述符、group、transform 和 mesh 仅在同步 build 期间被读取。成功返回后
+snapshot 已复制 frame 约定并拥有完整结果，不再依赖这些输入。
 
-经过优化的 SIMD、分块和多线程路径必须保持标量路径的可观测行为。
+## Snapshot 独立性
+
+snapshot 保存自己的深度金字塔、frame 约定和 build stats。它不会借用 context 的
+Level 0，也不会引用参与 build 的 mesh。因此下列操作都不会使已有 snapshot 失效：
+
+- 销毁参与 build 的 mesh；
+- 调整 context 尺寸；
+- 使用同一 context 构建其他 snapshot；
+- 销毁 context。
+
+resize 仅决定后续 snapshot 的尺寸。多个 snapshot 可以拥有不同尺寸并同时被查询。
+
+## Build 原子性与统计
+
+库只在 Level 0、Hi-Z 和统计全部完成后发布 snapshot。build 失败时输出 snapshot
+保持为空，已存在的 snapshot 和 context/mesh 逻辑状态不变。
+
+`soc_build_stats` 只描述构建阶段，并随 snapshot 冻结。它记录源三角形数、因齐次
+裁剪改变或拒绝的源三角形数，以及通过朝向和退化检查的裁剪后扇形三角形数。
+`rasterized_triangle_count` 不表示三角形曾在任何采样点赢得深度测试。
+
+`soc_query_stats` 则只描述一次 `soc_snapshot_test_aabbs()` 调用。查询不会修改
+snapshot，也不会在 context 或 snapshot 中累计计数。这使同一 snapshot 可以被多个
+调用方并发只读查询。
 
 ## AABB 遮挡判定
 
-查询先验证世界空间 AABB 的所有分量均为有限值且 `min <= max`，再使用当前帧的
-`clip_from_world` 变换八个角点。任何非有限的变换结果，以及横跨近平裁剪平面或
-其他无法形成可靠透视投影的情况，都直接得到 `SOC_VISIBILITY_UNKNOWN`。这类结果
-不会被用于剔除。
+查询先验证 AABB 的所有分量均为有限值且 `min <= max`，再用 snapshot 保存的
+`clip_from_world` 变换八个角点。非有限变换结果、横跨近平裁剪面或其他无法可靠投影
+的情况得到 `SOC_VISIBILITY_UNKNOWN`，保持 fail-open。
 
-对于可安全投影的 AABB，查询保守计算其屏幕矩形与最靠近相机的包围盒深度，并选择
-能够覆盖该矩形的 Hi-Z 层级。选择的层级及其覆盖采样不得漏掉投影触及的第 0 层级
-像素。只有所有必要的 Hi-Z 深度都能证明包围盒在遮挡物之后时，查询才返回
-`SOC_VISIBILITY_OCCLUDED`。正向 Z 使用严格的“包围盒深度大于遮挡深度”关系，
-反向 Z 使用严格的“包围盒深度小于遮挡深度”关系；相等或无法证明时返回
-`SOC_VISIBILITY_VISIBLE`。
+对于可安全投影的 AABB，查询保守计算屏幕矩形和最靠近相机的包围盒深度，并选择
+覆盖该矩形的 Hi-Z 层级。只有全部必要采样都严格证明包围盒位于遮挡深度之后，才
+返回 `SOC_VISIBILITY_OCCLUDED`。正向 Z 使用严格的大于关系，反向 Z 使用严格的
+小于关系；相等或无法证明时返回 `SOC_VISIBILITY_VISIBLE`。
 
-两种裁剪深度范围均沿用遮挡物光栅化的帧约定：
-`SOC_CLIP_DEPTH_ZERO_TO_ONE` 直接使用 `[0, 1]` 深度，
-`SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE` 则在投影后映射到 `[0, 1]`。因此同一套
-严格遮挡规则可以与 `SOC_DEPTH_FORWARD` 和 `SOC_DEPTH_REVERSED` 的任意受支持
-组合配合使用。
+## Hi-Z 层级
 
-## Hi-Z 层级查询
-
-查询仅在 `QUERY_READY` 状态下有效，且必须位于 `soc_occluders_finish()`
-之后、`soc_frame_end()` 之前。
-
-首先在不提供目标缓冲区的情况下查询元数据：
+先查询元数据：
 
 ```c
 soc_hiz_level_info info = {
     .struct_size = sizeof(soc_hiz_level_info),
 };
 
-soc_hiz_level_query(context, level, &info, NULL, 0u);
+soc_snapshot_hiz_level_query(snapshot, level, &info, NULL, 0u);
 ```
 
-然后分配可容纳 `info.required_element_count` 个 `float` 的空间，并再次查询：
+再分配 `info.required_element_count` 个 `float` 并复制数据：
 
 ```c
-soc_hiz_level_query(
-    context,
+soc_snapshot_hiz_level_query(
+    snapshot,
     level,
     &info,
     depth,
@@ -112,12 +110,6 @@ soc_hiz_level_query(
 );
 ```
 
-深度数据采用紧密排列，并以行主序存储。第 0 层级使用上下文分辨率，
-其中包含以标量方式光栅化的深度图像。若上一层尺寸为 `w x h`，下一层尺寸为
-`ceil(w / 2) x ceil(h / 2)`，如此递归直至 `1 x 1`。
-
-每个派生层级像素归约上一层对应的 `2 x 2` 子区域。对于非二次幂（NPOT）尺寸，
-右边缘或下边缘可能不足四个子项；归约只包含仍在上一层范围内的有效子项，不会
-使用清除深度或其他虚拟值进行填充。正向 Z 取有效子项的最大深度，反向 Z 取
-有效子项的最小深度。正向 Z 的第 0 层级清除深度为 `1.0`，反向 Z 为 `0.0`。
-`soc_occluders_finish()` 返回成功时，所有这些层级均已同步构建完成并可供查询。
+输出采用紧密行主序。Level 0 使用 build 时的 context 尺寸；每个下一层宽高均为
+上一层的 `ceil(value / 2)`，直至 `1 x 1`。正向 Z 取对应有效子项的最大深度，
+反向 Z 取最小深度；NPOT 的右侧和底部不会以虚拟子项补齐。

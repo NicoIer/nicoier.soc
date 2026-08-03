@@ -8,6 +8,15 @@
 `soc` 是一个使用 C17 编写的 CPU Hi-Z 遮挡剔除库。它提供稳定的 C ABI，
 可供原生程序调用，也支持与 Unity/C# 互操作。
 
+当前 ABI 2 使用一次性 `soc_occlusion_build()`：调用方提供完整 frame 和全部
+occluder groups，库同步生成不可变 `soc_snapshot`。可见性、build stats 和 Hi-Z
+均通过 snapshot 查询。snapshot 拥有自己的结果，可以在参与 build 的 mesh 被销毁、
+context 被 resize 或销毁后继续使用；查询统计按每次调用返回，不修改 snapshot。
+
+当前 build 算法仍是同步、单线程的标量正确性实现。snapshot 模型为后续 SIMD、
+分块、多线程和异步扩展预留边界，但不代表这些优化已经启用。完整调用和生命周期
+约定见 [ABI 策略](docs/ABI.md) 与 [遮挡构建与查询流程](docs/PIPELINE.md)。
+
 ## 构建
 
 ```sh

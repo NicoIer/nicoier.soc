@@ -1,0 +1,112 @@
+#include "core/soc_snapshot.h"
+
+#include "occlusion/soc_visibility.h"
+
+#include <stddef.h>
+#include <stdlib.h>
+
+void soc_snapshot_destroy_internal(soc_snapshot* snapshot)
+{
+    if (snapshot == NULL) {
+        return;
+    }
+
+    soc_hiz_shutdown(&snapshot->depth_pyramid);
+    free(snapshot);
+}
+
+soc_result soc_snapshot_test_aabbs_internal(
+    const soc_snapshot* snapshot,
+    const soc_aabb* world_bounds,
+    uint32_t bounds_count,
+    soc_visibility* out_visibility,
+    soc_query_stats* out_stats
+)
+{
+    uint64_t occluded_count;
+    soc_result result;
+    uint64_t visible_count = 0u;
+    uint64_t unknown_count = 0u;
+    uint32_t index;
+
+    if (snapshot == NULL ||
+        (out_stats != NULL &&
+            out_stats->struct_size < SOC_QUERY_STATS_SIZE_V1)) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+    if (bounds_count != 0u &&
+        (world_bounds == NULL || out_visibility == NULL)) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+
+    result = soc_occlusion_test_aabbs(
+        &snapshot->depth_pyramid,
+        &snapshot->frame,
+        world_bounds,
+        bounds_count,
+        out_visibility,
+        &occluded_count
+    );
+    if (result != SOC_RESULT_OK) {
+        return result;
+    }
+
+    for (index = 0u; index < bounds_count; ++index) {
+        if (out_visibility[index] == SOC_VISIBILITY_UNKNOWN) {
+            ++unknown_count;
+        } else if (out_visibility[index] == SOC_VISIBILITY_VISIBLE) {
+            ++visible_count;
+        }
+    }
+
+    if (out_stats != NULL) {
+        out_stats->reserved = 0u;
+        out_stats->tested_aabb_count = bounds_count;
+        out_stats->visible_aabb_count = visible_count;
+        out_stats->occluded_aabb_count = occluded_count;
+        out_stats->unknown_aabb_count = unknown_count;
+    }
+    return SOC_RESULT_OK;
+}
+
+soc_result soc_snapshot_get_build_stats_internal(
+    const soc_snapshot* snapshot,
+    soc_build_stats* out_stats
+)
+{
+    if (snapshot == NULL ||
+        out_stats == NULL ||
+        out_stats->struct_size < SOC_BUILD_STATS_SIZE_V1) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+
+    out_stats->hiz_level_count = snapshot->build_stats.hiz_level_count;
+    out_stats->input_triangle_count =
+        snapshot->build_stats.input_triangle_count;
+    out_stats->clipped_triangle_count =
+        snapshot->build_stats.clipped_triangle_count;
+    out_stats->rasterized_triangle_count =
+        snapshot->build_stats.rasterized_triangle_count;
+    return SOC_RESULT_OK;
+}
+
+soc_result soc_snapshot_hiz_level_query_internal(
+    const soc_snapshot* snapshot,
+    uint32_t level,
+    soc_hiz_level_info* out_info,
+    float* out_depth,
+    uint64_t out_depth_count
+)
+{
+    if (snapshot == NULL) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+
+    return soc_hiz_query(
+        &snapshot->depth_pyramid,
+        level,
+        out_info,
+        out_depth,
+        out_depth_count
+    );
+}

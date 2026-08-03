@@ -39,10 +39,10 @@
 | `src/raster/soc_rasterizer.c` | `soc_rasterizer_initialize()` / `resize()` / `shutdown()` | 管理 rasterizer 生命周期和借用的 Level 0 指针 | 后续 scratch/tile storage 必须在这些方法中事务性管理 |
 | `src/raster/soc_rasterizer.c` | `soc_rasterizer_begin_frame()` | 保存 frame 配置并清除 Level 0 | 后续 tile state 也应在这里重置 |
 | `src/raster/soc_rasterizer.c` | `soc_rasterizer_submit_occluders()` | 遍历实例/三角形并串联全部阶段 | 当前优化的主要入口 |
-| `src/raster/soc_rasterizer.c` | `soc_rasterizer_finish_occluders()` | 当前只验证状态 | 可作为未来任务收尾点，但不得随意改变统计可见时机 |
+| `src/raster/soc_rasterizer.c` | `soc_rasterizer_finish_occluders()` | 当前只验证状态 | 可作为未来内部任务收尾点；公开统计仅在 snapshot 发布后可见 |
 | `src/core/soc_mesh.c` | `soc_mesh_create_internal()` | 验证并复制 position/index snapshot | 可计算 bounds、cluster 和顶点复用信息 |
-| `src/core/soc_pipeline.c` | `soc_occluders_submit_internal()` | 调用 rasterizer，并将计数复制到公开 stats | 并行或延迟执行不得破坏统计可见时机 |
-| `src/core/soc_context.c` | `soc_context_create_internal()` | 创建 Hi-Z 和 rasterizer | 当前拒绝 `worker_count > 1` |
+| `src/core/soc_pipeline.c` | `soc_occlusion_build_internal()` | 验证完整 group 数组、驱动 rasterizer/Hi-Z 并发布 snapshot | 候选 snapshot 必须完整成功后再公开 |
+| `src/core/soc_context.c` | `soc_context_create_internal()` | 保存未来 build 的尺寸、worker 配置和 mesh owner | 当前拒绝 `worker_count > 1` |
 
 ### 推荐的内部调用分层
 
@@ -96,7 +96,7 @@ soc_rasterizer_submit_occluders()
 - 2,072 个裁剪后扇形三角形进入光栅化；
 - 27,624 个像素写入深度。
 
-当前默认 15 样本、每样本至少 200 ms 的 submit 基线为：
+当前默认 15 样本、每样本至少 200 ms 的光栅阶段基线为：
 
 | 指标 | 结果 |
 | --- | ---: |
@@ -107,9 +107,10 @@ soc_rasterizer_submit_occluders()
 | Max | 311.712 us |
 | Level 0 checksum | `2db3aca647f29990` |
 
-运行方法见 `benchmarks/README.md` 的“真实 OBJ 深度提交基准”。该基准仅计量
-`soc_occluders_submit()`；OBJ 解析、mesh/context 创建、Level 0 清除、Hi-Z
-构建、深度读回和校验均位于计时区外。
+运行方法见 `benchmarks/README.md` 的真实 OBJ 基准。该数字来自 ABI 2 切换前对
+内部遮挡物光栅阶段的独立计时；OBJ 解析、mesh/context 创建、Level 0 清除、Hi-Z
+构建、深度读回和校验均位于计时区外。ABI 2 的公开 `soc_occlusion_build()` 会同步
+包含清除、光栅和 Hi-Z，因此不能把该数字直接解释为完整公开 build 延迟。
 
 ## 第一阶段：裁剪和提交快速路径
 
@@ -286,7 +287,7 @@ mesh vertex index -> transformed clip-space vertex
 
 - triangle soup 没有顶点复用，缓存收益可能为零；
 - scratch memory 不宜在计时中的 submit 临时分配；
-- 可在 context 空闲期或 mesh 创建阶段扩容 reusable scratch；
+- 可在调用方保证没有并发 context 操作时或 mesh 创建阶段扩容 reusable scratch；
 - 应增加 shared-grid/shared-index benchmark，避免只用 triangle soup 评估。
 
 **对应现有方法和结构**
@@ -294,7 +295,8 @@ mesh vertex index -> transformed clip-space vertex
 - `transform_vertex()`：继续作为单顶点参考变换方法；
 - `soc_rasterizer_submit_occluders()`：实例开始时先填充 transformed vertex cache；
 - `soc_rasterizer_initialize()` / `soc_rasterizer_shutdown()`：初始化和释放 scratch；
-- `soc_mesh_create_internal()`：在 context 处于 IDLE 时，根据新 mesh 的
+- `soc_mesh_create_internal()`：若未来将 reusable scratch 明确放入 context，则在
+  调用方保证同一 context 没有并发 build、resize 或 destroy 时，根据新 mesh 的
   `vertex_count` 请求扩容；
 - `soc_rasterizer`：记录 scratch pointer 和 capacity。
 
@@ -743,11 +745,11 @@ clip 和统计逻辑；SIMD 只替换能够逐位或保守等价的计算内核�
 - `soc_context_create_internal()`：当前在 `worker_count > 1` 时返回 unsupported；未来在
   这里创建 worker pool，并保存实际 worker count；
 - `soc_context_destroy_internal()`：停止并回收 worker；
-- `soc_context_resize_internal()`：resize 前等待 raster work 完成，并事务性替换 tile；
+- `soc_context_resize_internal()`：只改变未来 build 尺寸；已有 snapshot 与任务存储独立；
 - `soc_rasterizer_submit_occluders()`：完成 transform/clip/setup 和 tile binning；
 - `soc_rasterizer_finish_occluders()`：等待 tile jobs，并在返回前保证 Level 0 完整；
-- `soc_occluders_submit_internal()`：当前在 submit 返回后立即复制 rasterizer stats，
-  并累加 input triangle count；并行设计必须保持此时的统计可观察行为。
+- `soc_occlusion_build_internal()`：一次看到全部 group，并且只在 raster、Hi-Z 和
+  `soc_build_stats` 均完整后发布不可变 snapshot。
 
 **建议新增平台和 raster 方法**
 
@@ -767,13 +769,12 @@ static soc_result bin_raster_triangle(
 static void rasterize_tile_job(void* user_data, uint32_t tile_index);
 ```
 
-最保守的第一版可以让 `soc_rasterizer_submit_occluders()` 完成全部 setup/binning 后，
-立即派发并等待 tile jobs，再返回给 `soc_occluders_submit_internal()`。这样不改变
-submit 后统计已经完整的语义。等行为和收益稳定后，再评估是否把等待移动到
-`soc_rasterizer_finish_occluders()`；若移动等待，必须确认公开
-`soc_context_get_stats()` 在 `RECORDING_OCCLUDERS` 状态下的结果不会发生不兼容变化。
+ABI 2 当前仍要求 `soc_occlusion_build()` 同步返回，因此第一版并行实现应在内部完成
+setup/binning、派发 tile jobs、等待 Level 0 与 Hi-Z 完成，再一次性发布 snapshot。
+未来若增加异步 build，可以复用相同 snapshot 发布边界；build stats 与 query stats
+已经分离，不需要维护 ABI 1 的中途统计可见时机。
 
-每个 tile 只能由一个 job 写入，triangle 在 tile 内的顺序最好保持原 submit 顺序。
+每个 tile 只能由一个 job 写入，triangle 在 tile 内的顺序最好保持原 group/instance 顺序。
 虽然严格 min/max depth 在数学上与顺序无关，但浮点 tie、统计和未来扩展都更容易在
 稳定顺序下保持确定性。
 
@@ -951,7 +952,8 @@ static int test_tile_early_z_matches_reference(void);
 
 - `benchmarks/soc_bench.c::workload_run_timed()` 测量合成 geometry/fill/overdraw/
   instance 路径；
-- `benchmarks/soc_obj_bench.c::run_submit()` 测量带真实 OBJ metadata 的纯 submit；
+- `benchmarks/soc_obj_bench.c::run_submit()` 是历史命名，测量带真实 OBJ metadata 的
+  内部光栅工作；完整 ABI 2 build 还包括 clear、Hi-Z 和 snapshot 分配；
 - `benchmarks/soc_obj_bench.c::capture_validation()` 在计时前后核对统计、drawn pixels
   和 Level 0 checksum。
 

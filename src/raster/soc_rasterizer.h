@@ -9,7 +9,7 @@ typedef struct soc_rasterizer {
     uint32_t width;
     uint32_t height;
     size_t depth_element_count;
-    /* Borrowed Level 0 storage owned by the context's depth pyramid. */
+    /* Borrowed Level 0 storage owned by the in-progress snapshot. */
     float* depth;
     uint64_t clipped_triangle_count;
     uint64_t rasterized_triangle_count;
