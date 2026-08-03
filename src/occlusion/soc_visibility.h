@@ -31,8 +31,8 @@ typedef struct soc_aabb_query_context {
     ];
     soc_visibility_world_plane w_plane;
     double transform_error_scale;
-    uint32_t near_plane;
-    uint32_t near_plane_bit;
+    uint32_t near_clip_plane_index;
+    uint32_t near_clip_plane_bit;
     soc_clip_depth_range clip_depth_range;
     soc_depth_direction depth_direction;
 } soc_aabb_query_context;

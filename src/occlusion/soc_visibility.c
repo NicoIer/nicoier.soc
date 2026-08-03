@@ -189,10 +189,12 @@ void soc_aabb_query_context_initialize(
         .clip_planes = {{0.0, 0.0, 0.0, 0.0}},
         .w_plane = {0.0, 0.0, 0.0, 0.0},
         .transform_error_scale = 0.0,
-        .near_plane = frame->depth_direction == SOC_DEPTH_REVERSED
+        .near_clip_plane_index =
+            frame->depth_direction == SOC_DEPTH_REVERSED
             ? 5u
             : 4u,
-        .near_plane_bit = frame->depth_direction == SOC_DEPTH_REVERSED
+        .near_clip_plane_bit =
+            frame->depth_direction == SOC_DEPTH_REVERSED
             ? SOC_CLIP_MAXIMUM_Z_BIT
             : SOC_CLIP_MINIMUM_Z_BIT,
         .clip_depth_range = frame->clip_depth_range,
@@ -316,11 +318,11 @@ static soc_aabb_projection project_aabb(
     soc_visibility_clip_vertex axis_z;
     uint32_t all_outside_mask = SOC_CLIP_ALL_BITS;
     soc_bool has_nonpositive_w = SOC_FALSE;
-    soc_bool has_near_plane_outside_corner = SOC_FALSE;
+    soc_bool has_corner_outside_near_clip_plane = SOC_FALSE;
     soc_bool use_direct_corners = SOC_FALSE;
     double bounds_scale = 1.0;
     double minimum_w = DBL_MAX;
-    double minimum_near_distance;
+    double minimum_near_clip_distance;
     double clip_error_margin;
     double projection_margin;
     uint32_t corner;
@@ -382,12 +384,12 @@ static soc_aabb_projection project_aabb(
         }
     }
     minimum_w = minimum_plane_distance(&query->w_plane, bounds);
-    minimum_near_distance = minimum_plane_distance(
-        &query->clip_planes[query->near_plane],
+    minimum_near_clip_distance = minimum_plane_distance(
+        &query->clip_planes[query->near_clip_plane_index],
         bounds
     );
     if (finite_double(minimum_w) != SOC_TRUE ||
-        finite_double(minimum_near_distance) != SOC_TRUE) {
+        finite_double(minimum_near_clip_distance) != SOC_TRUE) {
         return SOC_AABB_PROJECTION_UNKNOWN;
     }
     if (minimum_w < -clip_error_margin) {
@@ -395,9 +397,9 @@ static soc_aabb_projection project_aabb(
     } else if (minimum_w <= clip_error_margin) {
         use_direct_corners = SOC_TRUE;
     }
-    if (minimum_near_distance < -clip_error_margin) {
-        has_near_plane_outside_corner = SOC_TRUE;
-    } else if (minimum_near_distance <= clip_error_margin) {
+    if (minimum_near_clip_distance < -clip_error_margin) {
+        has_corner_outside_near_clip_plane = SOC_TRUE;
+    } else if (minimum_near_clip_distance <= clip_error_margin) {
         use_direct_corners = SOC_TRUE;
     }
 
@@ -409,7 +411,7 @@ static soc_aabb_projection project_aabb(
     if (use_direct_corners == SOC_TRUE) {
         all_outside_mask = SOC_CLIP_ALL_BITS;
         has_nonpositive_w = SOC_FALSE;
-        has_near_plane_outside_corner = SOC_FALSE;
+        has_corner_outside_near_clip_plane = SOC_FALSE;
         minimum_w = DBL_MAX;
 
         for (corner = 0u; corner < SOC_AABB_CORNER_COUNT; ++corner) {
@@ -425,7 +427,7 @@ static soc_aabb_projection project_aabb(
             soc_visibility_clip_vertex* clip = &clip_corners[corner];
             double minimum_z_distance;
             double maximum_z_distance;
-            double near_distance;
+            double near_clip_distance;
 
             *clip = transform_point(query, x, y, z);
             if (finite_clip_vertex(clip) != SOC_TRUE) {
@@ -436,8 +438,8 @@ static soc_aabb_projection project_aabb(
                     ? clip->z
                     : clip->z + clip->w;
             maximum_z_distance = clip->w - clip->z;
-            near_distance =
-                query->near_plane_bit == SOC_CLIP_MAXIMUM_Z_BIT
+            near_clip_distance =
+                query->near_clip_plane_bit == SOC_CLIP_MAXIMUM_Z_BIT
                     ? maximum_z_distance
                     : minimum_z_distance;
 
@@ -462,8 +464,8 @@ static soc_aabb_projection project_aabb(
             if (clip->w <= 0.0) {
                 has_nonpositive_w = SOC_TRUE;
             }
-            if (near_distance < 0.0) {
-                has_near_plane_outside_corner = SOC_TRUE;
+            if (near_clip_distance < 0.0) {
+                has_corner_outside_near_clip_plane = SOC_TRUE;
             }
             minimum_w = clip->w < minimum_w ? clip->w : minimum_w;
         }
@@ -472,8 +474,8 @@ static soc_aabb_projection project_aabb(
     if (has_nonpositive_w == SOC_TRUE) {
         return SOC_AABB_PROJECTION_UNKNOWN;
     }
-    if (has_near_plane_outside_corner == SOC_TRUE &&
-        (all_outside_mask & query->near_plane_bit) == 0u) {
+    if (has_corner_outside_near_clip_plane == SOC_TRUE &&
+        (all_outside_mask & query->near_clip_plane_bit) == 0u) {
         return SOC_AABB_PROJECTION_UNKNOWN;
     }
     if (all_outside_mask != 0u) {
