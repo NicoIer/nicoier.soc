@@ -35,30 +35,28 @@ _Static_assert(
     offsetof(soc_frame_desc, clip_from_world) == 4u,
     "soc_frame_desc matrix offset changed"
 );
-
-static int test_constants(void)
-{
-    if (SOC_FALSE != 0u || SOC_TRUE == 0u) {
-        return 1;
-    }
-    if (SOC_RESULT_OK != 0 || SOC_RESULT_INVALID_ARGUMENT >= 0) {
-        return 1;
-    }
-    if (SOC_VISIBILITY_UNKNOWN != 0u) {
-        return 1;
-    }
-    if (SOC_VISIBILITY_VISIBLE == SOC_VISIBILITY_OCCLUDED) {
-        return 1;
-    }
-    if (SOC_ABI_VERSION !=
-        ((SOC_ABI_VERSION_MAJOR << 16u) | SOC_ABI_VERSION_MINOR)) {
-        return 1;
-    }
-
-    return 0;
-}
+_Static_assert(SOC_FALSE == 0u, "SOC_FALSE must be zero");
+_Static_assert(SOC_TRUE != 0u, "SOC_TRUE must be nonzero");
+_Static_assert(SOC_RESULT_OK == 0, "SOC_RESULT_OK must be zero");
+_Static_assert(
+    SOC_RESULT_INVALID_ARGUMENT < 0,
+    "error results must be negative"
+);
+_Static_assert(
+    SOC_VISIBILITY_UNKNOWN == 0u,
+    "unknown visibility must be zero"
+);
+_Static_assert(
+    SOC_VISIBILITY_VISIBLE != SOC_VISIBILITY_OCCLUDED,
+    "visible and occluded values must differ"
+);
+_Static_assert(
+    SOC_ABI_VERSION ==
+        ((SOC_ABI_VERSION_MAJOR << 16u) | SOC_ABI_VERSION_MINOR),
+    "SOC_ABI_VERSION encoding changed"
+);
 
 int main(void)
 {
-    return test_constants();
+    return 0;
 }
