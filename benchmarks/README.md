@@ -11,12 +11,15 @@ tests 时，CTest 会注册 `soc.bench.validate`，只运行确定性的 `--vali
 建议使用干净的 Release 共享库构建：
 
 ```sh
+export SOC_APPLE_SDK="$(xcrun --sdk macosx --show-sdk-path)"
+
 cmake -S . -B build-bench \
   -DCMAKE_BUILD_TYPE=Release \
   -DSOC_BUILD_BENCHMARKS=ON \
   -DSOC_BUILD_TESTS=ON \
   -DSOC_BUILD_TOOLS=OFF \
   -DSOC_BUILD_SHARED=ON
+
 cmake --build build-bench --config Release
 ctest --test-dir build-bench --output-on-failure
 ```
@@ -38,6 +41,37 @@ Xcode 或 Ninja Multi-Config 的可执行文件通常位于
 ./build-bench/benchmarks/soc_bench --list
 ```
 
+### 真实 OBJ 深度提交基准
+
+`soc_obj_bench` 读取带有 `# SOC benchmark OBJ v1` 元数据头的 OBJ，使用文件中
+记录的分辨率、裁剪深度范围、深度方向、正面绕序、双面标志和
+`camera_clip_from_world_col_major`。OBJ 解析、mesh/context 创建、Level 0 清除、
+Hi-Z 构建、深度读回和结果校验均位于计时区外；每个 operation 只计量
+`soc_occluders_submit()`，并在每轮使用重新清除的深度缓冲区。
+
+在 macOS 上，从仓库根目录复制执行以下一段 Shell，即可用 `test002.obj` 完成
+Release 静态构建和性能测试：
+
+```sh
+cmake -S . -B build-bench-obj \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DSOC_APPLE_SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)" \
+  -DSOC_BUILD_BENCHMARKS=ON \
+  -DSOC_BUILD_TESTS=OFF \
+  -DSOC_BUILD_TOOLS=OFF \
+  -DSOC_BUILD_SHARED=OFF && \
+cmake --build build-bench-obj \
+  --config Release --target soc_obj_bench --parallel && \
+./build-bench-obj/benchmarks/soc_obj_bench \
+  --input examples/test002.obj
+```
+
+默认执行 15 个样本，每个样本累计至少 200 ms 的 submit 时间；可通过
+`--samples N --sample-ms N` 调整。输出包含 median、P95、MAD、min/max，以及
+输入/裁剪/光栅化三角形计数、写入深度的像素数和 Level 0 checksum。Linux 和
+Windows 使用相同命令，但应省略 `SOC_APPLE_SDK_PATH` 这一行；多配置生成器的
+可执行文件可能位于 `build-bench-obj/benchmarks/Release/`。
+
 主要参数：
 
 - `--suite smoke|core|full`：选择 5 项快速冒烟、38 项稳态回归或 47 项完整
@@ -52,7 +86,7 @@ Xcode 或 Ninja Multi-Config 的可执行文件通常位于
 
 ## Workloads
 
-所有场景都在内存中确定性生成，不依赖 OBJ、trace 或网络资源：
+`soc_bench` 的内置场景都在内存中确定性生成，不依赖 OBJ、trace 或网络资源：
 
 - 空帧 clear 和 Hi-Z：多种 POT/NPOT 分辨率以及 forward/reversed Z。
 - geometry：16,384 个小三角形的视锥内、近平面裁剪、背面和退化路径。

@@ -3,8 +3,23 @@ target_link_libraries(soc_bench PRIVATE soc::soc)
 target_compile_features(soc_bench PRIVATE c_std_17)
 soc_enable_warnings(soc_bench)
 
+add_executable(
+    soc_obj_bench
+    soc_obj_bench.c
+    "${PROJECT_SOURCE_DIR}/tools/soc_cli_obj.c"
+)
+target_include_directories(
+    soc_obj_bench
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/tools"
+)
+target_link_libraries(soc_obj_bench PRIVATE soc::soc)
+target_compile_features(soc_obj_bench PRIVATE c_std_17)
+soc_enable_warnings(soc_obj_bench)
+
 if(UNIX)
     target_link_libraries(soc_bench PRIVATE m)
+    target_link_libraries(soc_obj_bench PRIVATE m)
 endif()
 
 if(SOC_BUILD_SHARED)
