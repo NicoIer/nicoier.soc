@@ -77,14 +77,18 @@ snapshot，也不会在 context 或 snapshot 中累计计数。这使同一 snap
 
 ## AABB 遮挡判定
 
-查询先验证 AABB 的所有分量均为有限值且 `min <= max`，再用 snapshot 保存的
-`clip_from_world` 变换八个角点。非有限变换结果、横跨近平裁剪面或其他无法可靠投影
-的情况得到 `SOC_VISIBILITY_UNKNOWN`，保持 fail-open。
+snapshot 构建时会把 `clip_from_world` 转为查询专用的双精度列向量、六个世界空间
+裁剪面和数值误差尺度，后续所有批次直接复用。每个 AABB 验证所有分量均为有限值
+且 `min <= max` 后，直接选择各裁剪面的正/负顶点求解析极值；处于数值误差带内的
+边界情况回退到逐角点判定，以保持原有边界语义。非有限变换结果、横跨近平裁剪面
+或其他无法可靠投影的情况得到 `SOC_VISIBILITY_UNKNOWN`，保持 fail-open。
 
-对于可安全投影的 AABB，查询保守计算屏幕矩形和最靠近相机的包围盒深度，并选择
-覆盖该矩形的 Hi-Z 层级。只有全部必要采样都严格证明包围盒位于遮挡深度之后，才
-返回 `SOC_VISIBILITY_OCCLUDED`。正向 Z 使用严格的大于关系，反向 Z 使用严格的
-小于关系；相等或无法证明时返回 `SOC_VISIBILITY_VISIBLE`。
+对于可安全投影的 AABB，只完整变换最小角点，再用三条轴增量重建其余七个角点；
+每个角点只求一次 `1 / w`，复用于 NDC X、Y 和深度。投影范围按误差界向外扩张，
+随后选择覆盖屏幕矩形的 Hi-Z 层级。只有全部必要采样都严格证明包围盒位于遮挡深度
+之后，才返回 `SOC_VISIBILITY_OCCLUDED`。正向 Z 使用严格的大于关系，反向 Z 使用
+严格的小于关系；相等或无法证明时返回 `SOC_VISIBILITY_VISIBLE`。查询结果的
+visible/occluded/unknown 计数在同一主循环中累加，不再二次扫描输出数组。
 
 ## Hi-Z 层级
 

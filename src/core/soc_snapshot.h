@@ -3,11 +3,12 @@
 
 #include <soc/soc.h>
 
-#include "occlusion/soc_hiz.h"
+#include "occlusion/soc_visibility.h"
 
 struct soc_snapshot {
     soc_hiz depth_pyramid;
     soc_frame_desc frame;
+    soc_aabb_query_context query_context;
     soc_build_stats build_stats;
 };
 

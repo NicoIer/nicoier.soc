@@ -116,7 +116,8 @@ typedef enum geometry_pattern {
 typedef enum query_pattern {
     QUERY_OCCLUDED,
     QUERY_VISIBLE,
-    QUERY_MIXED
+    QUERY_MIXED,
+    QUERY_MIXED_PERSPECTIVE
 } query_pattern;
 
 typedef struct bench_case {
@@ -340,6 +341,12 @@ static const bench_case g_cases[] = {
      .kind = BENCH_QUERY, .tier = 1u, .width = 640u, .height = 360u,
      .triangle_count = 1u, .instance_count = 1u, .query_count = 65536u,
      .query_batch_size = 65536u, .query_pattern = QUERY_MIXED},
+    {.name = "query.perspective.mixed.small.65536",
+     .description = "Query mixed small AABBs through perspective projection",
+     .kind = BENCH_QUERY, .tier = 1u, .width = 640u, .height = 360u,
+     .triangle_count = 1u, .instance_count = 1u, .query_count = 65536u,
+     .query_batch_size = 65536u,
+     .query_pattern = QUERY_MIXED_PERSPECTIVE},
     {.name = "query.outcomes.mixed.large.65536",
      .description = "Query mixed large projected AABBs",
      .kind = BENCH_QUERY, .tier = 1u, .width = 640u, .height = 360u,
@@ -529,6 +536,25 @@ static soc_frame_desc default_frame_desc(void)
     return desc;
 }
 
+static soc_bool uses_perspective_queries(const bench_case* definition)
+{
+    return definition->query_pattern == QUERY_MIXED_PERSPECTIVE
+        ? SOC_TRUE
+        : SOC_FALSE;
+}
+
+static void configure_perspective_frame(soc_frame_desc* desc)
+{
+    /*
+     * w = world z and clip z = world z - 1. The near plane is z = 1,
+     * and normalized depth increases toward one as world z increases.
+     */
+    desc->clip_from_world.col2.z = 1.0f;
+    desc->clip_from_world.col2.w = 1.0f;
+    desc->clip_from_world.col3.z = -1.0f;
+    desc->clip_from_world.col3.w = 0.0f;
+}
+
 static uint32_t rng_next(uint64_t* state)
 {
     uint64_t value = *state;
@@ -564,6 +590,9 @@ static soc_bool checked_size_multiply(
 
 static float case_occluder_depth(const bench_case* definition)
 {
+    if (uses_perspective_queries(definition) == SOC_TRUE) {
+        return 2.0f;
+    }
     if (definition->clip_depth_range ==
         SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) {
         return definition->depth_direction == SOC_DEPTH_FORWARD
@@ -575,6 +604,9 @@ static float case_occluder_depth(const bench_case* definition)
 
 static float case_visible_depth(const bench_case* definition)
 {
+    if (uses_perspective_queries(definition) == SOC_TRUE) {
+        return 1.35f;
+    }
     if (definition->clip_depth_range ==
         SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) {
         return definition->depth_direction == SOC_DEPTH_FORWARD
@@ -586,6 +618,9 @@ static float case_visible_depth(const bench_case* definition)
 
 static float case_occluded_depth(const bench_case* definition)
 {
+    if (uses_perspective_queries(definition) == SOC_TRUE) {
+        return 4.0f;
+    }
     if (definition->clip_depth_range ==
         SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) {
         return definition->depth_direction == SOC_DEPTH_FORWARD
@@ -680,14 +715,18 @@ static int create_surface_mesh(
                 ? depth_delta : -depth_delta);
 
         if (oversized) {
-            v[0] = -1.0f;
-            v[1] = -1.0f;
+            const float perspective_scale =
+                uses_perspective_queries(work->definition) == SOC_TRUE
+                ? depth : 1.0f;
+
+            v[0] = -perspective_scale;
+            v[1] = -perspective_scale;
             v[2] = depth;
-            v[3] = 3.0f;
-            v[4] = -1.0f;
+            v[3] = 3.0f * perspective_scale;
+            v[4] = -perspective_scale;
             v[5] = depth;
-            v[6] = -1.0f;
-            v[7] = 3.0f;
+            v[6] = -perspective_scale;
+            v[7] = 3.0f * perspective_scale;
             v[8] = depth;
         } else {
             uint32_t side = 1u;
@@ -1029,6 +1068,7 @@ static int allocate_queries(workload* work)
 {
     const bench_case* definition = work->definition;
     const uint32_t count = definition->query_count;
+    const soc_bool perspective = uses_perspective_queries(definition);
     uint32_t index;
     uint64_t rng = work->seed ^ UINT64_C(0x8EBC6AF09C88C6E3);
     size_t bounds_bytes;
@@ -1059,19 +1099,22 @@ static int allocate_queries(workload* work)
             definition->large_queries ? 0.55f : 0.85f;
         float x = -coordinate_range +
             2.0f * coordinate_range * rng_unit(&rng);
-        const float y = -coordinate_range +
+        float y = -coordinate_range +
             2.0f * coordinate_range * rng_unit(&rng);
-        const float radius = definition->large_queries
+        float radius = definition->large_queries
             ? 0.14f + 0.08f * rng_unit(&rng)
             : 0.006f + 0.018f * rng_unit(&rng);
-        const float half_depth = definition->large_queries ? 0.04f : 0.01f;
+        float half_depth = perspective == SOC_TRUE
+            ? 0.05f
+            : (definition->large_queries ? 0.04f : 0.01f);
         float center_z = case_occluded_depth(definition);
         float minimum_z;
         float maximum_z;
 
         if (definition->query_pattern == QUERY_VISIBLE) {
             center_z = case_visible_depth(definition);
-        } else if (definition->query_pattern == QUERY_MIXED) {
+        } else if (definition->query_pattern == QUERY_MIXED ||
+                   definition->query_pattern == QUERY_MIXED_PERSPECTIVE) {
             const uint32_t bucket = index % 20u;
 
             if (bucket < 12u) {
@@ -1082,7 +1125,11 @@ static int allocate_queries(workload* work)
                 x = 1.30f;
                 center_z = case_occluded_depth(definition);
             } else {
-                if (definition->depth_direction == SOC_DEPTH_REVERSED) {
+                if (perspective == SOC_TRUE) {
+                    center_z = 1.0f;
+                    half_depth = 0.10f;
+                } else if (definition->depth_direction ==
+                           SOC_DEPTH_REVERSED) {
                     minimum_z = 0.95f;
                     maximum_z = 1.05f;
                 } else {
@@ -1095,14 +1142,21 @@ static int allocate_queries(workload* work)
                             SOC_CLIP_DEPTH_ZERO_TO_ONE
                         ? 0.05f : -0.95f;
                 }
-                work->bounds[index].min.x = x - radius;
-                work->bounds[index].min.y = y - radius;
-                work->bounds[index].min.z = minimum_z;
-                work->bounds[index].max.x = x + radius;
-                work->bounds[index].max.y = y + radius;
-                work->bounds[index].max.z = maximum_z;
-                continue;
+                if (perspective != SOC_TRUE) {
+                    work->bounds[index].min.x = x - radius;
+                    work->bounds[index].min.y = y - radius;
+                    work->bounds[index].min.z = minimum_z;
+                    work->bounds[index].max.x = x + radius;
+                    work->bounds[index].max.y = y + radius;
+                    work->bounds[index].max.z = maximum_z;
+                    continue;
+                }
             }
+        }
+        if (perspective == SOC_TRUE) {
+            x *= center_z;
+            y *= center_z;
+            radius *= center_z;
         }
         minimum_z = center_z - half_depth;
         maximum_z = center_z + half_depth;
@@ -1239,6 +1293,9 @@ static int workload_initialize(
     work->frame_desc = default_frame_desc();
     work->frame_desc.clip_depth_range = definition->clip_depth_range;
     work->frame_desc.depth_direction = definition->depth_direction;
+    if (uses_perspective_queries(definition) == SOC_TRUE) {
+        configure_perspective_frame(&work->frame_desc);
+    }
     work->build_stats.struct_size = sizeof(work->build_stats);
     work->query_stats.struct_size = sizeof(work->query_stats);
 
@@ -1776,7 +1833,8 @@ static int workload_validate(const workload* work)
                 definition->name);
             return 1;
         }
-        if (definition->query_pattern == QUERY_MIXED &&
+        if ((definition->query_pattern == QUERY_MIXED ||
+             definition->query_pattern == QUERY_MIXED_PERSPECTIVE) &&
             (work->visible == 0u || work->occluded == 0u ||
              work->unknown == 0u)) {
             fprintf(stderr, "%s: expected mixed visibility outcomes\n",

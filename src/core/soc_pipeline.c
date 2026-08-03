@@ -261,6 +261,10 @@ soc_result soc_occlusion_build_internal(
     }
 
     snapshot->frame = frame;
+    soc_aabb_query_context_initialize(
+        &snapshot->frame,
+        &snapshot->query_context
+    );
     snapshot->build_stats.struct_size = sizeof(snapshot->build_stats);
     snapshot->build_stats.hiz_level_count =
         snapshot->depth_pyramid.level_count;

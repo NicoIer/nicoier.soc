@@ -23,11 +23,8 @@ soc_result soc_snapshot_test_aabbs_internal(
     soc_query_stats* out_stats
 )
 {
-    uint64_t occluded_count;
+    soc_occlusion_query_counts counts;
     soc_result result;
-    uint64_t visible_count = 0u;
-    uint64_t unknown_count = 0u;
-    uint32_t index;
 
     if (snapshot == NULL ||
         (out_stats != NULL &&
@@ -41,30 +38,22 @@ soc_result soc_snapshot_test_aabbs_internal(
 
     result = soc_occlusion_test_aabbs(
         &snapshot->depth_pyramid,
-        &snapshot->frame,
+        &snapshot->query_context,
         world_bounds,
         bounds_count,
         out_visibility,
-        &occluded_count
+        &counts
     );
     if (result != SOC_RESULT_OK) {
         return result;
     }
 
-    for (index = 0u; index < bounds_count; ++index) {
-        if (out_visibility[index] == SOC_VISIBILITY_UNKNOWN) {
-            ++unknown_count;
-        } else if (out_visibility[index] == SOC_VISIBILITY_VISIBLE) {
-            ++visible_count;
-        }
-    }
-
     if (out_stats != NULL) {
         out_stats->reserved = 0u;
         out_stats->tested_aabb_count = bounds_count;
-        out_stats->visible_aabb_count = visible_count;
-        out_stats->occluded_aabb_count = occluded_count;
-        out_stats->unknown_aabb_count = unknown_count;
+        out_stats->visible_aabb_count = counts.visible;
+        out_stats->occluded_aabb_count = counts.occluded;
+        out_stats->unknown_aabb_count = counts.unknown;
     }
     return SOC_RESULT_OK;
 }

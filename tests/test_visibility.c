@@ -6,6 +6,7 @@
 #include <stdio.h>
 
 #define ARRAY_COUNT(array) (sizeof(array) / sizeof((array)[0]))
+#define RANDOM_AABB_COUNT 257u
 
 #define CHECK(condition) \
     do { \
@@ -68,18 +69,32 @@ static soc_frame_desc make_frame_desc(soc_depth_direction depth_direction)
     return desc;
 }
 
-static soc_frame_desc make_perspective_frame_desc(void)
+static soc_frame_desc make_perspective_frame_desc(
+    soc_clip_depth_range clip_depth_range,
+    soc_depth_direction depth_direction
+)
 {
-    soc_frame_desc desc = make_frame_desc(SOC_DEPTH_FORWARD);
+    soc_frame_desc desc = make_frame_desc(depth_direction);
 
     /*
-     * w = world z and clip z = world z - 1. The near plane is z = 1,
-     * and normalized depth increases toward one as world z increases.
+     * All four conventions use w = world z and a world-space near plane at
+     * z = 1. Forward depth maps z = 1 to zero and infinity to one; reversed
+     * depth maps z = 1 to one and infinity to zero.
      */
-    desc.clip_from_world.col2.z = 1.0f;
+    desc.clip_depth_range = clip_depth_range;
     desc.clip_from_world.col2.w = 1.0f;
-    desc.clip_from_world.col3.z = -1.0f;
     desc.clip_from_world.col3.w = 0.0f;
+    if (clip_depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE) {
+        desc.clip_from_world.col2.z =
+            depth_direction == SOC_DEPTH_FORWARD ? 1.0f : 0.0f;
+        desc.clip_from_world.col3.z =
+            depth_direction == SOC_DEPTH_FORWARD ? -1.0f : 1.0f;
+    } else {
+        desc.clip_from_world.col2.z =
+            depth_direction == SOC_DEPTH_FORWARD ? 1.0f : -1.0f;
+        desc.clip_from_world.col3.z =
+            depth_direction == SOC_DEPTH_FORWARD ? -2.0f : 2.0f;
+    }
     return desc;
 }
 
@@ -534,7 +549,10 @@ static int test_negative_one_to_one_depth_mapping(void)
     return 0;
 }
 
-static int test_perspective_projection(void)
+static int test_perspective_convention_batch(
+    soc_clip_depth_range clip_depth_range,
+    soc_depth_direction depth_direction
+)
 {
     const float positions[] = {
         -2.0f, -2.0f, 2.0f,
@@ -542,29 +560,30 @@ static int test_perspective_projection(void)
         -2.0f,  6.0f, 2.0f,
     };
     const soc_mat4 identity = identity_matrix();
-    const soc_frame_desc frame_desc = make_perspective_frame_desc();
-    const soc_aabb bounds[] = {
-        {
-            .min = {-0.20f, -0.20f, 1.20f},
-            .max = {0.20f, 0.20f, 1.50f},
-        },
-        {
-            .min = {-0.40f, -0.40f, 2.00f},
-            .max = {0.40f, 0.40f, 2.00f},
-        },
-        {
-            .min = {-0.80f, -0.80f, 3.00f},
-            .max = {0.80f, 0.80f, 4.00f},
-        },
-        {
-            .min = {-0.10f, -0.10f, 0.80f},
-            .max = {0.10f, 0.10f, 1.20f},
-        },
+    const soc_frame_desc frame_desc = make_perspective_frame_desc(
+        clip_depth_range,
+        depth_direction
+    );
+    soc_aabb bounds[] = {
+        make_aabb(-0.20f, -0.20f, 1.20f, 0.20f, 0.20f, 1.50f),
+        make_aabb(-0.80f, -0.80f, 3.00f, 0.80f, 0.80f, 4.00f),
+        make_aabb(5.00f, -0.25f, 2.00f, 6.00f, 0.25f, 3.00f),
+        make_aabb(-0.10f, -0.10f, 0.80f, 0.10f, 0.10f, 1.20f),
+        make_aabb(-0.10f, -0.10f, -2.00f, 0.10f, 0.10f, -0.50f),
+        make_aabb(0.00f, 0.00f, 3.50f, 0.00f, 0.00f, 3.50f),
+        make_aabb(0.20f, -0.20f, 3.00f, -0.20f, 0.20f, 4.00f),
+        make_aabb(-0.20f, -0.20f, 3.00f, 0.20f, 0.20f, 4.00f),
+        make_aabb(-0.20f, -0.20f, 3.00f, 0.20f, 0.20f, 4.00f),
     };
     const soc_visibility expected[] = {
         SOC_VISIBILITY_VISIBLE,
-        SOC_VISIBILITY_VISIBLE,
         SOC_VISIBILITY_OCCLUDED,
+        SOC_VISIBILITY_VISIBLE,
+        SOC_VISIBILITY_UNKNOWN,
+        SOC_VISIBILITY_UNKNOWN,
+        SOC_VISIBILITY_OCCLUDED,
+        SOC_VISIBILITY_UNKNOWN,
+        SOC_VISIBILITY_UNKNOWN,
         SOC_VISIBILITY_UNKNOWN,
     };
     soc_visibility actual[ARRAY_COUNT(bounds)] = {0};
@@ -574,6 +593,9 @@ static int test_perspective_projection(void)
     soc_context* context = NULL;
     soc_mesh* mesh = NULL;
     soc_snapshot* snapshot = NULL;
+
+    bounds[7].min.x = NAN;
+    bounds[8].max.y = INFINITY;
 
     CHECK_RESULT(create_context(9u, 6u, &context), SOC_RESULT_OK);
     CHECK_RESULT(
@@ -609,13 +631,453 @@ static int test_perspective_projection(void)
         &query_stats,
         ARRAY_COUNT(bounds),
         2u,
-        1u,
-        1u
+        2u,
+        5u
     ) == 0);
 
     soc_snapshot_destroy(snapshot);
     CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
     soc_context_destroy(context);
+    return 0;
+}
+
+static int test_perspective_projection_conventions(void)
+{
+    const soc_clip_depth_range clip_depth_ranges[] = {
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE,
+    };
+    const soc_depth_direction depth_directions[] = {
+        SOC_DEPTH_FORWARD,
+        SOC_DEPTH_REVERSED,
+    };
+    size_t range_index;
+    size_t direction_index;
+
+    for (range_index = 0u;
+         range_index < ARRAY_COUNT(clip_depth_ranges);
+         ++range_index) {
+        for (direction_index = 0u;
+             direction_index < ARRAY_COUNT(depth_directions);
+             ++direction_index) {
+            if (test_perspective_convention_batch(
+                    clip_depth_ranges[range_index],
+                    depth_directions[direction_index]
+                ) != 0) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static uint32_t deterministic_random_u32(uint32_t* state)
+{
+    uint32_t value = *state;
+
+    value ^= value << 13u;
+    value ^= value >> 17u;
+    value ^= value << 5u;
+    *state = value;
+    return value;
+}
+
+static float deterministic_random_unit(uint32_t* state)
+{
+    return (float)(deterministic_random_u32(state) >> 8u) *
+        (1.0f / 16777216.0f);
+}
+
+static void make_deterministic_random_aabbs(
+    soc_aabb bounds[RANDOM_AABB_COUNT]
+)
+{
+    uint32_t state = UINT32_C(0x534F4301);
+    uint32_t index;
+
+    for (index = 0u; index < RANDOM_AABB_COUNT; ++index) {
+        const float random_x = deterministic_random_unit(&state);
+        const float random_y = deterministic_random_unit(&state);
+        const float random_z = deterministic_random_unit(&state);
+        const float radius =
+            0.005f + 0.12f * deterministic_random_unit(&state);
+        const float centered_x = (random_x * 2.0f - 1.0f) * 0.75f;
+        const float centered_y = (random_y * 2.0f - 1.0f) * 0.75f;
+
+        switch (index % 10u) {
+        case 0u: {
+            const float minimum_z = 2.50f + random_z * 1.50f;
+
+            bounds[index] = make_aabb(
+                centered_x - radius,
+                centered_y - radius,
+                minimum_z,
+                centered_x + radius,
+                centered_y + radius,
+                minimum_z + 0.20f
+            );
+            break;
+        }
+        case 1u: {
+            const float minimum_z = 1.10f + random_z * 0.30f;
+
+            bounds[index] = make_aabb(
+                centered_x - radius,
+                centered_y - radius,
+                minimum_z,
+                centered_x + radius,
+                centered_y + radius,
+                minimum_z + 0.20f
+            );
+            break;
+        }
+        case 2u:
+            bounds[index] = make_aabb(
+                5.0f + random_x,
+                centered_y - radius,
+                2.0f,
+                6.0f + random_x,
+                centered_y + radius,
+                3.0f
+            );
+            break;
+        case 3u:
+            bounds[index] = make_aabb(
+                centered_x - radius,
+                centered_y - radius,
+                0.80f,
+                centered_x + radius,
+                centered_y + radius,
+                1.20f
+            );
+            break;
+        case 4u:
+            bounds[index] = make_aabb(
+                centered_x - radius,
+                centered_y - radius,
+                -2.0f,
+                centered_x + radius,
+                centered_y + radius,
+                -0.5f
+            );
+            break;
+        case 5u: {
+            const float minimum_z = 1.05f + random_z * 3.50f;
+
+            bounds[index] = make_aabb(
+                centered_x - radius,
+                centered_y - radius,
+                minimum_z,
+                centered_x + radius,
+                centered_y + radius,
+                minimum_z + radius
+            );
+            break;
+        }
+        case 6u:
+            bounds[index] = make_aabb(
+                centered_x,
+                centered_y,
+                3.0f,
+                centered_x,
+                centered_y,
+                3.0f
+            );
+            break;
+        case 7u:
+            bounds[index] = make_aabb(
+                centered_x + radius,
+                centered_y - radius,
+                2.0f,
+                centered_x - radius,
+                centered_y + radius,
+                3.0f
+            );
+            break;
+        case 8u:
+            bounds[index] = make_aabb(
+                NAN,
+                centered_y - radius,
+                2.0f,
+                centered_x + radius,
+                centered_y + radius,
+                3.0f
+            );
+            break;
+        default:
+            bounds[index] = make_aabb(
+                centered_x - radius,
+                centered_y - radius,
+                2.0f,
+                centered_x + radius,
+                INFINITY,
+                3.0f
+            );
+            break;
+        }
+    }
+}
+
+static soc_visibility expected_deterministic_visibility(
+    uint32_t index,
+    const soc_aabb* bounds
+)
+{
+    switch (index % 10u) {
+    case 0u:
+    case 6u:
+        return SOC_VISIBILITY_OCCLUDED;
+    case 1u:
+    case 2u:
+        return SOC_VISIBILITY_VISIBLE;
+    case 5u:
+        return bounds->min.z <= 2.0f
+            ? SOC_VISIBILITY_VISIBLE
+            : SOC_VISIBILITY_OCCLUDED;
+    default:
+        return SOC_VISIBILITY_UNKNOWN;
+    }
+}
+
+/*
+ * Public-API consistency and conservative-behavior coverage. This deliberately
+ * does not claim to be an implementation differential: bulk, singleton, and
+ * stats-free calls currently dispatch through the same library path.
+ */
+static int test_bulk_query_consistency_for_convention(
+    soc_clip_depth_range clip_depth_range,
+    soc_depth_direction depth_direction
+)
+{
+    const float positions[] = {
+        -2.0f, -2.0f, 2.0f,
+         6.0f, -2.0f, 2.0f,
+        -2.0f,  6.0f, 2.0f,
+    };
+    const soc_mat4 identity = identity_matrix();
+    const soc_frame_desc frame_desc = make_perspective_frame_desc(
+        clip_depth_range,
+        depth_direction
+    );
+    soc_aabb bounds[RANDOM_AABB_COUNT];
+    soc_visibility bulk[RANDOM_AABB_COUNT] = {0};
+    soc_visibility repeated[RANDOM_AABB_COUNT] = {0};
+    soc_visibility without_stats[RANDOM_AABB_COUNT] = {0};
+    soc_visibility empty[RANDOM_AABB_COUNT] = {0};
+    soc_query_stats bulk_stats = {
+        .struct_size = sizeof(soc_query_stats),
+    };
+    soc_query_stats repeated_stats = {
+        .struct_size = sizeof(soc_query_stats),
+    };
+    soc_query_stats empty_stats = {
+        .struct_size = sizeof(soc_query_stats),
+    };
+    soc_context* context = NULL;
+    soc_mesh* mesh = NULL;
+    soc_snapshot* occluded_snapshot = NULL;
+    soc_snapshot* empty_snapshot = NULL;
+    uint64_t visible_count = 0u;
+    uint64_t occluded_count = 0u;
+    uint64_t unknown_count = 0u;
+    uint64_t empty_visible_count = 0u;
+    uint64_t empty_unknown_count = 0u;
+    uint32_t index;
+
+    make_deterministic_random_aabbs(bounds);
+    CHECK_RESULT(create_context(31u, 19u, &context), SOC_RESULT_OK);
+    CHECK_RESULT(
+        create_triangle_mesh(context, positions, &mesh),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        build_single_group_snapshot(
+            context,
+            &frame_desc,
+            mesh,
+            &identity,
+            &occluded_snapshot
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        build_empty_snapshot(context, &frame_desc, &empty_snapshot),
+        SOC_RESULT_OK
+    );
+
+    CHECK_RESULT(
+        soc_snapshot_test_aabbs(
+            occluded_snapshot,
+            bounds,
+            RANDOM_AABB_COUNT,
+            bulk,
+            &bulk_stats
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        soc_snapshot_test_aabbs(
+            occluded_snapshot,
+            bounds,
+            RANDOM_AABB_COUNT,
+            repeated,
+            &repeated_stats
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK(check_visibility(repeated, bulk, RANDOM_AABB_COUNT) == 0);
+
+    CHECK_RESULT(
+        soc_snapshot_test_aabbs(
+            occluded_snapshot,
+            bounds,
+            RANDOM_AABB_COUNT,
+            without_stats,
+            NULL
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK(check_visibility(without_stats, bulk, RANDOM_AABB_COUNT) == 0);
+
+    for (index = 0u; index < RANDOM_AABB_COUNT; ++index) {
+        const soc_visibility expected = expected_deterministic_visibility(
+            index,
+            &bounds[index]
+        );
+        soc_visibility scalar = SOC_VISIBILITY_UNKNOWN;
+        soc_query_stats scalar_stats = {
+            .struct_size = sizeof(soc_query_stats),
+        };
+        uint64_t scalar_visible;
+        uint64_t scalar_occluded;
+        uint64_t scalar_unknown;
+
+        CHECK_RESULT(
+            soc_snapshot_test_aabbs(
+                occluded_snapshot,
+                &bounds[index],
+                1u,
+                &scalar,
+                &scalar_stats
+            ),
+            SOC_RESULT_OK
+        );
+        if (bulk[index] != expected) {
+            fprintf(
+                stderr,
+                "random visibility[%u] was %u, expected %u "
+                "(clip range %u, depth direction %u)\n",
+                index,
+                (unsigned int)bulk[index],
+                (unsigned int)expected,
+                (unsigned int)clip_depth_range,
+                (unsigned int)depth_direction
+            );
+            return 1;
+        }
+        CHECK(scalar == bulk[index]);
+        CHECK(scalar == SOC_VISIBILITY_VISIBLE ||
+            scalar == SOC_VISIBILITY_OCCLUDED ||
+            scalar == SOC_VISIBILITY_UNKNOWN);
+
+        scalar_visible = scalar == SOC_VISIBILITY_VISIBLE ? 1u : 0u;
+        scalar_occluded = scalar == SOC_VISIBILITY_OCCLUDED ? 1u : 0u;
+        scalar_unknown = scalar == SOC_VISIBILITY_UNKNOWN ? 1u : 0u;
+        CHECK(check_query_stats(
+            &scalar_stats,
+            1u,
+            scalar_visible,
+            scalar_occluded,
+            scalar_unknown
+        ) == 0);
+        visible_count += scalar_visible;
+        occluded_count += scalar_occluded;
+        unknown_count += scalar_unknown;
+    }
+    CHECK(visible_count > 0u);
+    CHECK(occluded_count > 0u);
+    CHECK(unknown_count > 0u);
+    CHECK(check_query_stats(
+        &bulk_stats,
+        RANDOM_AABB_COUNT,
+        visible_count,
+        occluded_count,
+        unknown_count
+    ) == 0);
+    CHECK(check_query_stats(
+        &repeated_stats,
+        RANDOM_AABB_COUNT,
+        visible_count,
+        occluded_count,
+        unknown_count
+    ) == 0);
+
+    CHECK_RESULT(
+        soc_snapshot_test_aabbs(
+            empty_snapshot,
+            bounds,
+            RANDOM_AABB_COUNT,
+            empty,
+            &empty_stats
+        ),
+        SOC_RESULT_OK
+    );
+    for (index = 0u; index < RANDOM_AABB_COUNT; ++index) {
+        CHECK(empty[index] != SOC_VISIBILITY_OCCLUDED);
+        if (empty[index] == SOC_VISIBILITY_UNKNOWN) {
+            ++empty_unknown_count;
+            CHECK(bulk[index] == SOC_VISIBILITY_UNKNOWN);
+        } else {
+            CHECK(empty[index] == SOC_VISIBILITY_VISIBLE);
+            ++empty_visible_count;
+            CHECK(bulk[index] != SOC_VISIBILITY_UNKNOWN);
+        }
+        if (bulk[index] == SOC_VISIBILITY_OCCLUDED) {
+            CHECK(empty[index] == SOC_VISIBILITY_VISIBLE);
+        }
+    }
+    CHECK(check_query_stats(
+        &empty_stats,
+        RANDOM_AABB_COUNT,
+        empty_visible_count,
+        0u,
+        empty_unknown_count
+    ) == 0);
+
+    soc_snapshot_destroy(empty_snapshot);
+    soc_snapshot_destroy(occluded_snapshot);
+    CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
+    soc_context_destroy(context);
+    return 0;
+}
+
+static int test_deterministic_bulk_query_consistency_and_conservatism(void)
+{
+    const soc_clip_depth_range clip_depth_ranges[] = {
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE,
+    };
+    const soc_depth_direction depth_directions[] = {
+        SOC_DEPTH_FORWARD,
+        SOC_DEPTH_REVERSED,
+    };
+    size_t range_index;
+    size_t direction_index;
+
+    for (range_index = 0u;
+         range_index < ARRAY_COUNT(clip_depth_ranges);
+         ++range_index) {
+        for (direction_index = 0u;
+             direction_index < ARRAY_COUNT(depth_directions);
+             ++direction_index) {
+            if (test_bulk_query_consistency_for_convention(
+                    clip_depth_ranges[range_index],
+                    depth_directions[direction_index]
+                ) != 0) {
+                return 1;
+            }
+        }
+    }
     return 0;
 }
 
@@ -715,7 +1177,10 @@ int main(void)
     if (test_negative_one_to_one_depth_mapping() != 0) {
         return 1;
     }
-    if (test_perspective_projection() != 0) {
+    if (test_perspective_projection_conventions() != 0) {
+        return 1;
+    }
+    if (test_deterministic_bulk_query_consistency_and_conservatism() != 0) {
         return 1;
     }
     if (test_partial_coverage_and_offscreen_are_conservative() != 0) {
