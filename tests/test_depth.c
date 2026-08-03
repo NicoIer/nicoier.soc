@@ -1,5 +1,6 @@
 #include <soc/soc.h>
 
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -903,6 +904,555 @@ static int test_clipped_oversized_triangle(void)
     return 0;
 }
 
+static int check_trivially_rejected_triangle_with_desc(
+    soc_context* context,
+    const soc_frame_desc* frame_desc,
+    const float positions[9]
+)
+{
+    const uint16_t indices[] = {0u, 1u, 2u};
+    soc_mesh* mesh = NULL;
+    soc_mesh* meshes[1];
+    frame_capture capture;
+
+    CHECK_RESULT(
+        create_triangle_mesh(
+            context,
+            positions,
+            indices,
+            SOC_MESH_FLAG_TWO_SIDED,
+            &mesh
+        ),
+        SOC_RESULT_OK
+    );
+    meshes[0] = mesh;
+    CHECK_RESULT(
+        capture_frame_with_desc(
+            context,
+            frame_desc,
+            meshes,
+            NULL,
+            NULL,
+            1u,
+            &capture
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK(check_layout(&capture, TEST_WIDTH, TEST_HEIGHT) == 0);
+    CHECK(check_all_depth(&capture, TEST_PIXEL_COUNT, 1.0f) == 0);
+    CHECK(check_stats(&capture, 4u, 1u, 1u, 0u) == 0);
+    CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
+    return 0;
+}
+
+static int check_trivially_rejected_triangle(
+    soc_context* context,
+    const float positions[9]
+)
+{
+    const soc_frame_desc frame_desc = make_frame_desc(SOC_DEPTH_FORWARD);
+
+    return check_trivially_rejected_triangle_with_desc(
+        context,
+        &frame_desc,
+        positions
+    );
+}
+
+static int test_clip_outcode_trivial_paths(void)
+{
+    const uint16_t indices[] = {0u, 1u, 2u};
+    const float boundary_positions[] = {
+        -1.0f, -1.0f, 0.0f,
+         1.0f, -1.0f, 1.0f,
+         0.0f,  1.0f, 0.5f,
+    };
+    const float rejected_positions[][9] = {
+        {
+            -2.00f, -0.50f, 0.50f,
+            -1.50f,  0.50f, 0.50f,
+            -1.25f,  0.00f, 0.50f,
+        },
+        {
+            2.00f, -0.50f, 0.50f,
+            1.25f,  0.00f, 0.50f,
+            1.50f,  0.50f, 0.50f,
+        },
+        {
+            -0.50f, -2.00f, 0.50f,
+             0.00f, -1.25f, 0.50f,
+             0.50f, -1.50f, 0.50f,
+        },
+        {
+            -0.50f, 2.00f, 0.50f,
+             0.50f, 1.50f, 0.50f,
+             0.00f, 1.25f, 0.50f,
+        },
+        {
+            -0.50f, -0.50f, -0.25f,
+             0.50f, -0.50f, -0.25f,
+             0.00f,  0.50f, -0.25f,
+        },
+        {
+            -0.50f, -0.50f, 1.25f,
+             0.50f, -0.50f, 1.25f,
+             0.00f,  0.50f, 1.25f,
+        },
+    };
+    const float nan_positions[] = {
+        NAN,   -0.50f, 0.50f,
+        0.50f, -0.50f, 0.50f,
+        0.00f,  0.50f, 0.50f,
+    };
+    const float infinite_positions[] = {
+        -0.50f, -0.50f, 0.50f,
+         0.50f, -0.50f, 0.50f,
+         0.00f, INFINITY, 0.50f,
+    };
+    float negative_zero_positions[9];
+    float accepted_positions[9];
+    soc_context* context = NULL;
+    soc_mesh* mesh = NULL;
+    soc_mesh* meshes[1];
+    frame_capture capture;
+    uint32_t drawn_count = 0u;
+    uint32_t case_index;
+    uint32_t pixel;
+
+    CHECK_RESULT(
+        create_context(TEST_WIDTH, TEST_HEIGHT, &context),
+        SOC_RESULT_OK
+    );
+
+    make_triangle(0.25f, accepted_positions);
+    CHECK_RESULT(
+        create_triangle_mesh(
+            context,
+            accepted_positions,
+            indices,
+            SOC_MESH_FLAG_TWO_SIDED,
+            &mesh
+        ),
+        SOC_RESULT_OK
+    );
+    meshes[0] = mesh;
+    CHECK_RESULT(
+        capture_frame(context, SOC_DEPTH_FORWARD, meshes, 1u, &capture),
+        SOC_RESULT_OK
+    );
+    CHECK(check_triangle_depth(&capture, 0.25f, 1.0f) == 0);
+    CHECK(check_stats(&capture, 4u, 1u, 0u, 1u) == 0);
+    CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
+
+    CHECK_RESULT(
+        create_triangle_mesh(
+            context,
+            boundary_positions,
+            indices,
+            SOC_MESH_FLAG_TWO_SIDED,
+            &mesh
+        ),
+        SOC_RESULT_OK
+    );
+    meshes[0] = mesh;
+    CHECK_RESULT(
+        capture_frame(context, SOC_DEPTH_FORWARD, meshes, 1u, &capture),
+        SOC_RESULT_OK
+    );
+    CHECK(check_stats(&capture, 4u, 1u, 0u, 1u) == 0);
+    for (pixel = 0u; pixel < TEST_PIXEL_COUNT; ++pixel) {
+        if (!depth_equal(capture.depth[pixel], 1.0f)) {
+            ++drawn_count;
+        }
+    }
+    CHECK(drawn_count > 0u);
+    CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
+
+    make_triangle(-0.0f, negative_zero_positions);
+    CHECK_RESULT(
+        create_triangle_mesh(
+            context,
+            negative_zero_positions,
+            indices,
+            SOC_MESH_FLAG_TWO_SIDED,
+            &mesh
+        ),
+        SOC_RESULT_OK
+    );
+    meshes[0] = mesh;
+    CHECK_RESULT(
+        capture_frame(context, SOC_DEPTH_FORWARD, meshes, 1u, &capture),
+        SOC_RESULT_OK
+    );
+    CHECK(check_triangle_depth(&capture, -0.0f, 1.0f) == 0);
+    CHECK(check_stats(&capture, 4u, 1u, 0u, 1u) == 0);
+    CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
+
+    for (case_index = 0u;
+         case_index < sizeof(rejected_positions) /
+             sizeof(rejected_positions[0]);
+         ++case_index) {
+        CHECK(check_trivially_rejected_triangle(
+            context,
+            rejected_positions[case_index]
+        ) == 0);
+    }
+    CHECK(check_trivially_rejected_triangle(context, nan_positions) == 0);
+    CHECK(check_trivially_rejected_triangle(
+        context,
+        infinite_positions
+    ) == 0);
+
+    soc_context_destroy(context);
+    return 0;
+}
+
+static int test_clip_outcode_partial_active_plane(void)
+{
+    const uint16_t indices[] = {0u, 1u, 2u};
+    const float source_positions[] = {
+        -2.0f,  0.00f, 0.40f,
+         0.0f, -0.50f, 0.40f,
+         0.0f,  0.50f, 0.40f,
+    };
+    const float reference_first_positions[] = {
+        -1.0f,  0.25f, 0.40f,
+        -1.0f, -0.25f, 0.40f,
+         0.0f, -0.50f, 0.40f,
+    };
+    const float reference_second_positions[] = {
+        -1.0f,  0.25f, 0.40f,
+         0.0f, -0.50f, 0.40f,
+         0.0f,  0.50f, 0.40f,
+    };
+    soc_context* context = NULL;
+    soc_mesh* source_mesh = NULL;
+    soc_mesh* reference_first_mesh = NULL;
+    soc_mesh* reference_second_mesh = NULL;
+    soc_mesh* source_meshes[1];
+    soc_mesh* reference_meshes[2];
+    frame_capture source_capture;
+    frame_capture reference_capture;
+    uint32_t pixel;
+
+    CHECK_RESULT(
+        create_context(TEST_WIDTH, TEST_HEIGHT, &context),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        create_triangle_mesh(
+            context,
+            source_positions,
+            indices,
+            SOC_MESH_FLAG_TWO_SIDED,
+            &source_mesh
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        create_triangle_mesh(
+            context,
+            reference_first_positions,
+            indices,
+            SOC_MESH_FLAG_TWO_SIDED,
+            &reference_first_mesh
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        create_triangle_mesh(
+            context,
+            reference_second_positions,
+            indices,
+            SOC_MESH_FLAG_TWO_SIDED,
+            &reference_second_mesh
+        ),
+        SOC_RESULT_OK
+    );
+
+    source_meshes[0] = source_mesh;
+    CHECK_RESULT(
+        capture_frame(
+            context,
+            SOC_DEPTH_FORWARD,
+            source_meshes,
+            1u,
+            &source_capture
+        ),
+        SOC_RESULT_OK
+    );
+    reference_meshes[0] = reference_first_mesh;
+    reference_meshes[1] = reference_second_mesh;
+    CHECK_RESULT(
+        capture_frame(
+            context,
+            SOC_DEPTH_FORWARD,
+            reference_meshes,
+            2u,
+            &reference_capture
+        ),
+        SOC_RESULT_OK
+    );
+
+    CHECK(check_stats(&source_capture, 4u, 1u, 1u, 2u) == 0);
+    CHECK(check_stats(&reference_capture, 4u, 2u, 0u, 2u) == 0);
+    for (pixel = 0u; pixel < TEST_PIXEL_COUNT; ++pixel) {
+        if (!depth_equal(
+                source_capture.depth[pixel],
+                reference_capture.depth[pixel]
+            )) {
+            fprintf(
+                stderr,
+                "active-plane clip changed pixel %u from %.9g to %.9g\n",
+                pixel,
+                (double)reference_capture.depth[pixel],
+                (double)source_capture.depth[pixel]
+            );
+            return 1;
+        }
+    }
+
+    CHECK_RESULT(soc_mesh_destroy(source_mesh), SOC_RESULT_OK);
+    CHECK_RESULT(soc_mesh_destroy(reference_first_mesh), SOC_RESULT_OK);
+    CHECK_RESULT(soc_mesh_destroy(reference_second_mesh), SOC_RESULT_OK);
+    soc_context_destroy(context);
+    return 0;
+}
+
+static int test_negative_one_to_one_near_outcodes(void)
+{
+    const uint16_t indices[] = {0u, 1u, 2u};
+    const float rejected_positions[] = {
+        -0.50f, -0.50f, -1.25f,
+         0.50f, -0.50f, -1.25f,
+         0.00f,  0.50f, -1.25f,
+    };
+    const float source_positions[] = {
+        -0.75f, -0.50f, -1.50f,
+         0.75f, -0.50f, -0.50f,
+         0.00f,  0.75f, -0.50f,
+    };
+    const float reference_first_positions[] = {
+        -0.375f,  0.125f, -1.00f,
+         0.000f, -0.500f, -1.00f,
+         0.750f, -0.500f, -0.50f,
+    };
+    const float reference_second_positions[] = {
+        -0.375f, 0.125f, -1.00f,
+         0.750f, -0.500f, -0.50f,
+         0.000f, 0.750f, -0.50f,
+    };
+    soc_frame_desc frame_desc = make_frame_desc(SOC_DEPTH_FORWARD);
+    soc_context* context = NULL;
+    soc_mesh* source_mesh = NULL;
+    soc_mesh* reference_first_mesh = NULL;
+    soc_mesh* reference_second_mesh = NULL;
+    soc_mesh* source_meshes[1];
+    soc_mesh* reference_meshes[2];
+    frame_capture source_capture;
+    frame_capture reference_capture;
+    uint32_t pixel;
+
+    frame_desc.clip_depth_range = SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE;
+    CHECK_RESULT(
+        create_context(TEST_WIDTH, TEST_HEIGHT, &context),
+        SOC_RESULT_OK
+    );
+    CHECK(check_trivially_rejected_triangle_with_desc(
+        context,
+        &frame_desc,
+        rejected_positions
+    ) == 0);
+
+    CHECK_RESULT(
+        create_triangle_mesh(
+            context,
+            source_positions,
+            indices,
+            SOC_MESH_FLAG_TWO_SIDED,
+            &source_mesh
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        create_triangle_mesh(
+            context,
+            reference_first_positions,
+            indices,
+            SOC_MESH_FLAG_TWO_SIDED,
+            &reference_first_mesh
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        create_triangle_mesh(
+            context,
+            reference_second_positions,
+            indices,
+            SOC_MESH_FLAG_TWO_SIDED,
+            &reference_second_mesh
+        ),
+        SOC_RESULT_OK
+    );
+
+    source_meshes[0] = source_mesh;
+    CHECK_RESULT(
+        capture_frame_with_desc(
+            context,
+            &frame_desc,
+            source_meshes,
+            NULL,
+            NULL,
+            1u,
+            &source_capture
+        ),
+        SOC_RESULT_OK
+    );
+    reference_meshes[0] = reference_first_mesh;
+    reference_meshes[1] = reference_second_mesh;
+    CHECK_RESULT(
+        capture_frame_with_desc(
+            context,
+            &frame_desc,
+            reference_meshes,
+            NULL,
+            NULL,
+            2u,
+            &reference_capture
+        ),
+        SOC_RESULT_OK
+    );
+
+    CHECK(check_stats(&source_capture, 4u, 1u, 1u, 2u) == 0);
+    CHECK(check_stats(&reference_capture, 4u, 2u, 0u, 2u) == 0);
+    for (pixel = 0u; pixel < TEST_PIXEL_COUNT; ++pixel) {
+        if (!depth_equal(
+                source_capture.depth[pixel],
+                reference_capture.depth[pixel]
+            )) {
+            fprintf(
+                stderr,
+                "NO near clip changed pixel %u from %.9g to %.9g\n",
+                pixel,
+                (double)reference_capture.depth[pixel],
+                (double)source_capture.depth[pixel]
+            );
+            return 1;
+        }
+    }
+
+    CHECK_RESULT(soc_mesh_destroy(source_mesh), SOC_RESULT_OK);
+    CHECK_RESULT(soc_mesh_destroy(reference_first_mesh), SOC_RESULT_OK);
+    CHECK_RESULT(soc_mesh_destroy(reference_second_mesh), SOC_RESULT_OK);
+    soc_context_destroy(context);
+    return 0;
+}
+
+static int test_clip_outcode_disjoint_vertex_planes(void)
+{
+    const uint16_t indices[] = {0u, 1u, 2u};
+    const float positions[] = {
+        -2.0f, 0.0f, 0.35f,
+         2.0f, 0.0f, 0.35f,
+         0.0f, 2.0f, 0.35f,
+    };
+    soc_context* context = NULL;
+    soc_mesh* mesh = NULL;
+    soc_mesh* meshes[1];
+    frame_capture capture;
+    uint32_t drawn_count = 0u;
+    uint32_t pixel;
+
+    CHECK_RESULT(
+        create_context(TEST_WIDTH, TEST_HEIGHT, &context),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        create_triangle_mesh(
+            context,
+            positions,
+            indices,
+            SOC_MESH_FLAG_TWO_SIDED,
+            &mesh
+        ),
+        SOC_RESULT_OK
+    );
+    meshes[0] = mesh;
+    CHECK_RESULT(
+        capture_frame(context, SOC_DEPTH_FORWARD, meshes, 1u, &capture),
+        SOC_RESULT_OK
+    );
+    CHECK(capture.stats.hiz_level_count == 4u);
+    CHECK(capture.stats.input_triangle_count == 1u);
+    CHECK(capture.stats.clipped_triangle_count == 1u);
+    CHECK(capture.stats.rasterized_triangle_count > 0u);
+    for (pixel = 0u; pixel < TEST_PIXEL_COUNT; ++pixel) {
+        if (depth_equal(capture.depth[pixel], 0.35f)) {
+            ++drawn_count;
+        }
+    }
+    CHECK(drawn_count > 0u);
+
+    CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
+    soc_context_destroy(context);
+    return 0;
+}
+
+static int test_clip_outcode_multi_instance_stats(void)
+{
+    const uint16_t indices[] = {0u, 1u, 2u};
+    const uint32_t instance_counts[] = {3u};
+    const soc_frame_desc frame_desc = make_frame_desc(SOC_DEPTH_FORWARD);
+    float positions[9];
+    soc_mat4 transforms[3];
+    const soc_mat4* transform_arrays[1];
+    soc_context* context = NULL;
+    soc_mesh* mesh = NULL;
+    soc_mesh* meshes[1];
+    frame_capture capture;
+
+    make_triangle(0.40f, positions);
+    transforms[0] = identity_matrix();
+    transforms[1] = identity_matrix();
+    transforms[1].col3.x = -0.75f;
+    transforms[2] = identity_matrix();
+    transforms[2].col3.x = -2.0f;
+    transform_arrays[0] = transforms;
+
+    CHECK_RESULT(
+        create_context(TEST_WIDTH, TEST_HEIGHT, &context),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        create_triangle_mesh(
+            context,
+            positions,
+            indices,
+            SOC_MESH_FLAG_TWO_SIDED,
+            &mesh
+        ),
+        SOC_RESULT_OK
+    );
+    meshes[0] = mesh;
+    CHECK_RESULT(
+        capture_frame_with_desc(
+            context,
+            &frame_desc,
+            meshes,
+            transform_arrays,
+            instance_counts,
+            1u,
+            &capture
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK(check_stats(&capture, 4u, 3u, 2u, 3u) == 0);
+
+    CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
+    soc_context_destroy(context);
+    return 0;
+}
+
 static int test_fullscreen_hiz_levels(
     soc_depth_direction depth_direction,
     float expected_depth
@@ -1207,6 +1757,21 @@ int main(void)
         return 1;
     }
     if (test_clipped_oversized_triangle() != 0) {
+        return 1;
+    }
+    if (test_clip_outcode_trivial_paths() != 0) {
+        return 1;
+    }
+    if (test_clip_outcode_partial_active_plane() != 0) {
+        return 1;
+    }
+    if (test_negative_one_to_one_near_outcodes() != 0) {
+        return 1;
+    }
+    if (test_clip_outcode_disjoint_vertex_planes() != 0) {
+        return 1;
+    }
+    if (test_clip_outcode_multi_instance_stats() != 0) {
         return 1;
     }
     if (test_hiz_pipeline_integration() != 0) {

@@ -114,6 +114,11 @@ soc_rasterizer_submit_occluders()
 
 ## 第一阶段：裁剪和提交快速路径
 
+当前实现状态：outcode trivial accept/reject 和受保护的 active-plane clipping 已完成；
+uint16/uint32 提交循环专门化仍未实施。部分相交路径会按原平面顺序处理 active planes，
+并在插值后的 polygon 因浮点舍入落到被跳过平面之外时回退原六平面裁剪，保持参考
+路径的保守性和精确输出。
+
 ### 1. 齐次裁剪 outcode
 
 为每个 clip-space 顶点计算六位 outcode，每一位表示顶点位于对应裁剪平面之外。
@@ -139,21 +144,27 @@ intersection_code = code0 & code1 & code2
 - 修改或包装 `clip_triangle()`：只让部分相交三角形进入 polygon clipping；
 - 复用 `clip_plane_distance()` 的平面定义，确保 outcode 与精确裁剪的 inside 条件一致。
 
-**建议新增方法和类型**
+**当前内部方法和类型**
 
 ```c
 typedef uint8_t soc_clip_outcode;
+
+typedef enum soc_clip_classification {
+    SOC_CLIP_CLASSIFICATION_NONFINITE = 0,
+    SOC_CLIP_CLASSIFICATION_ACCEPT,
+    SOC_CLIP_CLASSIFICATION_REJECT,
+    SOC_CLIP_CLASSIFICATION_PARTIAL,
+} soc_clip_classification;
 
 static soc_clip_outcode compute_clip_outcode(
     const soc_clip_vertex* vertex,
     soc_clip_depth_range depth_range
 );
 
-static soc_bool classify_clip_triangle(
+static soc_clip_classification classify_clip_triangle(
     const soc_clip_vertex vertices[3],
     soc_clip_depth_range depth_range,
-    soc_clip_outcode* out_active_planes,
-    soc_bool* out_trivially_rejected
+    soc_clip_outcode* out_active_planes
 );
 ```
 
@@ -197,9 +208,11 @@ clip only active_planes, then rasterize the fan;
 
 ### 2. 只处理 active clip planes
 
-需要精确裁剪时，只遍历 `union_code` 中置位的平面。若原始三角形的所有顶点均在
-某个凸半空间内，裁剪其他平面所产生的多边形仍是原三角形的子集，不会新产生该
-平面之外的顶点，因此跳过未置位平面是安全的。
+需要精确裁剪时，优先只遍历 `union_code` 中置位的平面。数学上，若原始三角形的
+所有顶点均在某个凸半空间内，裁剪其他平面所产生的多边形仍是原三角形的子集；但
+浮点插值可能让新顶点因舍入略微落到原本 inactive 的平面之外。当前实现在首次产生
+交点后检查每个将被跳过的平面；若当前 polygon 不再完全位于其内，就从原三角形
+回退六平面参考裁剪。
 
 **对应现有方法**
 
@@ -218,10 +231,9 @@ static uint32_t clip_triangle_masked(
 );
 ```
 
-循环仍按 plane 0 到 5 的原始顺序执行，只跳过 mask 未置位的 plane。保持原顺序可以
-减少裁剪交点浮点结果发生变化的概率。由于调用方已经完成有限值检查和分类，
-`clip_triangle_masked()` 不需要再次扫描三个输入顶点；在过渡阶段也可以暂时保留检查，
-待 checksum 和测试稳定后再去除重复工作。
+循环仍按 plane 0 到 5 的原始顺序执行，只跳过能够证明当前 polygon 仍完全位于其内
+的 inactive plane。调用方已经完成原始三个顶点的有限值检查和分类；masked path 的
+额外检查只用于决定是否需要回退 `clip_triangle_all_planes()`。
 
 ### 3. 提交循环专门化
 

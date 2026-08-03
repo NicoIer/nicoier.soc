@@ -10,6 +10,18 @@
 #define SOC_CLIP_PLANE_COUNT 6u
 #define SOC_MAX_CLIPPED_VERTICES 12u
 
+typedef uint8_t soc_clip_outcode;
+
+#define SOC_CLIP_OUTCODE_ALL \
+    ((soc_clip_outcode)((1u << SOC_CLIP_PLANE_COUNT) - 1u))
+
+typedef enum soc_clip_classification {
+    SOC_CLIP_CLASSIFICATION_NONFINITE = 0,
+    SOC_CLIP_CLASSIFICATION_ACCEPT,
+    SOC_CLIP_CLASSIFICATION_REJECT,
+    SOC_CLIP_CLASSIFICATION_PARTIAL,
+} soc_clip_classification;
+
 typedef struct soc_clip_vertex {
     double x;
     double y;
@@ -123,6 +135,55 @@ static double clip_plane_distance(
     }
 }
 
+static soc_clip_outcode compute_clip_outcode(
+    const soc_clip_vertex* vertex,
+    soc_clip_depth_range depth_range
+)
+{
+    soc_clip_outcode outcode = 0u;
+    uint32_t plane;
+
+    for (plane = 0u; plane < SOC_CLIP_PLANE_COUNT; ++plane) {
+        if (clip_plane_distance(vertex, plane, depth_range) < 0.0) {
+            outcode = (soc_clip_outcode)(
+                outcode | (soc_clip_outcode)(1u << plane)
+            );
+        }
+    }
+    return outcode;
+}
+
+static soc_clip_classification classify_clip_triangle(
+    const soc_clip_vertex vertices[3],
+    soc_clip_depth_range depth_range,
+    soc_clip_outcode* out_active_planes
+)
+{
+    soc_clip_outcode active_planes = 0u;
+    soc_clip_outcode common_planes = SOC_CLIP_OUTCODE_ALL;
+    uint32_t index;
+
+    for (index = 0u; index < 3u; ++index) {
+        soc_clip_outcode outcode;
+
+        if (finite_clip_vertex(&vertices[index]) != SOC_TRUE) {
+            *out_active_planes = 0u;
+            return SOC_CLIP_CLASSIFICATION_NONFINITE;
+        }
+        outcode = compute_clip_outcode(&vertices[index], depth_range);
+        active_planes = (soc_clip_outcode)(active_planes | outcode);
+        common_planes = (soc_clip_outcode)(common_planes & outcode);
+    }
+
+    *out_active_planes = active_planes;
+    if (common_planes != 0u) {
+        return SOC_CLIP_CLASSIFICATION_REJECT;
+    }
+    return active_planes == 0u
+        ? SOC_CLIP_CLASSIFICATION_ACCEPT
+        : SOC_CLIP_CLASSIFICATION_PARTIAL;
+}
+
 static soc_clip_vertex interpolate_clip_vertex(
     const soc_clip_vertex* start,
     const soc_clip_vertex* end,
@@ -143,8 +204,7 @@ static uint32_t clip_polygon_against_plane(
     uint32_t input_count,
     soc_clip_vertex* output,
     uint32_t plane,
-    soc_clip_depth_range depth_range,
-    soc_bool* out_was_clipped
+    soc_clip_depth_range depth_range
 )
 {
     soc_clip_vertex previous;
@@ -203,8 +263,6 @@ static uint32_t clip_polygon_against_plane(
             }
             output[output_count] = current;
             ++output_count;
-        } else {
-            *out_was_clipped = SOC_TRUE;
         }
 
         previous = current;
@@ -215,11 +273,10 @@ static uint32_t clip_polygon_against_plane(
     return output_count;
 }
 
-static uint32_t clip_triangle(
+static uint32_t clip_triangle_all_planes(
     const soc_rasterizer* rasterizer,
     const soc_clip_vertex input_triangle[3],
-    soc_clip_vertex output_polygon[SOC_MAX_CLIPPED_VERTICES],
-    soc_bool* out_was_clipped
+    soc_clip_vertex output_polygon[SOC_MAX_CLIPPED_VERTICES]
 )
 {
     soc_clip_vertex buffer_a[SOC_MAX_CLIPPED_VERTICES];
@@ -230,12 +287,7 @@ static uint32_t clip_triangle(
     uint32_t plane;
     uint32_t index;
 
-    *out_was_clipped = SOC_FALSE;
     for (index = 0u; index < 3u; ++index) {
-        if (finite_clip_vertex(&input_triangle[index]) != SOC_TRUE) {
-            *out_was_clipped = SOC_TRUE;
-            return 0u;
-        }
         buffer_a[index] = input_triangle[index];
     }
 
@@ -247,8 +299,7 @@ static uint32_t clip_triangle(
             vertex_count,
             output,
             plane,
-            rasterizer->frame.clip_depth_range,
-            out_was_clipped
+            rasterizer->frame.clip_depth_range
         );
         if (vertex_count == 0u) {
             return 0u;
@@ -257,6 +308,99 @@ static uint32_t clip_triangle(
         swap = input;
         input = output;
         output = swap;
+    }
+
+    memcpy(
+        output_polygon,
+        input,
+        (size_t)vertex_count * sizeof(*output_polygon)
+    );
+    return vertex_count;
+}
+
+static soc_bool polygon_inside_clip_plane(
+    const soc_clip_vertex* vertices,
+    uint32_t vertex_count,
+    uint32_t plane,
+    soc_clip_depth_range depth_range
+)
+{
+    uint32_t index;
+
+    for (index = 0u; index < vertex_count; ++index) {
+        if (!(clip_plane_distance(
+                &vertices[index],
+                plane,
+                depth_range
+            ) >= 0.0)) {
+            return SOC_FALSE;
+        }
+    }
+    return SOC_TRUE;
+}
+
+static uint32_t clip_triangle_masked(
+    const soc_rasterizer* rasterizer,
+    const soc_clip_vertex input_triangle[3],
+    soc_clip_outcode active_planes,
+    soc_clip_vertex output_polygon[SOC_MAX_CLIPPED_VERTICES]
+)
+{
+    soc_clip_vertex buffer_a[SOC_MAX_CLIPPED_VERTICES];
+    soc_clip_vertex buffer_b[SOC_MAX_CLIPPED_VERTICES];
+    soc_clip_vertex* input = buffer_a;
+    soc_clip_vertex* output = buffer_b;
+    uint32_t vertex_count = 3u;
+    uint32_t plane;
+    uint32_t index;
+    soc_bool polygon_changed = SOC_FALSE;
+
+    for (index = 0u; index < 3u; ++index) {
+        buffer_a[index] = input_triangle[index];
+    }
+
+    for (plane = 0u; plane < SOC_CLIP_PLANE_COUNT; ++plane) {
+        const soc_clip_outcode plane_bit =
+            (soc_clip_outcode)(1u << plane);
+        soc_clip_vertex* swap;
+
+        if ((active_planes & plane_bit) == 0u) {
+            /*
+             * An earlier intersection can round just outside a plane that
+             * contained all three source vertices. Preserve the reference
+             * six-plane result by falling back instead of skipping it.
+             */
+            if (polygon_changed == SOC_TRUE &&
+                polygon_inside_clip_plane(
+                    input,
+                    vertex_count,
+                    plane,
+                    rasterizer->frame.clip_depth_range
+                ) != SOC_TRUE) {
+                return clip_triangle_all_planes(
+                    rasterizer,
+                    input_triangle,
+                    output_polygon
+                );
+            }
+            continue;
+        }
+
+        vertex_count = clip_polygon_against_plane(
+            input,
+            vertex_count,
+            output,
+            plane,
+            rasterizer->frame.clip_depth_range
+        );
+        if (vertex_count == 0u) {
+            return 0u;
+        }
+
+        swap = input;
+        input = output;
+        output = swap;
+        polygon_changed = SOC_TRUE;
     }
 
     memcpy(
@@ -680,7 +824,8 @@ soc_result soc_rasterizer_submit_occluders(
         for (triangle = 0u; triangle < triangle_count; ++triangle) {
             soc_clip_vertex clip_triangle_vertices[3];
             soc_clip_vertex clipped_polygon[SOC_MAX_CLIPPED_VERTICES];
-            soc_bool was_clipped;
+            soc_clip_outcode active_planes;
+            soc_clip_classification clip_classification;
             uint32_t clipped_vertex_count;
             uint32_t corner;
             uint32_t fan_index;
@@ -708,15 +853,39 @@ soc_result soc_rasterizer_submit_occluders(
                 );
             }
 
-            clipped_vertex_count = clip_triangle(
+            clip_classification = classify_clip_triangle(
+                clip_triangle_vertices,
+                rasterizer->frame.clip_depth_range,
+                &active_planes
+            );
+            if (clip_classification == SOC_CLIP_CLASSIFICATION_NONFINITE ||
+                clip_classification == SOC_CLIP_CLASSIFICATION_REJECT) {
+                ++rasterizer->clipped_triangle_count;
+                continue;
+            }
+
+            if (clip_classification == SOC_CLIP_CLASSIFICATION_ACCEPT) {
+                if (rasterize_triangle(
+                        rasterizer,
+                        &clip_triangle_vertices[0],
+                        &clip_triangle_vertices[1],
+                        &clip_triangle_vertices[2],
+                        (mesh->flags & SOC_MESH_FLAG_TWO_SIDED) != 0u
+                            ? SOC_TRUE
+                            : SOC_FALSE
+                    ) == SOC_TRUE) {
+                    ++rasterizer->rasterized_triangle_count;
+                }
+                continue;
+            }
+
+            ++rasterizer->clipped_triangle_count;
+            clipped_vertex_count = clip_triangle_masked(
                 rasterizer,
                 clip_triangle_vertices,
-                clipped_polygon,
-                &was_clipped
+                active_planes,
+                clipped_polygon
             );
-            if (was_clipped == SOC_TRUE) {
-                ++rasterizer->clipped_triangle_count;
-            }
             if (clipped_vertex_count < 3u) {
                 continue;
             }

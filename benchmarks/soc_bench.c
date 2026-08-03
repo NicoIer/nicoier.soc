@@ -108,7 +108,9 @@ typedef enum geometry_pattern {
     GEOMETRY_INSIDE,
     GEOMETRY_NEAR_CLIP,
     GEOMETRY_BACKFACE,
-    GEOMETRY_DEGENERATE
+    GEOMETRY_DEGENERATE,
+    GEOMETRY_OUTSIDE,
+    GEOMETRY_SHARED_GRID
 } geometry_pattern;
 
 typedef enum query_pattern {
@@ -245,6 +247,23 @@ static const bench_case g_cases[] = {
      .description = "Build a snapshot from 16384 in-frustum triangles",
      .kind = BENCH_GEOMETRY, .tier = 1u, .width = 640u, .height = 360u,
      .triangle_count = 16384u, .instance_count = 1u},
+    {.name = "geometry.outside.16384",
+     .description = "Reject 16384 triangles outside the right clip plane",
+     .kind = BENCH_GEOMETRY, .tier = 1u, .width = 640u, .height = 360u,
+     .triangle_count = 16384u, .instance_count = 1u,
+     .geometry_pattern = GEOMETRY_OUTSIDE},
+    {.name = "geometry.shared_grid.u16.16384",
+     .description = "Build a shared 16384-triangle grid with uint16 indices",
+     .kind = BENCH_GEOMETRY, .tier = 1u, .width = 640u, .height = 360u,
+     .triangle_count = 16384u, .instance_count = 1u,
+     .geometry_pattern = GEOMETRY_SHARED_GRID,
+     .index_type = SOC_INDEX_UINT16},
+    {.name = "geometry.shared_grid.u32.16384",
+     .description = "Build a shared 16384-triangle grid with uint32 indices",
+     .kind = BENCH_GEOMETRY, .tier = 1u, .width = 640u, .height = 360u,
+     .triangle_count = 16384u, .instance_count = 1u,
+     .geometry_pattern = GEOMETRY_SHARED_GRID,
+     .index_type = SOC_INDEX_UINT32},
     {.name = "geometry.near_clip.16384",
      .description = "Clip 16384 triangles crossing the near plane",
      .kind = BENCH_GEOMETRY, .tier = 1u, .width = 640u, .height = 360u,
@@ -596,8 +615,9 @@ static soc_result create_mesh(
     soc_context* context,
     const float* vertices,
     uint32_t vertex_count,
-    const uint32_t* indices,
+    const void* indices,
     uint32_t index_count,
+    soc_index_type index_type,
     uint32_t flags,
     soc_mesh** out_mesh
 )
@@ -611,7 +631,7 @@ static soc_result create_mesh(
         .vertex_stride = 3u * (uint32_t)sizeof(float),
         .position_offset = 0u,
         .index_count = index_count,
-        .index_type = SOC_INDEX_UINT32
+        .index_type = index_type
     };
     return soc_mesh_create(context, &desc, out_mesh);
 }
@@ -712,7 +732,138 @@ static int create_surface_mesh(
         triangle_count * 3u,
         indices,
         triangle_count * 3u,
+        SOC_INDEX_UINT32,
         SOC_MESH_FLAG_TWO_SIDED,
+        &work->mesh
+    );
+    free(vertices);
+    free(indices);
+    return result == SOC_RESULT_OK ? 0 : 1;
+}
+
+static void write_mesh_index(
+    void* indices,
+    soc_index_type index_type,
+    uint32_t offset,
+    uint32_t value
+)
+{
+    if (index_type == SOC_INDEX_UINT16) {
+        ((uint16_t*)indices)[offset] = (uint16_t)value;
+    } else {
+        ((uint32_t*)indices)[offset] = value;
+    }
+}
+
+static int create_shared_grid_mesh(workload* work)
+{
+    const bench_case* definition = work->definition;
+    const uint32_t triangle_count = definition->triangle_count;
+    const size_t index_size =
+        definition->index_type == SOC_INDEX_UINT16
+        ? sizeof(uint16_t) : sizeof(uint32_t);
+    uint32_t quad_count;
+    uint32_t rows = 1u;
+    uint32_t columns;
+    uint32_t divisor;
+    uint32_t vertex_count;
+    uint32_t index_count;
+    uint32_t row;
+    uint32_t column;
+    float* vertices;
+    void* indices;
+    size_t vertex_bytes;
+    size_t index_bytes;
+    uint64_t vertex_count_u64;
+    soc_result result;
+
+    if (triangle_count == 0u || (triangle_count & 1u) != 0u ||
+        triangle_count > UINT32_MAX / 3u ||
+        (definition->index_type != SOC_INDEX_UINT16 &&
+         definition->index_type != SOC_INDEX_UINT32)) {
+        return 1;
+    }
+    quad_count = triangle_count / 2u;
+    for (divisor = 1u;
+         (uint64_t)divisor * divisor <= quad_count;
+         ++divisor) {
+        if (quad_count % divisor == 0u) {
+            rows = divisor;
+        }
+    }
+    columns = quad_count / rows;
+    vertex_count_u64 =
+        ((uint64_t)columns + 1u) * ((uint64_t)rows + 1u);
+    if (vertex_count_u64 > UINT32_MAX ||
+        (definition->index_type == SOC_INDEX_UINT16 &&
+         vertex_count_u64 > UINT16_MAX)) {
+        return 1;
+    }
+    vertex_count = (uint32_t)vertex_count_u64;
+    index_count = triangle_count * 3u;
+    if (!checked_size_multiply(
+            (size_t)vertex_count,
+            3u * sizeof(float),
+            &vertex_bytes
+        ) ||
+        !checked_size_multiply(
+            (size_t)index_count,
+            index_size,
+            &index_bytes
+        )) {
+        return 1;
+    }
+    vertices = (float*)malloc(vertex_bytes);
+    indices = malloc(index_bytes);
+    if (vertices == NULL || indices == NULL) {
+        free(vertices);
+        free(indices);
+        return 1;
+    }
+
+    for (row = 0u; row <= rows; ++row) {
+        for (column = 0u; column <= columns; ++column) {
+            const uint32_t vertex = row * (columns + 1u) + column;
+            float* position = &vertices[(size_t)vertex * 3u];
+
+            position[0] = -0.90f +
+                1.80f * (float)column / (float)columns;
+            position[1] = -0.90f +
+                1.80f * (float)row / (float)rows;
+            position[2] = case_occluder_depth(definition);
+        }
+    }
+    for (row = 0u; row < rows; ++row) {
+        for (column = 0u; column < columns; ++column) {
+            const uint32_t cell = row * columns + column;
+            const uint32_t first_index = cell * 6u;
+            const uint32_t top_left = row * (columns + 1u) + column;
+            const uint32_t top_right = top_left + 1u;
+            const uint32_t bottom_left = top_left + columns + 1u;
+            const uint32_t bottom_right = bottom_left + 1u;
+
+            write_mesh_index(indices, definition->index_type,
+                first_index + 0u, top_left);
+            write_mesh_index(indices, definition->index_type,
+                first_index + 1u, top_right);
+            write_mesh_index(indices, definition->index_type,
+                first_index + 2u, bottom_right);
+            write_mesh_index(indices, definition->index_type,
+                first_index + 3u, top_left);
+            write_mesh_index(indices, definition->index_type,
+                first_index + 4u, bottom_right);
+            write_mesh_index(indices, definition->index_type,
+                first_index + 5u, bottom_left);
+        }
+    }
+    result = create_mesh(
+        work->context,
+        vertices,
+        vertex_count,
+        indices,
+        index_count,
+        definition->index_type,
+        SOC_MESH_FLAG_NONE,
         &work->mesh
     );
     free(vertices);
@@ -732,6 +883,9 @@ static int create_geometry_mesh(workload* work)
     size_t vertex_bytes;
     size_t index_bytes;
 
+    if (definition->geometry_pattern == GEOMETRY_SHARED_GRID) {
+        return create_shared_grid_mesh(work);
+    }
     if (triangle_count == 0u ||
         triangle_count > UINT32_MAX / 3u ||
         !checked_size_multiply(
@@ -791,6 +945,10 @@ static int create_geometry_mesh(workload* work)
             v[4] = y0;
             v[6] = x1;
             v[7] = y0;
+        } else if (definition->geometry_pattern == GEOMETRY_OUTSIDE) {
+            v[0] += 2.0f;
+            v[3] += 2.0f;
+            v[6] += 2.0f;
         }
         indices[(size_t)triangle * 3u + 0u] = triangle * 3u + 0u;
         indices[(size_t)triangle * 3u + 1u] = triangle * 3u + 1u;
@@ -802,6 +960,7 @@ static int create_geometry_mesh(workload* work)
         triangle_count * 3u,
         indices,
         triangle_count * 3u,
+        SOC_INDEX_UINT32,
         SOC_MESH_FLAG_NONE,
         &work->mesh
     );
@@ -1538,6 +1697,24 @@ static int workload_validate(const workload* work)
              definition->geometry_pattern == GEOMETRY_DEGENERATE) &&
             work->build_stats.rasterized_triangle_count != 0u) {
             fprintf(stderr, "%s: rejected geometry was rasterized\n",
+                definition->name);
+            return 1;
+        }
+        if (definition->geometry_pattern == GEOMETRY_OUTSIDE &&
+            (work->build_stats.clipped_triangle_count !=
+                 definition->triangle_count ||
+             work->build_stats.rasterized_triangle_count != 0u)) {
+            fprintf(stderr,
+                "%s: fully outside geometry counters failed validation\n",
+                definition->name);
+            return 1;
+        }
+        if (definition->geometry_pattern == GEOMETRY_SHARED_GRID &&
+            (work->build_stats.clipped_triangle_count != 0u ||
+             work->build_stats.rasterized_triangle_count !=
+                 definition->triangle_count)) {
+            fprintf(stderr,
+                "%s: shared grid counters failed validation\n",
                 definition->name);
             return 1;
         }
@@ -2390,7 +2567,8 @@ static int write_json(
                 definition->geometry_pattern, definition->query_pattern,
                 definition->large_queries ? "true" : "false",
                 definition->reverse_order ? "true" : "false",
-                definition->kind == BENCH_MESH_CREATE
+                definition->kind == BENCH_MESH_CREATE ||
+                    definition->geometry_pattern == GEOMETRY_SHARED_GRID
                     ? definition->index_type : SOC_INDEX_UINT32,
                 definition->kind == BENCH_MESH_CREATE
                     ? definition->vertex_stride : 12u,

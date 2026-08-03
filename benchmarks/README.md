@@ -74,7 +74,7 @@ Windows 使用相同命令，但应省略 `SOC_APPLE_SDK_PATH` 这一行；多�
 
 主要参数：
 
-- `--suite smoke|core|full`：选择 5 项快速冒烟、38 项稳态回归或 47 项完整
+- `--suite smoke|core|full`：选择 5 项快速冒烟、41 项稳态回归或 50 项完整
   诊断集合。
 - `--filter TEXT`：只运行名称包含 `TEXT` 的 case。
 - `--samples N`：采样轮数，默认 15。
@@ -90,7 +90,8 @@ Windows 使用相同命令，但应省略 `SOC_APPLE_SDK_PATH` 这一行；多�
 
 - 空 snapshot build：多种 POT/NPOT 分辨率以及 forward/reversed Z；原 clear/Hi-Z
   case 现在都计量公开 API 可观察的完整空 snapshot 构建。
-- geometry snapshot build：16,384 个小三角形的视锥内、近平面裁剪、背面和退化路径。
+- geometry snapshot build：16,384 个小三角形的视锥内、完全视锥外、近平面裁剪、
+  背面和退化路径，以及 uint16/uint32 shared-index grid。
 - fill snapshot build：全屏覆盖，以及 1/4/16 层的 near-to-far 与 far-to-near overdraw。
 - instance snapshot build：固定 128 三角形网格的 1/16/256 实例扩展。
 - query：每轮 65,536 个 AABB，分别以 1/64/4096/65536 批量调用，并覆盖
