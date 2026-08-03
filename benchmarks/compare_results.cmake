@@ -22,6 +22,9 @@ endif()
 if(NOT DEFINED FAIL_ON_REGRESSION)
     set(FAIL_ON_REGRESSION OFF)
 endif()
+if(NOT DEFINED FAIL_ON_NOISY)
+    set(FAIL_ON_NOISY OFF)
+endif()
 
 file(READ "${BASELINE}" baseline_json)
 file(READ "${CANDIDATE}" candidate_json)
@@ -173,6 +176,7 @@ math(EXPR baseline_case_last "${baseline_case_count} - 1")
 math(EXPR candidate_case_last "${candidate_case_count} - 1")
 set(compared_count 0)
 set(regression_count 0)
+set(noisy_count 0)
 
 foreach(candidate_index RANGE 0 ${candidate_case_last})
     string(JSON candidate_name ERROR_VARIABLE candidate_name_error
@@ -216,6 +220,21 @@ foreach(candidate_index RANGE 0 ${candidate_case_last})
                 "Case \"${candidate_name}\" has non-integer summary.${metric}")
         endif()
     endforeach()
+
+    string(JSON baseline_noisy ERROR_VARIABLE baseline_noisy_error
+        GET "${baseline_json}" cases ${baseline_index} summary noisy)
+    string(JSON candidate_noisy ERROR_VARIABLE candidate_noisy_error
+        GET "${candidate_json}" cases ${candidate_index} summary noisy)
+    if(NOT baseline_noisy_error STREQUAL "NOTFOUND" OR
+       NOT candidate_noisy_error STREQUAL "NOTFOUND")
+        message(FATAL_ERROR
+            "Case \"${candidate_name}\" must contain summary.noisy")
+    endif()
+    set(case_noisy FALSE)
+    if(baseline_noisy OR candidate_noisy)
+        set(case_noisy TRUE)
+        math(EXPR noisy_count "${noisy_count} + 1")
+    endif()
 
     foreach(array_name samples_ns iterations)
         string(JSON baseline_array_count ERROR_VARIABLE baseline_array_error
@@ -354,7 +373,13 @@ foreach(candidate_index RANGE 0 ${candidate_case_last})
     math(EXPR compared_count "${compared_count} + 1")
 
     if(case_regressed)
-        set(case_status "REGRESSION")
+        if(case_noisy)
+            set(case_status "REGRESSION (noisy)")
+        else()
+            set(case_status "REGRESSION")
+        endif()
+    elseif(case_noisy)
+        set(case_status "NOISY")
     elseif(candidate_median_ns LESS baseline_median_ns)
         set(case_status "improved")
     else()
@@ -387,10 +412,15 @@ foreach(baseline_index RANGE 0 ${baseline_case_last})
 endforeach()
 
 message(STATUS
-    "Compared ${compared_count} cases: ${regression_count} regression(s); "
+    "Compared ${compared_count} cases: ${regression_count} regression(s), "
+    "${noisy_count} noisy/inconclusive; "
     "rule is >${THRESHOLD_PERCENT}% and >3*max(MAD)")
 
 if(regression_count GREATER 0 AND FAIL_ON_REGRESSION)
     message(FATAL_ERROR
         "Performance comparison failed with ${regression_count} regression(s)")
+endif()
+if(noisy_count GREATER 0 AND FAIL_ON_NOISY)
+    message(FATAL_ERROR
+        "Performance comparison has ${noisy_count} noisy case(s); rerun it")
 endif()

@@ -68,7 +68,9 @@ context/mesh 创建、resize 和读回会分配或复制内存，因此与稳态
 
 输入生成、内存预触碰、资源分配、结果校验和验证用深度读回都在计时区外。
 每个性能 case 先预热至少 5 次和 250 ms，再自动标定迭代次数，使每个样本的计时
-负载至少达到 `--sample-ms`。默认保留全部 15 个样本，不删除离群值，并报告：
+负载至少达到 `--sample-ms`。只读 query/readback 阶段会在每轮预热或样本内复用
+同一个已构建的 Hi-Z 帧，避免计时外的重复建帧支配墙钟时间。默认保留全部 15
+个样本，不删除离群值，并报告：
 
 - median、P95、MAD、min 和 max；
 - 每个样本的有效 operation 次数；
@@ -107,8 +109,11 @@ cmake \
 1. 候选 median 比基线慢超过 `THRESHOLD_PERCENT`（默认 5%）；
 2. 绝对差大于 `3 * max(baseline MAD, candidate MAD)`。
 
-默认只报告回退；添加 `-DFAIL_ON_REGRESSION=ON` 才返回失败。P95 用于诊断，
-不参与判定，也不生成会掩盖单项退化的综合分数。
+默认只报告回退；添加 `-DFAIL_ON_REGRESSION=ON` 才返回失败。若任一侧结果被
+标记为 noisy，比较器会将该项显示为 `NOISY`（满足回退规则时显示
+`REGRESSION (noisy)`），并计入 noisy/inconclusive 数量；CI 可添加
+`-DFAIL_ON_NOISY=ON` 要求重新测量。P95 用于诊断，不参与判定，也不生成会
+掩盖单项退化的综合分数。
 
 为减少噪声，应关闭高负载后台任务、保持 CPU 电源/散热状态一致、避免同时
 运行多个 benchmark，并在同一启动方式下交替测量基线与候选。跨机器或不同

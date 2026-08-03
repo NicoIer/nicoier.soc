@@ -1636,14 +1636,11 @@ static int workload_validate(const workload* work)
     return 0;
 }
 
-static int run_one_operation(workload* work, uint64_t* elapsed_ns)
+static int run_timed_operation(workload* work, uint64_t* elapsed_ns)
 {
     uint64_t begin;
     uint64_t end;
 
-    if (workload_prepare(work) != 0) {
-        return 1;
-    }
     begin = timer_now_ns();
     if (workload_run_timed(work) != 0) {
         return 1;
@@ -1653,10 +1650,78 @@ static int run_one_operation(workload* work, uint64_t* elapsed_ns)
         fprintf(stderr, "monotonic clock failed to advance\n");
         return 1;
     }
+    *elapsed_ns = end - begin;
+    return 0;
+}
+
+static int run_one_operation(workload* work, uint64_t* elapsed_ns)
+{
+    if (workload_prepare(work) != 0) {
+        return 1;
+    }
+    if (run_timed_operation(work, elapsed_ns) != 0) {
+        return 1;
+    }
     if (workload_finish(work) != 0) {
         return 1;
     }
-    *elapsed_ns = end - begin;
+    return 0;
+}
+
+static int can_reuse_prepared_state(const workload* work)
+{
+    const bench_kind kind = work->definition->kind;
+
+    /*
+     * Queries and depth readbacks are read-only after the Hi-Z pyramid has
+     * been built. Reusing that prepared frame keeps setup outside the timed
+     * phase without rebuilding the same pyramid for every sub-microsecond
+     * operation.
+     */
+    return kind == BENCH_QUERY || kind == BENCH_READBACK;
+}
+
+static int run_operation_series(
+    workload* work,
+    uint64_t target_ns,
+    uint64_t minimum_iterations,
+    uint64_t* total_ns,
+    uint64_t* iterations
+)
+{
+    const int reuse_prepared_state = can_reuse_prepared_state(work);
+
+    *total_ns = 0u;
+    *iterations = 0u;
+    if (reuse_prepared_state && workload_prepare(work) != 0) {
+        return 1;
+    }
+
+    do {
+        uint64_t operation_ns;
+        int operation_result;
+
+        if (reuse_prepared_state) {
+            operation_result = run_timed_operation(work, &operation_ns);
+        } else {
+            operation_result = run_one_operation(work, &operation_ns);
+        }
+        if (operation_result != 0) {
+            return 1;
+        }
+        if (*total_ns > UINT64_MAX - operation_ns ||
+            *iterations == UINT64_MAX) {
+            fprintf(stderr, "%s: iteration accounting overflow\n",
+                work->definition->name);
+            return 1;
+        }
+        *total_ns += operation_ns;
+        ++*iterations;
+    } while (*iterations < minimum_iterations || *total_ns < target_ns);
+
+    if (reuse_prepared_state && workload_finish(work) != 0) {
+        return 1;
+    }
     return 0;
 }
 
@@ -1782,8 +1847,8 @@ static int benchmark_case_run(
     work.capture_results = SOC_FALSE;
 
     if (!opts->validate_only) {
-        uint64_t warmup_ns = 0u;
-        uint32_t warmup_iterations = 0u;
+        uint64_t warmup_ns;
+        uint64_t warmup_iterations;
 
         result->samples_ns = (uint64_t*)calloc(
             opts->samples,
@@ -1799,15 +1864,16 @@ static int benchmark_case_run(
         }
 
         /* Warm for at least five operations and 250 ms of measured work. */
-        do {
-            if (run_one_operation(&work, &ignored) != 0) {
-                workload_destroy(&work);
-                return 1;
-            }
-            warmup_ns += ignored;
-            ++warmup_iterations;
-        } while (warmup_iterations < 5u ||
-            warmup_ns < UINT64_C(250000000));
+        if (run_operation_series(
+                &work,
+                UINT64_C(250000000),
+                UINT64_C(5),
+                &warmup_ns,
+                &warmup_iterations
+            ) != 0) {
+            workload_destroy(&work);
+            return 1;
+        }
 
         for (sample = 0u; sample < opts->samples; ++sample) {
             const uint64_t target_ns =
@@ -1818,17 +1884,23 @@ static int benchmark_case_run(
             uint64_t total_ns = 0u;
             uint64_t iterations = 0u;
 
-            do {
-                uint64_t operation_ns;
+            if (run_operation_series(
+                    &work,
+                    target_ns,
+                    UINT64_C(1),
+                    &total_ns,
+                    &iterations
+                ) != 0) {
+                workload_destroy(&work);
+                return 1;
+            }
 
-                if (run_one_operation(&work, &operation_ns) != 0) {
-                    workload_destroy(&work);
-                    return 1;
-                }
-                total_ns += operation_ns;
-                ++iterations;
-            } while (total_ns < target_ns);
-
+            if (iterations > UINT64_MAX / repeat_count) {
+                fprintf(stderr, "%s: operation count overflow\n",
+                    definition->name);
+                workload_destroy(&work);
+                return 1;
+            }
             result->iterations[sample] = iterations * repeat_count;
             result->samples_ns[sample] =
                 (total_ns + result->iterations[sample] / 2u) /
