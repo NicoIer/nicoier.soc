@@ -64,10 +64,13 @@ set_target_properties(
         OUTPUT_NAME soc
 )
 
-if(WIN32 AND SOC_BUILD_SHARED)
-    # MinGW otherwise prefixes the runtime DLL with "lib", unlike MSVC.
-    # Keeping the runtime name soc.dll matches DllImport("soc").
-    set_target_properties(soc PROPERTIES PREFIX "")
+if(WIN32)
+    # Keep Windows artifact names consistent with the libsoc names used on
+    # every other platform, including MSVC where CMake omits "lib" by default.
+    set_target_properties(soc PROPERTIES PREFIX "lib")
+    if(SOC_BUILD_SHARED)
+        set_target_properties(soc PROPERTIES IMPORT_PREFIX "lib")
+    endif()
 endif()
 
 if(SOC_BUILD_SHARED)

@@ -1,5 +1,5 @@
-set(CMAKE_SYSTEM_NAME Linux)
-set(CMAKE_SYSTEM_PROCESSOR aarch64)
+set(CMAKE_SYSTEM_NAME Windows)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
 
 find_program(SOC_ZIG_EXECUTABLE NAMES zig)
 if(NOT SOC_ZIG_EXECUTABLE)
@@ -12,7 +12,7 @@ set(
     CACHE STRING
     "C compiler command"
 )
-set(CMAKE_C_FLAGS_INIT "--target=aarch64-linux-gnu")
+set(CMAKE_C_FLAGS_INIT "--target=x86_64-windows-gnu")
 
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)

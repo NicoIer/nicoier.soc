@@ -167,54 +167,54 @@ namespace soc
 
     internal static unsafe partial class Methods
     {
-        [DllImport("soc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         [return: NativeTypeName("uint32_t")]
         public static extern uint soc_get_abi_version();
 
-        [DllImport("soc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         [return: NativeTypeName("soc_result")]
         public static extern int soc_context_create([NativeTypeName("const soc_config *")] soc_config* config, soc_context** out_context);
 
-        [DllImport("soc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         public static extern void soc_context_destroy(soc_context* context);
 
-        [DllImport("soc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         [return: NativeTypeName("soc_result")]
         public static extern int soc_context_resize(soc_context* context, [NativeTypeName("uint32_t")] uint width, [NativeTypeName("uint32_t")] uint height);
 
-        [DllImport("soc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         [return: NativeTypeName("soc_result")]
         public static extern int soc_mesh_create(soc_context* context, [NativeTypeName("const soc_mesh_desc *")] soc_mesh_desc* desc, soc_mesh** out_mesh);
 
-        [DllImport("soc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         [return: NativeTypeName("soc_result")]
         public static extern int soc_mesh_destroy(soc_mesh* mesh);
 
-        [DllImport("soc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         [return: NativeTypeName("soc_result")]
         public static extern int soc_frame_begin(soc_context* context, [NativeTypeName("const soc_frame_desc *")] soc_frame_desc* desc);
 
-        [DllImport("soc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         [return: NativeTypeName("soc_result")]
         public static extern int soc_occluders_submit(soc_context* context, [NativeTypeName("const soc_mesh *")] soc_mesh* mesh, [NativeTypeName("const soc_mat4 *")] soc_mat4* object_to_world, [NativeTypeName("uint32_t")] uint instance_count);
 
-        [DllImport("soc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         [return: NativeTypeName("soc_result")]
         public static extern int soc_occluders_finish(soc_context* context);
 
-        [DllImport("soc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         [return: NativeTypeName("soc_result")]
         public static extern int soc_visibility_test_aabbs(soc_context* context, [NativeTypeName("const soc_aabb *")] soc_aabb* world_bounds, [NativeTypeName("uint32_t")] uint bounds_count, [NativeTypeName("soc_visibility *")] byte* out_visibility);
 
-        [DllImport("soc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         [return: NativeTypeName("soc_result")]
         public static extern int soc_frame_end(soc_context* context);
 
-        [DllImport("soc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         [return: NativeTypeName("soc_result")]
         public static extern int soc_context_get_stats([NativeTypeName("const soc_context *")] soc_context* context, soc_stats* out_stats);
 
-        [DllImport("soc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        [DllImport("libsoc", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         [return: NativeTypeName("soc_result")]
         public static extern int soc_hiz_level_query([NativeTypeName("const soc_context *")] soc_context* context, [NativeTypeName("uint32_t")] uint level, soc_hiz_level_info* out_info, float* out_depth, [NativeTypeName("uint64_t")] ulong out_depth_count);
 

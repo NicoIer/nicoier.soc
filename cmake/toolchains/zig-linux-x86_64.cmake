@@ -6,8 +6,12 @@ if(NOT SOC_ZIG_EXECUTABLE)
     message(FATAL_ERROR "zig was not found in PATH")
 endif()
 
-set(CMAKE_C_COMPILER "${SOC_ZIG_EXECUTABLE}" CACHE FILEPATH "C compiler")
-set(CMAKE_C_COMPILER_ARG1 "cc" CACHE STRING "C compiler first argument")
+set(
+    CMAKE_C_COMPILER
+    "${SOC_ZIG_EXECUTABLE};cc"
+    CACHE STRING
+    "C compiler command"
+)
 set(CMAKE_C_FLAGS_INIT "--target=x86_64-linux-gnu")
 
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)

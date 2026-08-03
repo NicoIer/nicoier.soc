@@ -16,10 +16,27 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+在 macOS 上执行原生构建前，还必须显式设置 SDK 绝对路径；项目不会使用活动
+Xcode 的默认 SDK：
+
+```sh
+export SOC_APPLE_SDK="/absolute/path/to/MacOSX.sdk"
+```
+
 需要静态库时，可设置 `SOC_BUILD_SHARED=OFF`
 
 Linux、Android、macOS、iOS 和 Windows 的交叉编译 preset、工具链要求及
 产物说明见 [跨平台构建](docs/BUILDING.md)。
+
+在一台 Mac 上构建并安装当前支持的全部平台变体：
+
+```sh
+export SOC_ANDROID_NDK="/absolute/path/to/android-ndk"
+export SOC_MACOS_SDK="/absolute/path/to/MacOSX.sdk"
+export SOC_IOS_DEVICE_SDK="/absolute/path/to/iPhoneOS.sdk"
+export SOC_IOS_SIMULATOR_SDK="/absolute/path/to/iPhoneSimulator.sdk"
+./scripts/build-all-macos.sh
+```
 
 ## 性能基准
 

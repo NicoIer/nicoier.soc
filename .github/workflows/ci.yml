@@ -1,0 +1,374 @@
+name: Native CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux shared + install consumer
+            os: ubuntu-24.04
+            shared: "ON"
+            verify_install: true
+          - name: Linux static + install consumer
+            os: ubuntu-24.04
+            shared: "OFF"
+            verify_install: true
+          - name: macOS shared
+            os: macos-15
+            shared: "ON"
+            verify_install: false
+          - name: Windows shared
+            os: windows-2022
+            shared: "ON"
+            verify_install: false
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set explicit host Apple SDK path
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          developer_dir="/Applications/Xcode_16.4.app/Contents/Developer"
+          sdkroot="$developer_dir/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk"
+          test -d "$developer_dir"
+          test -d "$sdkroot"
+          {
+            echo "DEVELOPER_DIR=$developer_dir"
+            echo "SOC_APPLE_SDK=$sdkroot"
+          } >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build/ci-host
+          -DCMAKE_BUILD_TYPE=Debug
+          -DSOC_BUILD_SHARED=${{ matrix.shared }}
+          -DSOC_BUILD_TESTS=ON
+          -DSOC_BUILD_TOOLS=ON
+          -DSOC_BUILD_BENCHMARKS=ON
+          -DSOC_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build build/ci-host --config Debug --parallel
+
+      - name: Test
+        run: ctest --test-dir build/ci-host --build-config Debug --output-on-failure
+
+      - name: Install
+        if: matrix.verify_install
+        run: cmake --install build/ci-host --config Debug --prefix "$GITHUB_WORKSPACE/build/ci-install"
+
+      - name: Configure external consumer
+        if: matrix.verify_install
+        run: cmake -S tests/package-consumer -B build/ci-consumer -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/build/ci-install"
+
+      - name: Build external consumer
+        if: matrix.verify_install
+        run: cmake --build build/ci-consumer --config Debug --parallel
+
+      - name: Test external consumer
+        if: matrix.verify_install
+        run: ctest --test-dir build/ci-consumer --build-config Debug --output-on-failure
+
+  macos-all-platforms:
+    name: All release libraries from macOS
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      SOC_ANDROID_NDK: /Users/runner/Library/Android/sdk/ndk/29.0.14206865
+      SOC_MACOS_SDK: /Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk
+      SOC_IOS_DEVICE_SDK: /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk
+      SOC_IOS_SIMULATOR_SDK: /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator18.5.sdk
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Zig
+        run: brew install zig
+
+      - name: Reject missing SDK paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          if env \
+            -u SOC_ANDROID_NDK \
+            -u SOC_MACOS_SDK \
+            -u SOC_IOS_DEVICE_SDK \
+            -u SOC_IOS_SIMULATOR_SDK \
+            ./scripts/build-all-macos.sh 2>missing-sdk.log
+          then
+            echo "build-all unexpectedly accepted missing SDK paths" >&2
+            exit 1
+          fi
+          grep -q "Android NDK path is required" missing-sdk.log
+          if grep -q "==> Configuring" missing-sdk.log
+          then
+            echo "build-all started configuring before validating SDK paths" >&2
+            exit 1
+          fi
+
+      - name: Verify pinned SDK paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$DEVELOPER_DIR"
+          test -f "$SOC_ANDROID_NDK/build/cmake/android.toolchain.cmake"
+          test -d "$SOC_MACOS_SDK"
+          test -d "$SOC_IOS_DEVICE_SDK"
+          test -d "$SOC_IOS_SIMULATOR_SDK"
+
+      - name: Validate SDK path contract
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./scripts/build-all-macos.sh --validate-inputs-only
+
+          env \
+            -u SOC_ANDROID_NDK \
+            -u SOC_MACOS_SDK \
+            -u SOC_IOS_DEVICE_SDK \
+            -u SOC_IOS_SIMULATOR_SDK \
+            ./scripts/build-all-macos.sh \
+              --validate-inputs-only \
+              --android-ndk "$SOC_ANDROID_NDK" \
+              --macos-sdk "$SOC_MACOS_SDK" \
+              --ios-device-sdk "$SOC_IOS_DEVICE_SDK" \
+              --ios-simulator-sdk "$SOC_IOS_SIMULATOR_SDK"
+
+          if ./scripts/build-all-macos.sh \
+            --validate-inputs-only \
+            --android-ndk relative/ndk 2>relative-sdk.log
+          then
+            echo "build-all unexpectedly accepted a relative SDK path" >&2
+            exit 1
+          fi
+          grep -q "path must be absolute" relative-sdk.log
+
+          if ./scripts/build-all-macos.sh \
+            --validate-inputs-only \
+            --android-ndk /definitely/not/an/ndk 2>invalid-sdk.log
+          then
+            echo "build-all fell back after an invalid CLI path" >&2
+            exit 1
+          fi
+          grep -q "/definitely/not/an/ndk" invalid-sdk.log
+
+          if ./scripts/build-all-macos.sh \
+            --validate-inputs-only \
+            --ios-device-sdk "$SOC_IOS_SIMULATOR_SDK" \
+            2>swapped-apple-sdk.log
+          then
+            echo "build-all accepted a simulator SDK as a device SDK" >&2
+            exit 1
+          fi
+          grep -q "Apple SDK platform mismatch" swapped-apple-sdk.log
+
+          common_flags=(
+            -G Ninja
+            -DSOC_BUILD_TESTS=OFF
+            -DSOC_BUILD_TOOLS=OFF
+            -DSOC_BUILD_BENCHMARKS=OFF
+          )
+          android_flags=(
+            "${common_flags[@]}"
+            "-DCMAKE_TOOLCHAIN_FILE=$GITHUB_WORKSPACE/cmake/toolchains/android.cmake"
+            -DANDROID_ABI=arm64-v8a
+            -DANDROID_PLATFORM=android-21
+          )
+          apple_flags=(
+            "${common_flags[@]}"
+            "-DCMAKE_TOOLCHAIN_FILE=$GITHUB_WORKSPACE/cmake/toolchains/apple-sdk.cmake"
+          )
+
+          expect_failure() {
+            local name="$1"
+            local expected="$2"
+            shift 2
+            if "$@" >"$name.log" 2>&1
+            then
+              echo "$name unexpectedly succeeded" >&2
+              exit 1
+            fi
+            grep -Fq "$expected" "$name.log"
+          }
+
+          env SOC_ANDROID_NDK="$SOC_ANDROID_NDK" \
+            cmake -S . -B build/sdk-contract/android-env \
+              "${android_flags[@]}"
+          env SOC_APPLE_SDK="$SOC_MACOS_SDK" \
+            cmake -S . -B build/sdk-contract/apple-env \
+              "${apple_flags[@]}" \
+              -DSOC_APPLE_SDK_PLATFORM=macosx
+
+          expect_failure android-missing "Android NDK path is required" \
+            env -u SOC_ANDROID_NDK \
+              ANDROID_NDK_HOME="$SOC_ANDROID_NDK" \
+            cmake -S . -B build/sdk-contract/android-missing \
+              "${android_flags[@]}" \
+              "-DSOC_ANDROID_NDK:PATH=$SOC_ANDROID_NDK" \
+              "-DCMAKE_ANDROID_NDK:PATH=$SOC_ANDROID_NDK"
+          expect_failure android-relative "Android NDK path must be absolute" \
+            env -u SOC_ANDROID_NDK \
+              cmake -S . -B build/sdk-contract/android-relative \
+              "${android_flags[@]}" \
+              -DSOC_ANDROID_NDK_PATH:PATH=relative/ndk
+          expect_failure android-conflict "Conflicting Android NDK paths" \
+            env SOC_ANDROID_NDK="$SOC_ANDROID_NDK" \
+              cmake -S . -B build/sdk-contract/android-conflict \
+              "${android_flags[@]}" \
+              -DSOC_ANDROID_NDK_PATH:PATH=/definitely/not/the/configured/ndk
+
+          expect_failure apple-missing "Apple SDK path is required" \
+            env -u SOC_APPLE_SDK \
+              SDKROOT="$SOC_MACOS_SDK" \
+            cmake -S . -B build/sdk-contract/apple-missing \
+              "${apple_flags[@]}" \
+              -DSOC_APPLE_SDK_PLATFORM=macosx \
+              "-DSOC_APPLE_SDK:PATH=$SOC_MACOS_SDK" \
+              "-DCMAKE_OSX_SYSROOT:PATH=$SOC_MACOS_SDK"
+          expect_failure apple-relative "Apple SDK path must be absolute" \
+            env -u SOC_APPLE_SDK \
+            cmake -S . -B build/sdk-contract/apple-relative \
+              "${apple_flags[@]}" \
+              -DSOC_APPLE_SDK_PLATFORM=macosx \
+              -DSOC_APPLE_SDK_PATH:PATH=relative/sdk
+          expect_failure apple-conflict "Conflicting Apple SDK paths" \
+            env SOC_APPLE_SDK="$SOC_MACOS_SDK" \
+            cmake -S . -B build/sdk-contract/apple-conflict \
+              "${apple_flags[@]}" \
+              -DSOC_APPLE_SDK_PLATFORM=macosx \
+              -DSOC_APPLE_SDK_PATH:PATH=/definitely/not/the/configured/sdk
+          expect_failure apple-platform "Apple SDK platform mismatch" \
+            env SOC_APPLE_SDK="$SOC_IOS_SIMULATOR_SDK" \
+            cmake -S . -B build/sdk-contract/apple-platform \
+              "${apple_flags[@]}" \
+              -DSOC_APPLE_SDK_PLATFORM=iphoneos
+          expect_failure apple-native-missing "Apple SDK path is required" \
+            env -u SOC_APPLE_SDK \
+              SDKROOT="$SOC_MACOS_SDK" \
+            cmake -S . -B build/sdk-contract/apple-native-missing \
+              "${common_flags[@]}" \
+              "-DCMAKE_OSX_SYSROOT:PATH=$SOC_MACOS_SDK"
+
+          expect_failure apple-macos-preset-platform \
+            "Apple SDK platform mismatch" \
+            env -u SOC_APPLE_SDK \
+            cmake --preset macos-universal \
+              -B build/sdk-contract/apple-macos-preset-platform \
+              "-DSOC_APPLE_SDK_PATH:PATH=$SOC_IOS_DEVICE_SDK"
+          expect_failure apple-device-preset-platform \
+            "Apple SDK platform mismatch" \
+            env -u SOC_APPLE_SDK \
+            cmake --preset ios-device-arm64 \
+              -B build/sdk-contract/apple-device-preset-platform \
+              "-DSOC_APPLE_SDK_PATH:PATH=$SOC_IOS_SIMULATOR_SDK"
+          expect_failure apple-simulator-preset-platform \
+            "Apple SDK platform mismatch" \
+            env -u SOC_APPLE_SDK \
+            cmake --preset ios-simulator-universal \
+              -B build/sdk-contract/apple-simulator-preset-platform \
+              "-DSOC_APPLE_SDK_PATH:PATH=$SOC_IOS_DEVICE_SDK"
+
+          env -u SOC_ANDROID_NDK \
+            cmake -S . -B build/sdk-contract/android-cache \
+              "${android_flags[@]}" \
+              "-DSOC_ANDROID_NDK_PATH:PATH=$SOC_ANDROID_NDK"
+          expect_failure android-cache-reuse "Android NDK path is required" \
+            env -u SOC_ANDROID_NDK \
+            cmake -S . -B build/sdk-contract/android-cache
+
+          env -u SOC_APPLE_SDK \
+            cmake -S . -B build/sdk-contract/apple-cache \
+              "${apple_flags[@]}" \
+              -DSOC_APPLE_SDK_PLATFORM=macosx \
+              "-DSOC_APPLE_SDK_PATH:PATH=$SOC_MACOS_SDK"
+          expect_failure apple-cache-reuse "Apple SDK path is required" \
+            env -u SOC_APPLE_SDK \
+            cmake -S . -B build/sdk-contract/apple-cache
+
+          env -u SOC_APPLE_SDK \
+            cmake -S . -B build/sdk-contract/apple-native-cache \
+              "${common_flags[@]}" \
+              "-DSOC_APPLE_SDK_PATH:PATH=$SOC_MACOS_SDK"
+          expect_failure apple-native-cache-reuse \
+            "Apple SDK path is required" \
+            env -u SOC_APPLE_SDK \
+            cmake -S . -B build/sdk-contract/apple-native-cache
+
+          expect_failure android-post-failure \
+            "project could not find requested file" \
+            env -u SOC_ANDROID_NDK \
+            cmake -S . -B build/sdk-contract/android-post-failure \
+              "${android_flags[@]}" \
+              "-DSOC_ANDROID_NDK_PATH:PATH=$SOC_ANDROID_NDK" \
+              -DCMAKE_PROJECT_INCLUDE=/definitely/not/a/cmake/file
+          expect_failure android-post-failure-cache-reuse \
+            "Android NDK path is required" \
+            env -u SOC_ANDROID_NDK \
+            cmake -S . -B build/sdk-contract/android-post-failure \
+              -DCMAKE_PROJECT_INCLUDE=
+
+          expect_failure apple-post-failure \
+            "project could not find requested file" \
+            env -u SOC_APPLE_SDK \
+            cmake -S . -B build/sdk-contract/apple-post-failure \
+              "${apple_flags[@]}" \
+              -DSOC_APPLE_SDK_PLATFORM=macosx \
+              "-DSOC_APPLE_SDK_PATH:PATH=$SOC_MACOS_SDK" \
+              -DCMAKE_PROJECT_INCLUDE=/definitely/not/a/cmake/file
+          expect_failure apple-post-failure-cache-reuse \
+            "Apple SDK path is required" \
+            env -u SOC_APPLE_SDK \
+            cmake -S . -B build/sdk-contract/apple-post-failure \
+              -DCMAKE_PROJECT_INCLUDE=
+
+      - name: Build every release platform from macOS
+        run: ./scripts/build-all-macos.sh
+
+  sanitizer:
+    name: Linux ASan + UBSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure
+        run: cmake --preset sanitize -DSOC_BUILD_BENCHMARKS=OFF
+
+      - name: Build
+        run: cmake --build --preset sanitize --parallel
+
+      - name: Test
+        run: ctest --preset sanitize

@@ -1,11 +1,55 @@
 cmake_minimum_required(VERSION 3.21)
 
+# Native top-level macOS builds also require an explicit SDK. Include the
+# repository's Apple wrapper here even when CMake is already using it as a
+# toolchain: older build directories created before the wrapper was attached
+# to the presets do not reload a newly assigned CMAKE_TOOLCHAIN_FILE.
+get_filename_component(
+    _soc_apple_toolchain_file
+    "${CMAKE_CURRENT_LIST_DIR}/cmake/toolchains/apple-sdk.cmake"
+    REALPATH
+)
+set(_soc_load_apple_toolchain OFF)
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin"
+        AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    if(NOT DEFINED CMAKE_TOOLCHAIN_FILE OR CMAKE_TOOLCHAIN_FILE STREQUAL "")
+        set(SOC_APPLE_SDK_PLATFORM macosx)
+        set(_soc_load_apple_toolchain ON)
+    else()
+        get_filename_component(
+            _soc_requested_toolchain_file
+            "${CMAKE_TOOLCHAIN_FILE}"
+            REALPATH
+            BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+        if(_soc_requested_toolchain_file STREQUAL _soc_apple_toolchain_file)
+            set(_soc_load_apple_toolchain ON)
+        endif()
+    endif()
+endif()
+if(_soc_load_apple_toolchain)
+    include("${_soc_apple_toolchain_file}")
+endif()
+
 project(
     soc
     VERSION 0.2.0
     DESCRIPTION "CPU software rasterization and occlusion culling library"
     LANGUAGES C
 )
+
+# CMake's unused-command-line tracking does not count reads performed only by
+# a toolchain file on every reconfigure. Touch the preset's platform contract
+# in project scope as well so a correctly consumed input stays warning-free.
+if(DEFINED SOC_APPLE_SDK_PLATFORM)
+    set(_soc_apple_sdk_platform "${SOC_APPLE_SDK_PLATFORM}")
+endif()
+if(DEFINED SOC_APPLE_SDK_PATH)
+    set(_soc_apple_sdk_path "${SOC_APPLE_SDK_PATH}")
+endif()
+if(DEFINED SOC_ANDROID_NDK_PATH)
+    set(_soc_android_ndk_path "${SOC_ANDROID_NDK_PATH}")
+endif()
 
 set(SOC_BUILD_SHARED_DEFAULT ON)
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")

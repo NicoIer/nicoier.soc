@@ -367,6 +367,70 @@ static int test_invalid_layout_is_atomic(void)
     return 0;
 }
 
+static int test_invalid_arguments_and_flags_are_atomic(void)
+{
+    const float positions[] = {
+        -1.0f, -1.0f, 0.0f,
+         1.0f, -1.0f, 0.0f,
+         0.0f,  1.0f, 0.0f,
+    };
+    const uint16_t indices[] = {0u, 1u, 2u};
+    soc_context* context;
+    soc_mesh_desc desc = make_mesh_desc(
+        positions,
+        indices,
+        3u,
+        3u * (uint32_t)sizeof(float),
+        0u,
+        3u,
+        SOC_INDEX_UINT16
+    );
+    soc_mesh* mesh;
+
+    context = create_context();
+    CHECK(context != NULL);
+
+    mesh = (soc_mesh*)(uintptr_t)1u;
+    CHECK_RESULT(
+        soc_mesh_create(NULL, &desc, &mesh),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+    CHECK(mesh == NULL);
+
+    mesh = (soc_mesh*)(uintptr_t)1u;
+    CHECK_RESULT(
+        soc_mesh_create(context, NULL, &mesh),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+    CHECK(mesh == NULL);
+    CHECK_RESULT(
+        soc_mesh_create(context, &desc, NULL),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+
+    desc.struct_size = SOC_MESH_DESC_SIZE_V1 - 1u;
+    mesh = (soc_mesh*)(uintptr_t)1u;
+    CHECK_RESULT(
+        soc_mesh_create(context, &desc, &mesh),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+    CHECK(mesh == NULL);
+
+    desc.struct_size = sizeof(desc);
+    desc.flags = SOC_MESH_FLAG_TWO_SIDED | (1u << 1u);
+    mesh = (soc_mesh*)(uintptr_t)1u;
+    CHECK_RESULT(
+        soc_mesh_create(context, &desc, &mesh),
+        SOC_RESULT_UNSUPPORTED
+    );
+    CHECK(mesh == NULL);
+    CHECK(context->meshes == NULL);
+    CHECK_RESULT(soc_mesh_destroy(NULL), SOC_RESULT_OK);
+
+    soc_context_destroy(context);
+    return 0;
+}
+
 int main(void)
 {
     if (test_uint16_storage_and_explicit_destroy() != 0) {
@@ -379,6 +443,9 @@ int main(void)
         return 1;
     }
     if (test_invalid_layout_is_atomic() != 0) {
+        return 1;
+    }
+    if (test_invalid_arguments_and_flags_are_atomic() != 0) {
         return 1;
     }
     return 0;

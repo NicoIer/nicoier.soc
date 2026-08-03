@@ -58,6 +58,14 @@ soc_enable_warnings(soc_test_hiz)
 
 add_test(NAME soc.hiz COMMAND soc_test_hiz)
 
+if(TARGET soc_bench)
+    add_test(
+        NAME soc.bench.validate
+        COMMAND soc_bench --validate-only
+    )
+    set_tests_properties(soc.bench.validate PROPERTIES LABELS validation)
+endif()
+
 if(TARGET soc_cli)
     add_test(
         NAME soc.cli

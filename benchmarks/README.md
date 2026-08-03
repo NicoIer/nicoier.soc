@@ -2,8 +2,9 @@
 
 `soc_bench` 是面向优化回归的、无第三方依赖的 C17 benchmark。它通过公开
 `soc` C ABI 测量同步单线程参考实现，覆盖整帧以及 clear、遮挡物提交、Hi-Z
-构建和 AABB 查询等阶段。正确性仍由 `tests/` 负责；benchmark 不会默认加入
-CTest，也不会成为跨机器的性能硬门禁。
+构建和 AABB 查询等阶段。正确性仍由 `tests/` 负责；同时启用 benchmark 和
+tests 时，CTest 会注册 `soc.bench.validate`，只运行确定性的 `--validate-only`
+校验。性能采样不会加入 CTest，也不会成为跨机器的性能硬门禁。
 
 ## 构建
 
@@ -21,6 +22,8 @@ ctest --test-dir build-bench --output-on-failure
 ```
 
 `SOC_BUILD_BENCHMARKS` 默认是 `OFF`。benchmark 目标不参与安装。
+只有同时设置 `SOC_BUILD_BENCHMARKS=ON` 和 `SOC_BUILD_TESTS=ON` 时，
+`soc.bench.validate` 才会出现在 CTest 测试列表中。
 Xcode 或 Ninja Multi-Config 的可执行文件通常位于
 `build-bench/benchmarks/Release/`；Windows 顶层构建位于
 `build-bench/bin/Release/soc_bench.exe`。其余命令相同。

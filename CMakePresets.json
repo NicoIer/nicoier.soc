@@ -7,6 +7,51 @@
   },
   "configurePresets": [
     {
+      "name": "native-tests",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SOC_BUILD_SHARED": true,
+        "SOC_BUILD_TESTS": true,
+        "SOC_BUILD_TOOLS": true,
+        "SOC_BUILD_BENCHMARKS": true,
+        "SOC_WARNINGS_AS_ERRORS": true
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Native Debug validation",
+      "inherits": "native-tests"
+    },
+    {
+      "name": "dev-static",
+      "displayName": "Native static Debug validation",
+      "inherits": "native-tests",
+      "cacheVariables": {
+        "SOC_BUILD_SHARED": false
+      }
+    },
+    {
+      "name": "sanitize",
+      "displayName": "Native ASan + UBSan validation",
+      "inherits": "native-tests",
+      "condition": {
+        "type": "inList",
+        "string": "${hostSystemName}",
+        "list": [
+          "Darwin",
+          "Linux"
+        ]
+      },
+      "cacheVariables": {
+        "SOC_BUILD_SHARED": false,
+        "CMAKE_C_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+      }
+    },
+    {
       "name": "release-library",
       "hidden": true,
       "generator": "Ninja",
@@ -84,6 +129,7 @@
       "name": "macos-universal",
       "displayName": "macOS Universal 2",
       "inherits": "release-library",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/apple-sdk.cmake",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
@@ -91,13 +137,15 @@
       },
       "cacheVariables": {
         "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
-        "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0"
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0",
+        "SOC_APPLE_SDK_PLATFORM": "macosx"
       }
     },
     {
       "name": "ios-device-arm64",
       "displayName": "iOS device arm64",
       "inherits": "release-library",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/apple-sdk.cmake",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
@@ -105,9 +153,9 @@
       },
       "cacheVariables": {
         "CMAKE_SYSTEM_NAME": "iOS",
-        "CMAKE_OSX_SYSROOT": "iphoneos",
         "CMAKE_OSX_ARCHITECTURES": "arm64",
         "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0",
+        "SOC_APPLE_SDK_PLATFORM": "iphoneos",
         "SOC_BUILD_SHARED": false
       }
     },
@@ -115,6 +163,7 @@
       "name": "ios-simulator-universal",
       "displayName": "iOS Simulator Universal",
       "inherits": "release-library",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/apple-sdk.cmake",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
@@ -122,9 +171,9 @@
       },
       "cacheVariables": {
         "CMAKE_SYSTEM_NAME": "iOS",
-        "CMAKE_OSX_SYSROOT": "iphonesimulator",
         "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
         "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0",
+        "SOC_APPLE_SDK_PLATFORM": "iphonesimulator",
         "SOC_BUILD_SHARED": false
       }
     },
@@ -133,6 +182,24 @@
       "displayName": "Windows x86_64 (MinGW-w64)",
       "inherits": "release-library",
       "toolchainFile": "${sourceDir}/cmake/toolchains/mingw-w64-x86_64.cmake"
+    },
+    {
+      "name": "windows-zig-x86_64",
+      "displayName": "Windows x86_64 (Zig)",
+      "inherits": "release-library",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/zig-windows-x86_64.cmake",
+      "environment": {
+        "ZIG_GLOBAL_CACHE_DIR": "${sourceDir}/build/.zig-cache"
+      }
+    },
+    {
+      "name": "windows-zig-arm64",
+      "displayName": "Windows ARM64 (Zig)",
+      "inherits": "release-library",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/zig-windows-aarch64.cmake",
+      "environment": {
+        "ZIG_GLOBAL_CACHE_DIR": "${sourceDir}/build/.zig-cache"
+      }
     },
     {
       "name": "windows-msvc-x64",
@@ -148,9 +215,36 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": null
       }
+    },
+    {
+      "name": "windows-msvc-arm64",
+      "displayName": "Windows ARM64 (Visual Studio 2022)",
+      "inherits": "release-library",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "ARM64",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": null
+      }
     }
   ],
   "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "dev-static",
+      "configurePreset": "dev-static"
+    },
+    {
+      "name": "sanitize",
+      "configurePreset": "sanitize"
+    },
     {
       "name": "android-armeabi-v7a",
       "configurePreset": "android-armeabi-v7a"
@@ -207,6 +301,14 @@
       "configurePreset": "windows-mingw-x86_64"
     },
     {
+      "name": "windows-zig-x86_64",
+      "configurePreset": "windows-zig-x86_64"
+    },
+    {
+      "name": "windows-zig-arm64",
+      "configurePreset": "windows-zig-arm64"
+    },
+    {
       "name": "windows-msvc-x64",
       "configurePreset": "windows-msvc-x64",
       "configuration": "Release",
@@ -214,6 +316,48 @@
         "type": "equals",
         "lhs": "${hostSystemName}",
         "rhs": "Windows"
+      }
+    },
+    {
+      "name": "windows-msvc-arm64",
+      "configurePreset": "windows-msvc-arm64",
+      "configuration": "Release",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "dev-static",
+      "configurePreset": "dev-static",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "sanitize",
+      "configurePreset": "sanitize",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
       }
     }
   ]
