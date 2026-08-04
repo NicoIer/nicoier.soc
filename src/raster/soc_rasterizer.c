@@ -20,6 +20,14 @@
 #define SOC_RASTER_EVALUATION_ERROR_SCALE 256.0
 #define SOC_RASTER_NUMERIC_ERROR_SCALE 128.0
 
+#if defined(_MSC_VER)
+#define SOC_NOINLINE __declspec(noinline)
+#elif defined(__clang__) || defined(__GNUC__)
+#define SOC_NOINLINE __attribute__((noinline))
+#else
+#define SOC_NOINLINE
+#endif
+
 _Static_assert(
     FLT_RADIX == 2 && FLT_MANT_DIG == 24 && sizeof(float) == 4u,
     "soc rasterization requires IEEE-754 binary32"
@@ -98,6 +106,15 @@ typedef struct soc_raster_triangle_setup {
     double depth_step_y;
     double depth_error_bound;
 } soc_raster_triangle_setup;
+
+typedef struct soc_raster_depth_plane {
+    double anchor_x;
+    double anchor_y;
+    double anchor;
+    double step_x;
+    double step_y;
+    double error_bound;
+} soc_raster_depth_plane;
 
 static soc_bool checked_size_multiply(
     size_t left,
@@ -770,81 +787,39 @@ static void configure_depth_plane(
     }
 }
 
-static soc_raster_setup_result setup_raster_triangle(
+static soc_raster_setup_result prepare_screen_triangle(
     const soc_rasterizer* rasterizer,
     const soc_clip_vertex* clip0,
     const soc_clip_vertex* clip1,
     const soc_clip_vertex* clip2,
     soc_bool two_sided,
-    soc_raster_triangle_setup* out_setup
+    soc_screen_vertex screen[3]
 )
 {
     const soc_clip_vertex* clip_vertices[3] = {clip0, clip1, clip2};
-    soc_screen_vertex ndc[3];
-    soc_screen_vertex screen[3];
-    soc_fixed_vertex fixed[3];
-    soc_bool fixed_exact[3];
-    double ndc_area;
     double screen_area;
-    int64_t minimum_x;
-    int64_t maximum_x;
-    int64_t minimum_y;
-    int64_t maximum_y;
-    int64_t fixed_area;
     uint32_t index;
 
+    /* Project only x/y until the cheap degeneracy and facing tests pass. */
     for (index = 0u; index < 3u; ++index) {
-        double depth;
+        double ndc_x;
+        double ndc_y;
 
         if (clip_vertices[index]->w <= 0.0) {
             return SOC_RASTER_SETUP_REJECTED;
         }
-
-        ndc[index].x = clip_vertices[index]->x / clip_vertices[index]->w;
-        ndc[index].y = clip_vertices[index]->y / clip_vertices[index]->w;
-        depth = clip_vertices[index]->z / clip_vertices[index]->w;
-        if (rasterizer->frame.clip_depth_range ==
-            SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) {
-            depth = depth * 0.5 + 0.5;
-        }
-
-        if (finite_double(ndc[index].x) != SOC_TRUE ||
-            finite_double(ndc[index].y) != SOC_TRUE ||
-            finite_double(depth) != SOC_TRUE) {
+        ndc_x = clip_vertices[index]->x / clip_vertices[index]->w;
+        ndc_y = clip_vertices[index]->y / clip_vertices[index]->w;
+        if (finite_double(ndc_x) != SOC_TRUE ||
+            finite_double(ndc_y) != SOC_TRUE) {
             return SOC_RASTER_SETUP_REJECTED;
         }
-
-        ndc[index].x = clamp_double(ndc[index].x, -1.0, 1.0);
-        ndc[index].y = clamp_double(ndc[index].y, -1.0, 1.0);
-        ndc[index].depth = clamp_double(depth, 0.0, 1.0);
-    }
-
-    ndc_area = edge_function(
-        &ndc[0],
-        &ndc[1],
-        ndc[2].x,
-        ndc[2].y
-    );
-    if (ndc_area == 0.0) {
-        return SOC_RASTER_SETUP_REJECTED;
-    }
-
-    if (two_sided != SOC_TRUE) {
-        const soc_bool front_facing =
-            rasterizer->frame.front_face == SOC_FRONT_FACE_CCW
-                ? (ndc_area > 0.0 ? SOC_TRUE : SOC_FALSE)
-                : (ndc_area < 0.0 ? SOC_TRUE : SOC_FALSE);
-        if (front_facing != SOC_TRUE) {
-            return SOC_RASTER_SETUP_REJECTED;
-        }
-    }
-
-    for (index = 0u; index < 3u; ++index) {
+        ndc_x = clamp_double(ndc_x, -1.0, 1.0);
+        ndc_y = clamp_double(ndc_y, -1.0, 1.0);
         screen[index].x =
-            (ndc[index].x * 0.5 + 0.5) * rasterizer->width;
+            (ndc_x * 0.5 + 0.5) * rasterizer->width;
         screen[index].y =
-            (0.5 - ndc[index].y * 0.5) * rasterizer->height;
-        screen[index].depth = ndc[index].depth;
+            (0.5 - ndc_y * 0.5) * rasterizer->height;
     }
 
     screen_area = edge_function(
@@ -856,10 +831,108 @@ static soc_raster_setup_result setup_raster_triangle(
     if (screen_area == 0.0) {
         return SOC_RASTER_SETUP_REJECTED;
     }
+    if (two_sided != SOC_TRUE) {
+        const soc_bool front_facing =
+            rasterizer->frame.front_face == SOC_FRONT_FACE_CCW
+                ? (screen_area < 0.0 ? SOC_TRUE : SOC_FALSE)
+                : (screen_area > 0.0 ? SOC_TRUE : SOC_FALSE);
+
+        if (front_facing != SOC_TRUE) {
+            return SOC_RASTER_SETUP_REJECTED;
+        }
+    }
+
+    for (index = 0u; index < 3u; ++index) {
+        double depth = clip_vertices[index]->z / clip_vertices[index]->w;
+
+        if (rasterizer->frame.clip_depth_range ==
+            SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) {
+            depth = depth * 0.5 + 0.5;
+        }
+        if (finite_double(depth) != SOC_TRUE) {
+            return SOC_RASTER_SETUP_REJECTED;
+        }
+        screen[index].depth = clamp_double(depth, 0.0, 1.0);
+    }
     if (screen_area < 0.0) {
         swap_screen_vertices(&screen[1], &screen[2]);
-        screen_area = -screen_area;
     }
+    return SOC_RASTER_SETUP_READY;
+}
+
+static soc_bool configure_shared_fan_depth_plane(
+    const soc_rasterizer* rasterizer,
+    const soc_screen_vertex plane_triangle[3],
+    soc_raster_depth_plane* out_plane
+)
+{
+    soc_raster_triangle_setup plane_setup;
+    double extent_x;
+    double extent_y;
+
+    memset(&plane_setup, 0, sizeof(plane_setup));
+    plane_setup.depth_anchor_x = plane_triangle[0].x;
+    plane_setup.depth_anchor_y = plane_triangle[0].y;
+    plane_setup.depth_anchor = plane_triangle[0].depth;
+    extent_x = next_double_up(
+        absolute_double(0.5 - plane_setup.depth_anchor_x) >
+            absolute_double(
+                (double)rasterizer->width - 0.5 -
+                plane_setup.depth_anchor_x
+            )
+            ? absolute_double(0.5 - plane_setup.depth_anchor_x)
+            : absolute_double(
+                (double)rasterizer->width - 0.5 -
+                plane_setup.depth_anchor_x
+            )
+    );
+    extent_y = next_double_up(
+        absolute_double(0.5 - plane_setup.depth_anchor_y) >
+            absolute_double(
+                (double)rasterizer->height - 0.5 -
+                plane_setup.depth_anchor_y
+            )
+            ? absolute_double(0.5 - plane_setup.depth_anchor_y)
+            : absolute_double(
+                (double)rasterizer->height - 0.5 -
+                plane_setup.depth_anchor_y
+            )
+    );
+    if (try_configure_fast_depth_plane(
+            plane_triangle,
+            0,
+            SOC_FALSE,
+            extent_x,
+            extent_y,
+            &plane_setup
+        ) != SOC_TRUE) {
+        return SOC_FALSE;
+    }
+
+    out_plane->anchor_x = plane_setup.depth_anchor_x;
+    out_plane->anchor_y = plane_setup.depth_anchor_y;
+    out_plane->anchor = plane_setup.depth_anchor;
+    out_plane->step_x = plane_setup.depth_step_x;
+    out_plane->step_y = plane_setup.depth_step_y;
+    out_plane->error_bound = plane_setup.depth_error_bound;
+    return SOC_TRUE;
+}
+
+static soc_raster_setup_result setup_raster_triangle(
+    const soc_rasterizer* rasterizer,
+    const soc_screen_vertex screen[3],
+    const soc_raster_depth_plane* shared_depth_plane,
+    soc_raster_triangle_setup* out_setup
+)
+{
+    soc_fixed_vertex fixed[3];
+    soc_bool fixed_exact[3];
+    int64_t minimum_x;
+    int64_t maximum_x;
+    int64_t minimum_y;
+    int64_t maximum_y;
+    int64_t fixed_area;
+    uint32_t index;
 
     for (index = 0u; index < 3u; ++index) {
         soc_bool exact_x;
@@ -992,7 +1065,14 @@ static soc_raster_setup_result setup_raster_triangle(
         );
     }
 
-    if (screen[0].depth == screen[1].depth &&
+    if (shared_depth_plane != NULL) {
+        out_setup->depth_anchor_x = shared_depth_plane->anchor_x;
+        out_setup->depth_anchor_y = shared_depth_plane->anchor_y;
+        out_setup->depth_anchor = shared_depth_plane->anchor;
+        out_setup->depth_step_x = shared_depth_plane->step_x;
+        out_setup->depth_step_y = shared_depth_plane->step_y;
+        out_setup->depth_error_bound = shared_depth_plane->error_bound;
+    } else if (screen[0].depth == screen[1].depth &&
         screen[0].depth == screen[2].depth) {
         out_setup->depth_anchor_x = screen[0].x;
         out_setup->depth_anchor_y = screen[0].y;
@@ -1016,6 +1096,84 @@ static soc_raster_setup_result setup_raster_triangle(
         );
     }
     return SOC_RASTER_SETUP_READY;
+}
+
+static float make_conservative_depth(
+    const soc_rasterizer* rasterizer,
+    double depth,
+    double depth_error_bound
+)
+{
+    float candidate_depth;
+    uint32_t candidate_bits;
+    uint32_t guard;
+
+    if (finite_double(depth) != SOC_TRUE) {
+        return rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
+            ? 0.0f
+            : 1.0f;
+    }
+
+    depth = rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
+        ? depth - depth_error_bound
+        : depth + depth_error_bound;
+    depth = clamp_double(depth, 0.0, 1.0);
+    candidate_depth = (float)depth;
+    memcpy(
+        &candidate_bits,
+        &candidate_depth,
+        sizeof(candidate_bits)
+    );
+    if (rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED) {
+        if ((double)candidate_depth > depth && candidate_bits != 0u) {
+            --candidate_bits;
+        }
+        for (guard = 0u;
+             guard < SOC_RASTER_DEPTH_GUARD_ULPS &&
+                candidate_bits != 0u;
+             ++guard) {
+            --candidate_bits;
+        }
+    } else {
+        const uint32_t one_bits = UINT32_C(0x3f800000);
+
+        if ((double)candidate_depth < depth &&
+            candidate_bits < one_bits) {
+            ++candidate_bits;
+        }
+        for (guard = 0u;
+             guard < SOC_RASTER_DEPTH_GUARD_ULPS &&
+                candidate_bits < one_bits;
+             ++guard) {
+            ++candidate_bits;
+        }
+    }
+    memcpy(
+        &candidate_depth,
+        &candidate_bits,
+        sizeof(candidate_depth)
+    );
+    return candidate_depth;
+}
+
+static void store_depth_candidate(
+    soc_rasterizer* rasterizer,
+    uint32_t pixel_x,
+    uint32_t pixel_y,
+    float candidate_depth
+)
+{
+    const size_t depth_index =
+        (size_t)pixel_y * rasterizer->width + pixel_x;
+    const float stored_depth = rasterizer->depth[depth_index];
+    const soc_bool passes_depth =
+        rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
+            ? (candidate_depth > stored_depth ? SOC_TRUE : SOC_FALSE)
+            : (candidate_depth < stored_depth ? SOC_TRUE : SOC_FALSE);
+
+    if (passes_depth == SOC_TRUE) {
+        rasterizer->depth[depth_index] = candidate_depth;
+    }
 }
 
 static void rasterize_depth_sample(
@@ -1084,6 +1242,64 @@ static void rasterize_depth_sample(
         : (candidate_depth < stored_depth ? SOC_TRUE : SOC_FALSE);
     if (passes_depth == SOC_TRUE) {
         rasterizer->depth[depth_index] = candidate_depth;
+    }
+}
+
+static void rasterize_small_constant_triangle(
+    soc_rasterizer* rasterizer,
+    const soc_raster_triangle_setup* setup
+)
+{
+    const soc_raster_region* region = &setup->bounds;
+    const int64_t sample_x =
+        (int64_t)region->minimum_x * SOC_RASTER_SUBPIXEL_SCALE +
+        SOC_RASTER_SUBPIXEL_HALF;
+    const int64_t sample_y =
+        (int64_t)region->minimum_y * SOC_RASTER_SUBPIXEL_SCALE +
+        SOC_RASTER_SUBPIXEL_HALF;
+    const float candidate_depth = make_conservative_depth(
+        rasterizer,
+        setup->depth_anchor,
+        setup->depth_error_bound
+    );
+    int64_t row_edges[3];
+    uint32_t edge_index;
+    uint32_t pixel_y;
+
+    for (edge_index = 0u; edge_index < 3u; ++edge_index) {
+        row_edges[edge_index] = fixed_edge_value(
+            &setup->edges[edge_index],
+            sample_x,
+            sample_y
+        ) + setup->edges[edge_index].coverage_bias;
+    }
+
+    for (pixel_y = region->minimum_y;
+         pixel_y < region->end_y;
+         ++pixel_y) {
+        int64_t edge0 = row_edges[0];
+        int64_t edge1 = row_edges[1];
+        int64_t edge2 = row_edges[2];
+        uint32_t pixel_x;
+
+        for (pixel_x = region->minimum_x;
+             pixel_x < region->end_x;
+             ++pixel_x) {
+            if (edge0 >= 0 && edge1 >= 0 && edge2 >= 0) {
+                store_depth_candidate(
+                    rasterizer,
+                    pixel_x,
+                    pixel_y,
+                    candidate_depth
+                );
+            }
+            edge0 += setup->edges[0].step_x;
+            edge1 += setup->edges[1].step_x;
+            edge2 += setup->edges[2].step_x;
+        }
+        row_edges[0] += setup->edges[0].step_y;
+        row_edges[1] += setup->edges[1].step_y;
+        row_edges[2] += setup->edges[2].step_y;
     }
 }
 
@@ -1189,6 +1405,33 @@ static void rasterize_depth_block(
         setup->depth_step_y *
             ((double)block_y + 0.5 - setup->depth_anchor_y);
     uint32_t row;
+
+    if (setup->depth_step_x == 0.0 && setup->depth_step_y == 0.0) {
+        const float candidate_depth = make_conservative_depth(
+            rasterizer,
+            block_depth,
+            setup->depth_error_bound
+        );
+
+        for (row = 0u; row < block_height; ++row) {
+            uint32_t column;
+
+            for (column = 0u; column < block_width; ++column) {
+                const uint32_t bit =
+                    row * SOC_RASTER_BLOCK_SIZE + column;
+
+                if ((coverage_mask & (UINT64_C(1) << bit)) != 0u) {
+                    store_depth_candidate(
+                        rasterizer,
+                        block_x + column,
+                        block_y + row,
+                        candidate_depth
+                    );
+                }
+            }
+        }
+        return;
+    }
 
     for (row = 0u; row < block_height; ++row) {
         double depth = block_depth + setup->depth_step_y * (double)row;
@@ -1339,21 +1582,17 @@ static void rasterize_triangle_blocks(
     }
 }
 
-static soc_bool rasterize_triangle(
+static SOC_NOINLINE soc_bool rasterize_prepared_triangle(
     soc_rasterizer* rasterizer,
-    const soc_clip_vertex* clip0,
-    const soc_clip_vertex* clip1,
-    const soc_clip_vertex* clip2,
-    soc_bool two_sided
+    const soc_screen_vertex screen[3],
+    const soc_raster_depth_plane* shared_depth_plane
 )
 {
     soc_raster_triangle_setup setup;
     const soc_raster_setup_result setup_result = setup_raster_triangle(
         rasterizer,
-        clip0,
-        clip1,
-        clip2,
-        two_sided,
+        screen,
+        shared_depth_plane,
         &setup
     );
 
@@ -1364,8 +1603,41 @@ static soc_bool rasterize_triangle(
         return SOC_TRUE;
     }
 
+    if (setup.bounds.end_x - setup.bounds.minimum_x <=
+            SOC_RASTER_BLOCK_SIZE &&
+        setup.bounds.end_y - setup.bounds.minimum_y <=
+            SOC_RASTER_BLOCK_SIZE &&
+        setup.depth_step_x == 0.0 && setup.depth_step_y == 0.0) {
+        rasterize_small_constant_triangle(rasterizer, &setup);
+        return SOC_TRUE;
+    }
+
     rasterize_triangle_blocks(rasterizer, &setup, &setup.bounds);
     return SOC_TRUE;
+}
+
+static soc_bool rasterize_triangle(
+    soc_rasterizer* rasterizer,
+    const soc_clip_vertex* clip0,
+    const soc_clip_vertex* clip1,
+    const soc_clip_vertex* clip2,
+    soc_bool two_sided
+)
+{
+    soc_screen_vertex screen[3];
+    const soc_raster_setup_result setup_result = prepare_screen_triangle(
+        rasterizer,
+        clip0,
+        clip1,
+        clip2,
+        two_sided,
+        screen
+    );
+
+    if (setup_result == SOC_RASTER_SETUP_REJECTED) {
+        return SOC_FALSE;
+    }
+    return rasterize_prepared_triangle(rasterizer, screen, NULL);
 }
 
 soc_result soc_rasterizer_initialize(
@@ -1515,6 +1787,8 @@ soc_result soc_rasterizer_submit_occluders(
         for (triangle = 0u; triangle < triangle_count; ++triangle) {
             soc_clip_vertex clip_triangle_vertices[3];
             soc_clip_vertex clipped_polygon[SOC_MAX_CLIPPED_VERTICES];
+            soc_raster_depth_plane fan_depth_plane;
+            const soc_raster_depth_plane* shared_depth_plane = NULL;
             soc_clip_outcode active_planes;
             soc_clip_classification clip_classification;
             uint32_t clipped_vertex_count;
@@ -1584,14 +1858,35 @@ soc_result soc_rasterizer_submit_occluders(
             for (fan_index = 1u;
                  fan_index + 1u < clipped_vertex_count;
                  ++fan_index) {
-                if (rasterize_triangle(
+                soc_screen_vertex screen[3];
+                const soc_raster_setup_result setup_result =
+                    prepare_screen_triangle(
                         rasterizer,
                         &clipped_polygon[0],
                         &clipped_polygon[fan_index],
                         &clipped_polygon[fan_index + 1u],
                         (mesh->flags & SOC_MESH_FLAG_TWO_SIDED) != 0u
                             ? SOC_TRUE
-                            : SOC_FALSE
+                            : SOC_FALSE,
+                        screen
+                    );
+
+                if (setup_result == SOC_RASTER_SETUP_REJECTED) {
+                    continue;
+                }
+                if (clipped_vertex_count > 3u &&
+                    shared_depth_plane == NULL &&
+                    configure_shared_fan_depth_plane(
+                        rasterizer,
+                        screen,
+                        &fan_depth_plane
+                    ) == SOC_TRUE) {
+                    shared_depth_plane = &fan_depth_plane;
+                }
+                if (rasterize_prepared_triangle(
+                        rasterizer,
+                        screen,
+                        shared_depth_plane
                     ) == SOC_TRUE) {
                     ++rasterizer->rasterized_triangle_count;
                 }
