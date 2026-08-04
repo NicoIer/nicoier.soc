@@ -138,7 +138,7 @@ add_test(NAME soc.rasterizer COMMAND soc_test_rasterizer)
 if(TARGET soc_bench)
     add_test(
         NAME soc.bench.validate
-        COMMAND soc_bench --validate-only
+        COMMAND soc_bench --suite full --validate-only
     )
     set_tests_properties(soc.bench.validate PROPERTIES LABELS validation)
 endif()

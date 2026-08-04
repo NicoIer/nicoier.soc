@@ -1892,6 +1892,17 @@ static int run_one_operation(workload* work, uint64_t* elapsed_ns)
     return 0;
 }
 
+static int run_validation_operation(workload* work)
+{
+    if (workload_prepare(work) != 0) {
+        return 1;
+    }
+    if (workload_run_timed(work) != 0) {
+        return 1;
+    }
+    return workload_finish(work);
+}
+
 static int can_reuse_prepared_state(const workload* work)
 {
     const bench_kind kind = work->definition->kind;
@@ -2046,7 +2057,6 @@ static int benchmark_case_run(
 )
 {
     workload work;
-    uint64_t ignored;
     uint32_t sample;
 
     memset(result, 0, sizeof(*result));
@@ -2060,7 +2070,7 @@ static int benchmark_case_run(
     }
 
     work.capture_results = SOC_TRUE;
-    if (run_one_operation(&work, &ignored) != 0 ||
+    if (run_validation_operation(&work) != 0 ||
         workload_validate(&work) != 0) {
         workload_destroy(&work);
         return 1;
@@ -2144,7 +2154,7 @@ static int benchmark_case_run(
          * counters still describe the sampled workload.
          */
         work.capture_results = SOC_TRUE;
-        if (run_one_operation(&work, &ignored) != 0 ||
+        if (run_validation_operation(&work) != 0 ||
             workload_validate(&work) != 0 ||
             !result_matches_workload(result, &work)) {
             fprintf(stderr, "%s: post-sampling validation changed results\n",
