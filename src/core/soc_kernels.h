@@ -19,6 +19,24 @@ typedef uint32_t soc_kernel_backend;
 
 #define SOC_KERNEL_RASTER_BLOCK_SIZE 8u
 
+typedef struct soc_kernel_mat4_f64 {
+    double columns[4][4];
+    uint64_t all_finite;
+} soc_kernel_mat4_f64;
+
+typedef struct soc_kernel_clip_vertex {
+    double x;
+    double y;
+    double z;
+    double w;
+} soc_kernel_clip_vertex;
+
+typedef struct soc_kernel_clip_metadata {
+    uint8_t active_planes;
+    uint8_t common_planes;
+    soc_bool all_finite;
+} soc_kernel_clip_metadata;
+
 typedef struct soc_kernel_table {
     soc_kernel_backend backend;
     void (*clear_f32)(float* destination, size_t count, float value);
@@ -38,6 +56,17 @@ typedef struct soc_kernel_table {
         uint32_t source_height,
         float* destination,
         soc_depth_direction depth_direction
+    );
+    void (*transform_triangle_f64)(
+        const soc_kernel_mat4_f64* object_to_world,
+        const soc_kernel_mat4_f64* clip_from_world,
+        const float* position0_xyz,
+        const float* position1_xyz,
+        const float* position2_xyz,
+        soc_bool positions_all_finite,
+        soc_clip_depth_range depth_range,
+        soc_kernel_clip_vertex out_clip[3],
+        soc_kernel_clip_metadata* out_metadata
     );
     soc_result (*test_aabbs)(
         const struct soc_hiz* hiz,
@@ -63,6 +92,23 @@ void soc_kernel_store_constant_depth_block_f32_scalar(
     uint64_t coverage_mask,
     float candidate_depth,
     soc_depth_direction depth_direction
+);
+
+void soc_kernel_mat4_f64_from_f32(
+    const soc_mat4* source,
+    soc_kernel_mat4_f64* destination
+);
+
+void soc_kernel_transform_triangle_f64_scalar(
+    const soc_kernel_mat4_f64* object_to_world,
+    const soc_kernel_mat4_f64* clip_from_world,
+    const float* position0_xyz,
+    const float* position1_xyz,
+    const float* position2_xyz,
+    soc_bool positions_all_finite,
+    soc_clip_depth_range depth_range,
+    soc_kernel_clip_vertex out_clip[3],
+    soc_kernel_clip_metadata* out_metadata
 );
 
 const soc_kernel_table* soc_kernel_table_scalar(void);

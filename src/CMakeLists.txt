@@ -5,6 +5,7 @@ add_library(
         core/soc_cpu_features.c
         core/soc_kernels.c
         core/soc_kernels_neon.c
+        core/soc_kernels_transform.c
         core/soc_mesh.c
         core/soc_pipeline.c
         core/soc_snapshot.c
@@ -28,6 +29,20 @@ set_target_properties(
         POSITION_INDEPENDENT_CODE ON
 )
 soc_enable_warnings(soc_core)
+
+if(MSVC)
+    set_source_files_properties(
+        core/soc_kernels_neon.c
+        core/soc_kernels_transform.c
+        PROPERTIES COMPILE_OPTIONS /fp:strict
+    )
+elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(
+        core/soc_kernels_neon.c
+        core/soc_kernels_transform.c
+        PROPERTIES COMPILE_OPTIONS -ffp-contract=off
+    )
+endif()
 
 if(SOC_BUILD_SHARED)
     add_library(

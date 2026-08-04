@@ -277,12 +277,207 @@ static void reduce_hiz_level_f32_neon(
     }
 }
 
+static SOC_NEON_FORCE_INLINE float64x2_t transform_pair_f64_neon(
+    float64x2_t column0,
+    float64x2_t column1,
+    float64x2_t column2,
+    float64x2_t column3,
+    double x,
+    double y,
+    double z,
+    double w
+)
+{
+    float64x2_t result = vmulq_n_f64(column0, x);
+
+    result = vaddq_f64(result, vmulq_n_f64(column1, y));
+    result = vaddq_f64(result, vmulq_n_f64(column2, z));
+    result = vaddq_f64(result, vmulq_n_f64(column3, w));
+    return result;
+}
+
+static SOC_NEON_FORCE_INLINE uint8_t compute_clip_outcode_f64_neon(
+    double x,
+    double y,
+    double z,
+    double w,
+    soc_clip_depth_range depth_range
+)
+{
+    uint8_t outcode = 0u;
+
+    if (x + w < 0.0) {
+        outcode = (uint8_t)(outcode | (UINT8_C(1) << 0u));
+    }
+    if (w - x < 0.0) {
+        outcode = (uint8_t)(outcode | (UINT8_C(1) << 1u));
+    }
+    if (y + w < 0.0) {
+        outcode = (uint8_t)(outcode | (UINT8_C(1) << 2u));
+    }
+    if (w - y < 0.0) {
+        outcode = (uint8_t)(outcode | (UINT8_C(1) << 3u));
+    }
+    if ((depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE ? z : z + w) < 0.0) {
+        outcode = (uint8_t)(outcode | (UINT8_C(1) << 4u));
+    }
+    if (w - z < 0.0) {
+        outcode = (uint8_t)(outcode | (UINT8_C(1) << 5u));
+    }
+    return outcode;
+}
+
+static void transform_triangle_f64_neon(
+    const soc_kernel_mat4_f64* object_to_world,
+    const soc_kernel_mat4_f64* clip_from_world,
+    const float* position0_xyz,
+    const float* position1_xyz,
+    const float* position2_xyz,
+    soc_bool positions_all_finite,
+    soc_clip_depth_range depth_range,
+    soc_kernel_clip_vertex out_clip[3],
+    soc_kernel_clip_metadata* out_metadata
+)
+{
+    const float* positions[3] = {
+        position0_xyz,
+        position1_xyz,
+        position2_xyz,
+    };
+    const float64x2_t object_xy0 =
+        vld1q_f64(&object_to_world->columns[0][0]);
+    const float64x2_t object_xy1 =
+        vld1q_f64(&object_to_world->columns[1][0]);
+    const float64x2_t object_xy2 =
+        vld1q_f64(&object_to_world->columns[2][0]);
+    const float64x2_t object_xy3 =
+        vld1q_f64(&object_to_world->columns[3][0]);
+    const float64x2_t object_zw0 =
+        vld1q_f64(&object_to_world->columns[0][2]);
+    const float64x2_t object_zw1 =
+        vld1q_f64(&object_to_world->columns[1][2]);
+    const float64x2_t object_zw2 =
+        vld1q_f64(&object_to_world->columns[2][2]);
+    const float64x2_t object_zw3 =
+        vld1q_f64(&object_to_world->columns[3][2]);
+    const float64x2_t clip_xy0 =
+        vld1q_f64(&clip_from_world->columns[0][0]);
+    const float64x2_t clip_xy1 =
+        vld1q_f64(&clip_from_world->columns[1][0]);
+    const float64x2_t clip_xy2 =
+        vld1q_f64(&clip_from_world->columns[2][0]);
+    const float64x2_t clip_xy3 =
+        vld1q_f64(&clip_from_world->columns[3][0]);
+    const float64x2_t clip_zw0 =
+        vld1q_f64(&clip_from_world->columns[0][2]);
+    const float64x2_t clip_zw1 =
+        vld1q_f64(&clip_from_world->columns[1][2]);
+    const float64x2_t clip_zw2 =
+        vld1q_f64(&clip_from_world->columns[2][2]);
+    const float64x2_t clip_zw3 =
+        vld1q_f64(&clip_from_world->columns[3][2]);
+    size_t index;
+
+    if (object_to_world->all_finite != UINT64_C(1) ||
+        clip_from_world->all_finite != UINT64_C(1) ||
+        positions_all_finite != SOC_TRUE) {
+        soc_kernel_transform_triangle_f64_scalar(
+            object_to_world,
+            clip_from_world,
+            position0_xyz,
+            position1_xyz,
+            position2_xyz,
+            positions_all_finite,
+            depth_range,
+            out_clip,
+            out_metadata
+        );
+        return;
+    }
+
+    out_metadata->active_planes = 0u;
+    out_metadata->common_planes = UINT8_C(0x3f);
+    out_metadata->all_finite = SOC_TRUE;
+
+    for (index = 0u; index < 3u; ++index) {
+        const double x = positions[index][0];
+        const double y = positions[index][1];
+        const double z = positions[index][2];
+        const float64x2_t world_xy = transform_pair_f64_neon(
+            object_xy0,
+            object_xy1,
+            object_xy2,
+            object_xy3,
+            x,
+            y,
+            z,
+            1.0
+        );
+        const float64x2_t world_zw = transform_pair_f64_neon(
+            object_zw0,
+            object_zw1,
+            object_zw2,
+            object_zw3,
+            x,
+            y,
+            z,
+            1.0
+        );
+        const double world_x = vgetq_lane_f64(world_xy, 0);
+        const double world_y = vgetq_lane_f64(world_xy, 1);
+        const double world_z = vgetq_lane_f64(world_zw, 0);
+        const double world_w = vgetq_lane_f64(world_zw, 1);
+        const float64x2_t clip_xy = transform_pair_f64_neon(
+            clip_xy0,
+            clip_xy1,
+            clip_xy2,
+            clip_xy3,
+            world_x,
+            world_y,
+            world_z,
+            world_w
+        );
+        const float64x2_t clip_zw = transform_pair_f64_neon(
+            clip_zw0,
+            clip_zw1,
+            clip_zw2,
+            clip_zw3,
+            world_x,
+            world_y,
+            world_z,
+            world_w
+        );
+
+        out_clip[index].x = vgetq_lane_f64(clip_xy, 0);
+        out_clip[index].y = vgetq_lane_f64(clip_xy, 1);
+        out_clip[index].z = vgetq_lane_f64(clip_zw, 0);
+        out_clip[index].w = vgetq_lane_f64(clip_zw, 1);
+        {
+            const uint8_t outcode = compute_clip_outcode_f64_neon(
+                out_clip[index].x,
+                out_clip[index].y,
+                out_clip[index].z,
+                out_clip[index].w,
+                depth_range
+            );
+
+            out_metadata->active_planes = (uint8_t)(
+                out_metadata->active_planes | outcode
+            );
+            out_metadata->common_planes = (uint8_t)(
+                out_metadata->common_planes & outcode
+            );
+        }
+    }
+}
+
 static const soc_kernel_table neon_kernels = {
     .backend = SOC_KERNEL_BACKEND_NEON,
     .clear_f32 = soc_kernel_clear_f32_scalar,
     .store_constant_depth_block_f32 =
         store_constant_depth_block_f32_neon,
     .reduce_hiz_level_f32 = reduce_hiz_level_f32_neon,
+    .transform_triangle_f64 = transform_triangle_f64_neon,
     .test_aabbs = soc_occlusion_test_aabbs,
 };
 

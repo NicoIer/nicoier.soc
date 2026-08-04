@@ -33,6 +33,8 @@
 #define RASTER_WIDTH 1920u
 #define RASTER_HEIGHT 1080u
 #define RASTER_PARTIAL_MASK UINT64_C(0x55aa55aa55aa55aa)
+#define TRANSFORM_TRIANGLES_PER_OPERATION 16384u
+#define TRANSFORM_POSITION_SET_COUNT 64u
 
 #if !defined(SOC_KERNEL_BENCH_BUILD_TYPE)
 #define SOC_KERNEL_BENCH_BUILD_TYPE "unknown"
@@ -46,9 +48,11 @@
 #define REQUIRED_GATE_CLEAR_F32 (UINT32_C(1) << 0u)
 #define REQUIRED_GATE_HIZ_REDUCE_LEVEL_F32 (UINT32_C(1) << 1u)
 #define REQUIRED_GATE_RASTER_DEPTH_BLOCK_F32 (UINT32_C(1) << 2u)
+#define REQUIRED_GATE_TRANSFORM_TRIANGLE_F64 (UINT32_C(1) << 3u)
 #define REQUIRED_GATE_ALL \
     (REQUIRED_GATE_CLEAR_F32 | REQUIRED_GATE_HIZ_REDUCE_LEVEL_F32 | \
-        REQUIRED_GATE_RASTER_DEPTH_BLOCK_F32)
+        REQUIRED_GATE_RASTER_DEPTH_BLOCK_F32 | \
+        REQUIRED_GATE_TRANSFORM_TRIANGLE_F64)
 
 typedef enum benchmark_kind {
     BENCHMARK_CLEAR_F32 = 0,
@@ -81,6 +85,15 @@ typedef struct backend_result {
     uint64_t checksum;
 } backend_result;
 
+typedef struct transform_workload {
+    soc_kernel_mat4_f64 object_to_world;
+    soc_kernel_mat4_f64 clip_from_world;
+    float positions[TRANSFORM_POSITION_SET_COUNT][9];
+    soc_kernel_clip_vertex outputs[TRANSFORM_POSITION_SET_COUNT][3];
+    soc_kernel_clip_metadata metadata[TRANSFORM_POSITION_SET_COUNT];
+    uint64_t invocation;
+} transform_workload;
+
 static volatile uint64_t benchmark_sink;
 
 static void print_usage(FILE* stream, const char* executable)
@@ -91,7 +104,7 @@ static void print_usage(FILE* stream, const char* executable)
         "  --samples N    Samples per backend and case (default: %u)\n"
         "  --sample-ms N  Minimum milliseconds per sample (default: %u)\n"
         "  --validate-only  Check Scalar/NEON outputs without timing\n"
-        "  --require-gate clear|hiz|raster|all\n"
+        "  --require-gate clear|hiz|raster|transform|all\n"
         "                  Require Release, default sampling, distinct kernel,\n"
         "                  and fail unless selected performance gate(s) pass\n"
         "  --help         Show this help\n",
@@ -233,6 +246,9 @@ static int parse_options(int argc, char** argv, options* out_options)
             } else if (strcmp(value, "raster") == 0) {
                 out_options->required_gates |=
                     REQUIRED_GATE_RASTER_DEPTH_BLOCK_F32;
+            } else if (strcmp(value, "transform") == 0) {
+                out_options->required_gates |=
+                    REQUIRED_GATE_TRANSFORM_TRIANGLE_F64;
             } else if (strcmp(value, "all") == 0) {
                 out_options->required_gates = REQUIRED_GATE_ALL;
             } else {
@@ -402,6 +418,44 @@ static uint64_t checksum_f32(const float* values, size_t count)
     return hash;
 }
 
+static uint64_t checksum_transform_outputs(
+    const soc_kernel_clip_vertex outputs[TRANSFORM_POSITION_SET_COUNT][3],
+    const soc_kernel_clip_metadata metadata[TRANSFORM_POSITION_SET_COUNT]
+)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    size_t set;
+
+    for (set = 0u; set < TRANSFORM_POSITION_SET_COUNT; ++set) {
+        size_t vertex;
+
+        for (vertex = 0u; vertex < 3u; ++vertex) {
+            const double components[4] = {
+                outputs[set][vertex].x,
+                outputs[set][vertex].y,
+                outputs[set][vertex].z,
+                outputs[set][vertex].w,
+            };
+            size_t component;
+
+            for (component = 0u; component < 4u; ++component) {
+                uint64_t bits;
+
+                memcpy(&bits, &components[component], sizeof(bits));
+                hash ^= bits;
+                hash *= UINT64_C(1099511628211);
+            }
+        }
+        hash ^= metadata[set].active_planes;
+        hash *= UINT64_C(1099511628211);
+        hash ^= metadata[set].common_planes;
+        hash *= UINT64_C(1099511628211);
+        hash ^= metadata[set].all_finite;
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
 static uint32_t random_u32(uint32_t* state)
 {
     uint32_t value = *state;
@@ -422,6 +476,122 @@ static void initialize_hiz_source(float* source, size_t count)
         source[index] =
             (float)(random_u32(&state) >> 8u) / 16777215.0f;
     }
+}
+
+static void initialize_transform_workload(transform_workload* workload)
+{
+    static const double object_columns[4][4] = {
+        {1.125, -0.375, 0.25, 0.0625},
+        {0.1875, 0.9375, -0.3125, 0.125},
+        {-0.4375, 0.21875, 1.0625, -0.09375},
+        {2.25, -1.5, 0.625, 1.0},
+    };
+    static const double clip_columns[4][4] = {
+        {0.8125, 0.15625, -0.28125, 0.09375},
+        {-0.125, 1.1875, 0.34375, -0.0625},
+        {0.40625, -0.234375, 0.875, 0.15625},
+        {-0.75, 0.5, 0.1875, 1.125},
+    };
+    uint32_t state = UINT32_C(0x5452414e);
+    size_t set;
+
+    memset(workload, 0, sizeof(*workload));
+    memcpy(
+        workload->object_to_world.columns,
+        object_columns,
+        sizeof(object_columns)
+    );
+    memcpy(
+        workload->clip_from_world.columns,
+        clip_columns,
+        sizeof(clip_columns)
+    );
+    workload->object_to_world.all_finite = UINT64_C(1);
+    workload->clip_from_world.all_finite = UINT64_C(1);
+    for (set = 0u; set < TRANSFORM_POSITION_SET_COUNT; ++set) {
+        size_t component;
+
+        for (component = 0u; component < 9u; ++component) {
+            const int32_t centered =
+                (int32_t)(random_u32(&state) & UINT32_C(0x0000ffff)) -
+                INT32_C(32768);
+
+            workload->positions[set][component] =
+                (float)centered / 8192.0f;
+        }
+    }
+}
+
+static void execute_transform_operation(
+    transform_workload* workload,
+    const soc_kernel_table* kernels
+)
+{
+    uint32_t triangle;
+    uint64_t observed = UINT64_C(14695981039346656037);
+
+    for (triangle = 0u;
+         triangle < TRANSFORM_TRIANGLES_PER_OPERATION;
+         ++triangle) {
+        const size_t set =
+            (size_t)((triangle + workload->invocation) &
+                (TRANSFORM_POSITION_SET_COUNT - 1u));
+        const float* positions = workload->positions[set];
+
+        kernels->transform_triangle_f64(
+            &workload->object_to_world,
+            &workload->clip_from_world,
+            positions,
+            positions + 3u,
+            positions + 6u,
+            SOC_TRUE,
+            SOC_CLIP_DEPTH_ZERO_TO_ONE,
+            workload->outputs[set],
+            &workload->metadata[set]
+        );
+        {
+            uint64_t bits;
+
+            memcpy(&bits, &workload->outputs[set][0].x, sizeof(bits));
+            observed = (observed ^ bits) * UINT64_C(1099511628211);
+        }
+    }
+    benchmark_sink =
+        (benchmark_sink ^ observed ^ workload->invocation) *
+        UINT64_C(1099511628211);
+    ++workload->invocation;
+}
+
+static int run_transform_timed_sample(
+    transform_workload* workload,
+    const soc_kernel_table* kernels,
+    uint64_t target_ns,
+    uint64_t* out_average_ns
+)
+{
+    const uint64_t start = timer_now_ns();
+    uint64_t end;
+    uint64_t elapsed;
+    uint64_t iterations = 0u;
+
+    if (start == UINT64_MAX) {
+        return 0;
+    }
+    do {
+        execute_transform_operation(workload, kernels);
+        if (iterations == UINT64_MAX) {
+            return 0;
+        }
+        ++iterations;
+        end = timer_now_ns();
+        if (end == UINT64_MAX || end < start) {
+            return 0;
+        }
+        elapsed = end - start;
+    } while (elapsed < target_ns);
+
+    *out_average_ns = (elapsed + iterations / 2u) / iterations;
+    return 1;
 }
 
 static soc_bool benchmark_is_raster_depth_block(benchmark_kind kind)
@@ -918,6 +1088,190 @@ cleanup:
     return success;
 }
 
+static uint64_t capture_transform_checksum(
+    transform_workload* workload,
+    const soc_kernel_table* kernels,
+    int fill
+)
+{
+    memset(workload->outputs, fill, sizeof(workload->outputs));
+    memset(workload->metadata, fill, sizeof(workload->metadata));
+    workload->invocation = 0u;
+    execute_transform_operation(workload, kernels);
+    return checksum_transform_outputs(
+        workload->outputs,
+        workload->metadata
+    );
+}
+
+static int run_transform_case(
+    const char* case_name,
+    const options* opts,
+    const soc_kernel_table* scalar_kernels,
+    const soc_kernel_table* neon_kernels,
+    soc_bool* out_gate_passed
+)
+{
+    transform_workload scalar_workload;
+    transform_workload neon_workload;
+    backend_result scalar_result = {0};
+    backend_result neon_result = {0};
+    uint64_t validation_scalar;
+    uint64_t validation_neon;
+    uint64_t warmup_average;
+    uint64_t target_ns;
+    uint32_t sample;
+    int success = 0;
+
+    initialize_transform_workload(&scalar_workload);
+    initialize_transform_workload(&neon_workload);
+    validation_scalar = capture_transform_checksum(
+        &scalar_workload,
+        scalar_kernels,
+        0xa5
+    );
+    validation_neon = capture_transform_checksum(
+        &neon_workload,
+        neon_kernels,
+        0x5a
+    );
+    if (validation_scalar != validation_neon ||
+        memcmp(
+            scalar_workload.positions,
+            neon_workload.positions,
+            sizeof(scalar_workload.positions)
+        ) != 0 ||
+        memcmp(
+            &scalar_workload.object_to_world,
+            &neon_workload.object_to_world,
+            sizeof(scalar_workload.object_to_world)
+        ) != 0 ||
+        memcmp(
+            &scalar_workload.clip_from_world,
+            &neon_workload.clip_from_world,
+            sizeof(scalar_workload.clip_from_world)
+        ) != 0) {
+        (void)fprintf(stderr, "%s: Scalar/NEON validation mismatch\n", case_name);
+        goto cleanup;
+    }
+    if (opts->validate_only == SOC_TRUE) {
+        (void)printf(
+            "case=%s validation=pass checksum=%016" PRIx64 "\n",
+            case_name,
+            validation_scalar
+        );
+        success = 1;
+        goto cleanup;
+    }
+    if (scalar_kernels->transform_triangle_f64 ==
+        neon_kernels->transform_triangle_f64) {
+        (void)printf(
+            "case=%s performance=unavailable reason=shared_implementation\n",
+            case_name
+        );
+        *out_gate_passed = SOC_FALSE;
+        success = 1;
+        goto cleanup;
+    }
+
+    scalar_result.samples_ns = (uint64_t*)calloc(
+        opts->sample_count,
+        sizeof(*scalar_result.samples_ns)
+    );
+    neon_result.samples_ns = (uint64_t*)calloc(
+        opts->sample_count,
+        sizeof(*neon_result.samples_ns)
+    );
+    if (scalar_result.samples_ns == NULL || neon_result.samples_ns == NULL) {
+        (void)fprintf(stderr, "%s: sample allocation failed\n", case_name);
+        goto cleanup;
+    }
+
+    if (!run_transform_timed_sample(
+            &scalar_workload,
+            scalar_kernels,
+            WARMUP_TARGET_NS,
+            &warmup_average
+        ) ||
+        !run_transform_timed_sample(
+            &neon_workload,
+            neon_kernels,
+            WARMUP_TARGET_NS,
+            &warmup_average
+        )) {
+        (void)fprintf(stderr, "%s: warmup failed\n", case_name);
+        goto cleanup;
+    }
+
+    target_ns = (uint64_t)opts->sample_ms * UINT64_C(1000000);
+    for (sample = 0u; sample < opts->sample_count; ++sample) {
+        backend_result* first_result = (sample & 1u) == 0u
+            ? &scalar_result : &neon_result;
+        backend_result* second_result = (sample & 1u) == 0u
+            ? &neon_result : &scalar_result;
+        transform_workload* first_workload = (sample & 1u) == 0u
+            ? &scalar_workload : &neon_workload;
+        transform_workload* second_workload = (sample & 1u) == 0u
+            ? &neon_workload : &scalar_workload;
+        const soc_kernel_table* first_kernels = (sample & 1u) == 0u
+            ? scalar_kernels : neon_kernels;
+        const soc_kernel_table* second_kernels = (sample & 1u) == 0u
+            ? neon_kernels : scalar_kernels;
+
+        if (!run_transform_timed_sample(
+                first_workload,
+                first_kernels,
+                target_ns,
+                &first_result->samples_ns[sample]
+            ) ||
+            !run_transform_timed_sample(
+                second_workload,
+                second_kernels,
+                target_ns,
+                &second_result->samples_ns[sample]
+            )) {
+            (void)fprintf(stderr, "%s: timed sample failed\n", case_name);
+            goto cleanup;
+        }
+    }
+
+    scalar_result.checksum = capture_transform_checksum(
+        &scalar_workload,
+        scalar_kernels,
+        0xa5
+    );
+    neon_result.checksum = capture_transform_checksum(
+        &neon_workload,
+        neon_kernels,
+        0x5a
+    );
+    if (scalar_result.checksum != validation_scalar ||
+        neon_result.checksum != validation_neon ||
+        scalar_result.checksum != neon_result.checksum) {
+        (void)fprintf(stderr, "%s: post-sampling validation changed\n", case_name);
+        goto cleanup;
+    }
+    if (!summarize_result(&scalar_result, opts->sample_count) ||
+        !summarize_result(&neon_result, opts->sample_count)) {
+        (void)fprintf(stderr, "%s: result summary failed\n", case_name);
+        goto cleanup;
+    }
+
+    print_backend_result(case_name, "scalar", &scalar_result);
+    print_backend_result(case_name, "neon", &neon_result);
+    *out_gate_passed = print_comparison(
+        case_name,
+        &scalar_result,
+        &neon_result
+    );
+    success = 1;
+
+cleanup:
+    free(scalar_result.samples_ns);
+    free(neon_result.samples_ns);
+    return success;
+}
+
 int main(int argc, char** argv)
 {
     options opts;
@@ -928,6 +1282,7 @@ int main(int argc, char** argv)
     soc_bool hiz_gate = SOC_FALSE;
     soc_bool raster_full_gate = SOC_FALSE;
     soc_bool raster_partial_gate = SOC_FALSE;
+    soc_bool transform_gate = SOC_FALSE;
     soc_bool required_gates_passed = SOC_TRUE;
     int parse_result;
 
@@ -972,7 +1327,8 @@ int main(int argc, char** argv)
     features = soc_cpu_features_detect();
     if (scalar_kernels == NULL || scalar_kernels->clear_f32 == NULL ||
         scalar_kernels->store_constant_depth_block_f32 == NULL ||
-        scalar_kernels->reduce_hiz_level_f32 == NULL) {
+        scalar_kernels->reduce_hiz_level_f32 == NULL ||
+        scalar_kernels->transform_triangle_f64 == NULL) {
         (void)fprintf(stderr, "soc_kernel_bench: Scalar kernels unavailable\n");
         return EXIT_FAILURE;
     }
@@ -980,6 +1336,7 @@ int main(int argc, char** argv)
         neon_kernels->clear_f32 == NULL ||
         neon_kernels->store_constant_depth_block_f32 == NULL ||
         neon_kernels->reduce_hiz_level_f32 == NULL ||
+        neon_kernels->transform_triangle_f64 == NULL ||
         features.architecture != SOC_CPU_ARCHITECTURE_ARM64 ||
         !soc_cpu_features_has(&features, SOC_CPU_FEATURE_NEON)) {
         (void)printf(
@@ -1051,6 +1408,13 @@ int main(int argc, char** argv)
             scalar_kernels,
             neon_kernels,
             &raster_partial_gate
+        ) ||
+        !run_transform_case(
+            "transform_triangle_f64.16384",
+            &opts,
+            scalar_kernels,
+            neon_kernels,
+            &transform_gate
         )) {
         return EXIT_FAILURE;
     }
@@ -1072,13 +1436,18 @@ int main(int argc, char** argv)
             raster_partial_gate != SOC_TRUE)) {
         required_gates_passed = SOC_FALSE;
     }
+    if ((opts.required_gates & REQUIRED_GATE_TRANSFORM_TRIANGLE_F64) != 0u &&
+        transform_gate != SOC_TRUE) {
+        required_gates_passed = SOC_FALSE;
+    }
 
     (void)printf(
         "soc_kernel_bench status=complete performance_gate=%s"
         " required_gate=%s sink=%016" PRIx64 "\n",
         clear_gate == SOC_TRUE && hiz_gate == SOC_TRUE &&
             raster_full_gate == SOC_TRUE &&
-            raster_partial_gate == SOC_TRUE
+            raster_partial_gate == SOC_TRUE &&
+            transform_gate == SOC_TRUE
             ? "pass"
             : "fail",
         opts.required_gates == REQUIRED_GATE_NONE

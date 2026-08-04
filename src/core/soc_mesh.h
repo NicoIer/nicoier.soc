@@ -10,6 +10,7 @@ struct soc_mesh {
     uint32_t vertex_count;
     uint32_t index_count;
     soc_index_type index_type;
+    soc_bool positions_all_finite;
     float* positions_xyz;
     void* indices;
 };

@@ -49,12 +49,7 @@ typedef enum soc_clip_classification {
     SOC_CLIP_CLASSIFICATION_PARTIAL,
 } soc_clip_classification;
 
-typedef struct soc_clip_vertex {
-    double x;
-    double y;
-    double z;
-    double w;
-} soc_clip_vertex;
+typedef soc_kernel_clip_vertex soc_clip_vertex;
 
 typedef struct soc_screen_vertex {
     double x;
@@ -137,43 +132,6 @@ static soc_bool finite_double(double value)
         : SOC_FALSE;
 }
 
-static soc_bool finite_clip_vertex(const soc_clip_vertex* vertex)
-{
-    return vertex != NULL &&
-        finite_double(vertex->x) == SOC_TRUE &&
-        finite_double(vertex->y) == SOC_TRUE &&
-        finite_double(vertex->z) == SOC_TRUE &&
-        finite_double(vertex->w) == SOC_TRUE
-        ? SOC_TRUE
-        : SOC_FALSE;
-}
-
-static soc_clip_vertex transform_vertex(
-    const soc_mat4* matrix,
-    const soc_clip_vertex* vertex
-)
-{
-    const soc_clip_vertex result = {
-        (double)matrix->col0.x * vertex->x +
-            (double)matrix->col1.x * vertex->y +
-            (double)matrix->col2.x * vertex->z +
-            (double)matrix->col3.x * vertex->w,
-        (double)matrix->col0.y * vertex->x +
-            (double)matrix->col1.y * vertex->y +
-            (double)matrix->col2.y * vertex->z +
-            (double)matrix->col3.y * vertex->w,
-        (double)matrix->col0.z * vertex->x +
-            (double)matrix->col1.z * vertex->y +
-            (double)matrix->col2.z * vertex->z +
-            (double)matrix->col3.z * vertex->w,
-        (double)matrix->col0.w * vertex->x +
-            (double)matrix->col1.w * vertex->y +
-            (double)matrix->col2.w * vertex->z +
-            (double)matrix->col3.w * vertex->w,
-    };
-    return result;
-}
-
 static uint32_t read_mesh_index(
     const soc_mesh* mesh,
     uint32_t index
@@ -214,55 +172,6 @@ static double clip_plane_distance(
         default:
             return vertex->w - vertex->z;
     }
-}
-
-static soc_clip_outcode compute_clip_outcode(
-    const soc_clip_vertex* vertex,
-    soc_clip_depth_range depth_range
-)
-{
-    soc_clip_outcode outcode = 0u;
-    uint32_t plane;
-
-    for (plane = 0u; plane < SOC_CLIP_PLANE_COUNT; ++plane) {
-        if (clip_plane_distance(vertex, plane, depth_range) < 0.0) {
-            outcode = (soc_clip_outcode)(
-                outcode | (soc_clip_outcode)(1u << plane)
-            );
-        }
-    }
-    return outcode;
-}
-
-static soc_clip_classification classify_clip_triangle(
-    const soc_clip_vertex vertices[3],
-    soc_clip_depth_range depth_range,
-    soc_clip_outcode* out_active_planes
-)
-{
-    soc_clip_outcode active_planes = 0u;
-    soc_clip_outcode common_planes = SOC_CLIP_OUTCODE_ALL;
-    uint32_t index;
-
-    for (index = 0u; index < 3u; ++index) {
-        soc_clip_outcode outcode;
-
-        if (finite_clip_vertex(&vertices[index]) != SOC_TRUE) {
-            *out_active_planes = 0u;
-            return SOC_CLIP_CLASSIFICATION_NONFINITE;
-        }
-        outcode = compute_clip_outcode(&vertices[index], depth_range);
-        active_planes = (soc_clip_outcode)(active_planes | outcode);
-        common_planes = (soc_clip_outcode)(common_planes & outcode);
-    }
-
-    *out_active_planes = active_planes;
-    if (common_planes != 0u) {
-        return SOC_CLIP_CLASSIFICATION_REJECT;
-    }
-    return active_planes == 0u
-        ? SOC_CLIP_CLASSIFICATION_ACCEPT
-        : SOC_CLIP_CLASSIFICATION_PARTIAL;
 }
 
 static soc_clip_vertex interpolate_clip_vertex(
@@ -1653,6 +1562,7 @@ soc_result soc_rasterizer_initialize(
         kernels == NULL ||
         kernels->clear_f32 == NULL ||
         kernels->store_constant_depth_block_f32 == NULL ||
+        kernels->transform_triangle_f64 == NULL ||
         !checked_size_multiply(
             (size_t)width,
             (size_t)height,
@@ -1761,6 +1671,7 @@ soc_result soc_rasterizer_submit_occluders(
 )
 {
     size_t transform_byte_count;
+    soc_kernel_mat4_f64 clip_from_world_f64;
     uint32_t instance;
 
     if (rasterizer == NULL ||
@@ -1778,10 +1689,21 @@ soc_result soc_rasterizer_submit_occluders(
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 
+    soc_kernel_mat4_f64_from_f32(
+        &rasterizer->frame.clip_from_world,
+        &clip_from_world_f64
+    );
+
     for (instance = 0u; instance < instance_count; ++instance) {
         const soc_mat4* instance_transform = &object_to_world[instance];
+        soc_kernel_mat4_f64 object_to_world_f64;
         const uint32_t triangle_count = mesh->index_count / 3u;
         uint32_t triangle;
+
+        soc_kernel_mat4_f64_from_f32(
+            instance_transform,
+            &object_to_world_f64
+        );
 
         for (triangle = 0u; triangle < triangle_count; ++triangle) {
             soc_clip_vertex clip_triangle_vertices[3];
@@ -1790,38 +1712,43 @@ soc_result soc_rasterizer_submit_occluders(
             const soc_raster_depth_plane* shared_depth_plane = NULL;
             soc_clip_outcode active_planes;
             soc_clip_classification clip_classification;
+            soc_kernel_clip_metadata clip_metadata;
             uint32_t clipped_vertex_count;
-            uint32_t corner;
             uint32_t fan_index;
-
-            for (corner = 0u; corner < 3u; ++corner) {
-                const uint32_t mesh_index = read_mesh_index(
-                    mesh,
-                    triangle * 3u + corner
-                );
-                const size_t position_index = (size_t)mesh_index * 3u;
-                const soc_clip_vertex object_position = {
-                    mesh->positions_xyz[position_index],
-                    mesh->positions_xyz[position_index + 1u],
-                    mesh->positions_xyz[position_index + 2u],
-                    1.0,
-                };
-                const soc_clip_vertex world_position = transform_vertex(
-                    instance_transform,
-                    &object_position
-                );
-
-                clip_triangle_vertices[corner] = transform_vertex(
-                    &rasterizer->frame.clip_from_world,
-                    &world_position
-                );
-            }
-
-            clip_classification = classify_clip_triangle(
-                clip_triangle_vertices,
-                rasterizer->frame.clip_depth_range,
-                &active_planes
+            const uint32_t mesh_index0 = read_mesh_index(
+                mesh,
+                triangle * 3u
             );
+            const uint32_t mesh_index1 = read_mesh_index(
+                mesh,
+                triangle * 3u + 1u
+            );
+            const uint32_t mesh_index2 = read_mesh_index(
+                mesh,
+                triangle * 3u + 2u
+            );
+
+            rasterizer->kernels->transform_triangle_f64(
+                &object_to_world_f64,
+                &clip_from_world_f64,
+                mesh->positions_xyz + (size_t)mesh_index0 * 3u,
+                mesh->positions_xyz + (size_t)mesh_index1 * 3u,
+                mesh->positions_xyz + (size_t)mesh_index2 * 3u,
+                mesh->positions_all_finite,
+                rasterizer->frame.clip_depth_range,
+                clip_triangle_vertices,
+                &clip_metadata
+            );
+            active_planes = clip_metadata.active_planes;
+            if (clip_metadata.all_finite != SOC_TRUE) {
+                clip_classification = SOC_CLIP_CLASSIFICATION_NONFINITE;
+            } else if (clip_metadata.common_planes != 0u) {
+                clip_classification = SOC_CLIP_CLASSIFICATION_REJECT;
+            } else {
+                clip_classification = active_planes == 0u
+                    ? SOC_CLIP_CLASSIFICATION_ACCEPT
+                    : SOC_CLIP_CLASSIFICATION_PARTIAL;
+            }
             if (clip_classification == SOC_CLIP_CLASSIFICATION_NONFINITE ||
                 clip_classification == SOC_CLIP_CLASSIFICATION_REJECT) {
                 ++rasterizer->clipped_triangle_count;

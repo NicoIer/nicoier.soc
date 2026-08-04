@@ -63,6 +63,7 @@ static const soc_kernel_table scalar_kernels = {
     .store_constant_depth_block_f32 =
         soc_kernel_store_constant_depth_block_f32_scalar,
     .reduce_hiz_level_f32 = soc_hiz_reduce_level_scalar,
+    .transform_triangle_f64 = soc_kernel_transform_triangle_f64_scalar,
     .test_aabbs = soc_occlusion_test_aabbs,
 };
 
