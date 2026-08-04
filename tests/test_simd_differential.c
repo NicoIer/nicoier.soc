@@ -780,6 +780,8 @@ int main(void)
     CHECK(neon->backend == SOC_KERNEL_BACKEND_NEON);
     CHECK(neon->clear_f32 != NULL);
     CHECK(neon->reduce_hiz_level_f32 != NULL);
+    CHECK(neon->clear_f32 == scalar->clear_f32);
+    CHECK(neon->reduce_hiz_level_f32 != scalar->reduce_hiz_level_f32);
     CHECK(soc_kernel_table_for_backend(SOC_KERNEL_BACKEND_NEON) == neon);
 
     if (test_clear_differential(scalar, neon) != 0) {

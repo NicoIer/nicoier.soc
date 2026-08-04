@@ -37,6 +37,12 @@ typedef struct soc_kernel_table {
     );
 } soc_kernel_table;
 
+void soc_kernel_clear_f32_scalar(
+    float* destination,
+    size_t count,
+    float value
+);
+
 const soc_kernel_table* soc_kernel_table_scalar(void);
 
 /* Returns null on build slices which do not contain AArch64 NEON kernels. */

@@ -5,7 +5,11 @@
 
 #include <stddef.h>
 
-static void clear_f32_scalar(float* destination, size_t count, float value)
+void soc_kernel_clear_f32_scalar(
+    float* destination,
+    size_t count,
+    float value
+)
 {
     size_t index;
 
@@ -16,19 +20,10 @@ static void clear_f32_scalar(float* destination, size_t count, float value)
 
 static const soc_kernel_table scalar_kernels = {
     .backend = SOC_KERNEL_BACKEND_SCALAR,
-    .clear_f32 = clear_f32_scalar,
+    .clear_f32 = soc_kernel_clear_f32_scalar,
     .reduce_hiz_level_f32 = soc_hiz_reduce_level_scalar,
     .test_aabbs = soc_occlusion_test_aabbs,
 };
-
-#if defined(__aarch64__) || defined(_M_ARM64)
-static const soc_kernel_table neon_kernels = {
-    .backend = SOC_KERNEL_BACKEND_NEON,
-    .clear_f32 = clear_f32_scalar,
-    .reduce_hiz_level_f32 = soc_hiz_reduce_level_scalar,
-    .test_aabbs = soc_occlusion_test_aabbs,
-};
-#endif
 
 const soc_kernel_table* soc_kernel_table_scalar(void)
 {
@@ -47,15 +42,6 @@ const soc_kernel_table* soc_kernel_table_select(
         return neon;
     }
     return soc_kernel_table_scalar();
-}
-
-const soc_kernel_table* soc_kernel_table_neon(void)
-{
-#if defined(__aarch64__) || defined(_M_ARM64)
-    return &neon_kernels;
-#else
-    return NULL;
-#endif
 }
 
 const soc_kernel_table* soc_kernel_table_for_backend(
