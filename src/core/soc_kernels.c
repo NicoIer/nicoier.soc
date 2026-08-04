@@ -18,9 +18,50 @@ void soc_kernel_clear_f32_scalar(
     }
 }
 
+void soc_kernel_store_constant_depth_block_f32_scalar(
+    float* destination,
+    size_t row_stride,
+    uint32_t block_width,
+    uint32_t block_height,
+    uint64_t coverage_mask,
+    float candidate_depth,
+    soc_depth_direction depth_direction
+)
+{
+    uint32_t row;
+
+    for (row = 0u; row < block_height; ++row) {
+        float* destination_row = destination + (size_t)row * row_stride;
+        uint32_t column;
+
+        for (column = 0u; column < block_width; ++column) {
+            const uint32_t bit =
+                row * SOC_KERNEL_RASTER_BLOCK_SIZE + column;
+
+            if ((coverage_mask & (UINT64_C(1) << bit)) != 0u) {
+                const float stored_depth = destination_row[column];
+                const soc_bool passes_depth =
+                    depth_direction == SOC_DEPTH_REVERSED
+                        ? (candidate_depth > stored_depth
+                            ? SOC_TRUE
+                            : SOC_FALSE)
+                        : (candidate_depth < stored_depth
+                            ? SOC_TRUE
+                            : SOC_FALSE);
+
+                if (passes_depth == SOC_TRUE) {
+                    destination_row[column] = candidate_depth;
+                }
+            }
+        }
+    }
+}
+
 static const soc_kernel_table scalar_kernels = {
     .backend = SOC_KERNEL_BACKEND_SCALAR,
     .clear_f32 = soc_kernel_clear_f32_scalar,
+    .store_constant_depth_block_f32 =
+        soc_kernel_store_constant_depth_block_f32_scalar,
     .reduce_hiz_level_f32 = soc_hiz_reduce_level_scalar,
     .test_aabbs = soc_occlusion_test_aabbs,
 };

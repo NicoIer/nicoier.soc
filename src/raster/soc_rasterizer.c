@@ -14,7 +14,7 @@
     ((int64_t)1 << SOC_RASTER_SUBPIXEL_BITS)
 #define SOC_RASTER_SUBPIXEL_HALF \
     (SOC_RASTER_SUBPIXEL_SCALE / 2)
-#define SOC_RASTER_BLOCK_SIZE 8u
+#define SOC_RASTER_BLOCK_SIZE SOC_KERNEL_RASTER_BLOCK_SIZE
 #define SOC_RASTER_DEPTH_GUARD_ULPS 1u
 #define SOC_RASTER_FAST_CONDITION_LIMIT 8.0
 #define SOC_RASTER_EVALUATION_ERROR_SCALE 256.0
@@ -1413,23 +1413,16 @@ static void rasterize_depth_block(
             setup->depth_error_bound
         );
 
-        for (row = 0u; row < block_height; ++row) {
-            uint32_t column;
-
-            for (column = 0u; column < block_width; ++column) {
-                const uint32_t bit =
-                    row * SOC_RASTER_BLOCK_SIZE + column;
-
-                if ((coverage_mask & (UINT64_C(1) << bit)) != 0u) {
-                    store_depth_candidate(
-                        rasterizer,
-                        block_x + column,
-                        block_y + row,
-                        candidate_depth
-                    );
-                }
-            }
-        }
+        rasterizer->kernels->store_constant_depth_block_f32(
+            rasterizer->depth + (size_t)block_y * rasterizer->width +
+                block_x,
+            rasterizer->width,
+            block_width,
+            block_height,
+            coverage_mask,
+            candidate_depth,
+            rasterizer->frame.depth_direction
+        );
         return;
     }
 
@@ -1659,6 +1652,7 @@ soc_result soc_rasterizer_initialize(
         depth == NULL ||
         kernels == NULL ||
         kernels->clear_f32 == NULL ||
+        kernels->store_constant_depth_block_f32 == NULL ||
         !checked_size_multiply(
             (size_t)width,
             (size_t)height,

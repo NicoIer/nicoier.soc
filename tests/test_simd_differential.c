@@ -42,6 +42,8 @@ enum {
         ((HIZ_MAX_WIDTH + 1) / 2) * ((HIZ_MAX_HEIGHT + 1) / 2),
     HIZ_SOURCE_STORAGE_COUNT = 192,
     HIZ_DESTINATION_STORAGE_COUNT = 80,
+    RASTER_DEPTH_GUARD_COUNT = 8,
+    RASTER_DEPTH_STORAGE_COUNT = 160,
 };
 
 static const uint32_t CANARY_BITS = UINT32_C(0x7fc0cafe);
@@ -217,6 +219,322 @@ static int test_clear_differential(
                     ) != 0) {
                     return 1;
                 }
+            }
+        }
+    }
+    return 0;
+}
+
+static uint64_t make_full_raster_coverage_mask(
+    uint32_t width,
+    uint32_t height
+)
+{
+    const uint64_t row_mask = (UINT64_C(1) << width) - UINT64_C(1);
+    uint64_t coverage_mask = 0u;
+    uint32_t row;
+
+    for (row = 0u; row < height; ++row) {
+        coverage_mask |= row_mask <<
+            (row * SOC_KERNEL_RASTER_BLOCK_SIZE);
+    }
+    return coverage_mask;
+}
+
+static int run_raster_depth_block_case(
+    const soc_kernel_table* scalar,
+    const soc_kernel_table* neon,
+    uint32_t width,
+    uint32_t height,
+    size_t row_stride,
+    size_t offset,
+    uint64_t coverage_mask,
+    uint32_t candidate_bits,
+    soc_depth_direction depth_direction
+)
+{
+    static const uint32_t stored_values[] = {
+        UINT32_C(0x00000000),
+        UINT32_C(0x80000000),
+        UINT32_C(0x3e800000),
+        UINT32_C(0x3f000000),
+        UINT32_C(0x3f800000),
+        UINT32_C(0x7f800000),
+        UINT32_C(0xff800000),
+        UINT32_C(0x7fc12345),
+        UINT32_C(0xffc54321),
+        UINT32_C(0x00000001),
+        UINT32_C(0x80000001),
+    };
+    float expected[RASTER_DEPTH_STORAGE_COUNT];
+    float scalar_storage[RASTER_DEPTH_STORAGE_COUNT];
+    float neon_storage[RASTER_DEPTH_STORAGE_COUNT];
+    const size_t begin = RASTER_DEPTH_GUARD_COUNT + offset;
+    const float candidate_depth = float_from_bits(candidate_bits);
+    size_t index;
+    uint32_t row;
+
+    CHECK(width >= 1u && width <= SOC_KERNEL_RASTER_BLOCK_SIZE);
+    CHECK(height >= 1u && height <= SOC_KERNEL_RASTER_BLOCK_SIZE);
+    CHECK(row_stride >= width);
+    CHECK(begin + (size_t)(height - 1u) * row_stride + width <=
+        ARRAY_COUNT(expected));
+
+    for (index = 0u; index < ARRAY_COUNT(expected); ++index) {
+        const uint32_t bits = stored_values[
+            (index + width * 3u + height * 5u + row_stride * 7u + offset) %
+                ARRAY_COUNT(stored_values)
+        ];
+
+        expected[index] = float_from_bits(bits);
+    }
+    memcpy(scalar_storage, expected, sizeof(expected));
+    memcpy(neon_storage, expected, sizeof(expected));
+
+    for (row = 0u; row < height; ++row) {
+        uint32_t column;
+
+        for (column = 0u; column < width; ++column) {
+            const uint32_t bit =
+                row * SOC_KERNEL_RASTER_BLOCK_SIZE + column;
+            float* stored = expected + begin + (size_t)row * row_stride +
+                column;
+
+            if ((coverage_mask & (UINT64_C(1) << bit)) != 0u &&
+                (depth_direction == SOC_DEPTH_REVERSED
+                    ? candidate_depth > *stored
+                    : candidate_depth < *stored)) {
+                *stored = candidate_depth;
+            }
+        }
+    }
+
+    scalar->store_constant_depth_block_f32(
+        scalar_storage + begin,
+        row_stride,
+        width,
+        height,
+        coverage_mask,
+        candidate_depth,
+        depth_direction
+    );
+    neon->store_constant_depth_block_f32(
+        neon_storage + begin,
+        row_stride,
+        width,
+        height,
+        coverage_mask,
+        candidate_depth,
+        depth_direction
+    );
+
+    for (index = 0u; index < ARRAY_COUNT(expected); ++index) {
+        const uint32_t expected_bits = float_bits(expected[index]);
+        const uint32_t scalar_bits = float_bits(scalar_storage[index]);
+        const uint32_t neon_bits = float_bits(neon_storage[index]);
+
+        if (scalar_bits != expected_bits || neon_bits != expected_bits) {
+            fprintf(
+                stderr,
+                "raster depth mismatch: %ux%u stride=%zu offset=%zu "
+                "mask=%016llx candidate=%08x direction=%u index=%zu "
+                "expected=%08x scalar=%08x neon=%08x\n",
+                (unsigned)width,
+                (unsigned)height,
+                row_stride,
+                offset,
+                (unsigned long long)coverage_mask,
+                (unsigned)candidate_bits,
+                (unsigned)depth_direction,
+                index,
+                (unsigned)expected_bits,
+                (unsigned)scalar_bits,
+                (unsigned)neon_bits
+            );
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int test_raster_depth_block_differential(
+    const soc_kernel_table* scalar,
+    const soc_kernel_table* neon
+)
+{
+    static const size_t row_strides[] = {8u, 9u, 17u};
+    static const uint32_t candidate_values[] = {
+        UINT32_C(0x00000000),
+        UINT32_C(0x80000000),
+        UINT32_C(0x3e800000),
+        UINT32_C(0x3f000000),
+        UINT32_C(0x3f800000),
+        UINT32_C(0x7f800000),
+        UINT32_C(0xff800000),
+        UINT32_C(0x7fc13579),
+        UINT32_C(0xffc2468a),
+        UINT32_C(0x00000001),
+    };
+    static const soc_depth_direction depth_directions[] = {
+        SOC_DEPTH_FORWARD,
+        SOC_DEPTH_REVERSED,
+    };
+    uint32_t width;
+
+    for (width = 1u; width <= SOC_KERNEL_RASTER_BLOCK_SIZE; ++width) {
+        uint32_t height;
+
+        for (height = 1u; height <= SOC_KERNEL_RASTER_BLOCK_SIZE; ++height) {
+            const uint32_t last_bit =
+                (height - 1u) * SOC_KERNEL_RASTER_BLOCK_SIZE + width - 1u;
+            uint32_t random_state = UINT32_C(0x6d2b79f5) ^
+                width * UINT32_C(0x9e3779b9) ^
+                height * UINT32_C(0x85ebca6b);
+            const uint32_t random_low = random_u32(&random_state);
+            const uint32_t random_high = random_u32(&random_state);
+            const uint64_t masks[] = {
+                UINT64_C(0),
+                UINT64_MAX,
+                make_full_raster_coverage_mask(width, height),
+                UINT64_C(0xaaaaaaaaaaaaaaaa),
+                UINT64_C(0x5555555555555555),
+                UINT64_C(1) | (UINT64_C(1) << last_bit),
+                (uint64_t)random_low | ((uint64_t)random_high << 32u),
+            };
+            size_t stride_index;
+
+            for (stride_index = 0u;
+                 stride_index < ARRAY_COUNT(row_strides);
+                 ++stride_index) {
+                size_t offset;
+
+                for (offset = 0u; offset < 4u; ++offset) {
+                    size_t mask_index;
+
+                    for (mask_index = 0u;
+                         mask_index < ARRAY_COUNT(masks);
+                         ++mask_index) {
+                        size_t candidate_index;
+
+                        for (candidate_index = 0u;
+                             candidate_index < ARRAY_COUNT(candidate_values);
+                             ++candidate_index) {
+                            size_t direction_index;
+
+                            for (direction_index = 0u;
+                                 direction_index <
+                                    ARRAY_COUNT(depth_directions);
+                                 ++direction_index) {
+                                if (run_raster_depth_block_case(
+                                        scalar,
+                                        neon,
+                                        width,
+                                        height,
+                                        row_strides[stride_index],
+                                        offset,
+                                        masks[mask_index],
+                                        candidate_values[candidate_index],
+                                        depth_directions[direction_index]
+                                    ) != 0) {
+                                    return 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int test_raster_depth_block_redzones(
+    const soc_kernel_table* scalar,
+    const soc_kernel_table* neon
+)
+{
+    static const uint32_t widths[] = {1u, 3u, 4u, 5u, 7u, 8u};
+    static const uint32_t heights[] = {1u, 7u, 8u};
+    size_t width_index;
+
+    for (width_index = 0u;
+         width_index < ARRAY_COUNT(widths);
+         ++width_index) {
+        size_t height_index;
+
+        for (height_index = 0u;
+             height_index < ARRAY_COUNT(heights);
+             ++height_index) {
+            const uint32_t width = widths[width_index];
+            const uint32_t height = heights[height_index];
+            const size_t logical_count = (size_t)width * height;
+            size_t offset;
+
+            for (offset = 0u; offset < 4u; ++offset) {
+                const size_t allocation_count = offset + logical_count;
+                float* scalar_storage = (float*)malloc(
+                    allocation_count * sizeof(*scalar_storage)
+                );
+                float* neon_storage = (float*)malloc(
+                    allocation_count * sizeof(*neon_storage)
+                );
+                size_t index;
+
+                if (scalar_storage == NULL || neon_storage == NULL) {
+                    free(neon_storage);
+                    free(scalar_storage);
+                    fprintf(stderr, "raster depth redzone allocation failed\n");
+                    return 1;
+                }
+                for (index = 0u; index < allocation_count; ++index) {
+                    scalar_storage[index] = float_from_bits(
+                        (index & 1u) == 0u
+                            ? UINT32_C(0x3f400000)
+                            : UINT32_C(0x7fc12345)
+                    );
+                }
+                memcpy(
+                    neon_storage,
+                    scalar_storage,
+                    allocation_count * sizeof(*scalar_storage)
+                );
+
+                scalar->store_constant_depth_block_f32(
+                    scalar_storage + offset,
+                    width,
+                    width,
+                    height,
+                    UINT64_MAX,
+                    0.25f,
+                    SOC_DEPTH_FORWARD
+                );
+                neon->store_constant_depth_block_f32(
+                    neon_storage + offset,
+                    width,
+                    width,
+                    height,
+                    UINT64_MAX,
+                    0.25f,
+                    SOC_DEPTH_FORWARD
+                );
+                if (memcmp(
+                        scalar_storage,
+                        neon_storage,
+                        allocation_count * sizeof(*scalar_storage)
+                    ) != 0) {
+                    fprintf(
+                        stderr,
+                        "raster depth redzone mismatch: %ux%u offset=%zu\n",
+                        (unsigned)width,
+                        (unsigned)height,
+                        offset
+                    );
+                    free(neon_storage);
+                    free(scalar_storage);
+                    return 1;
+                }
+                free(neon_storage);
+                free(scalar_storage);
             }
         }
     }
@@ -772,6 +1090,7 @@ int main(void)
     CHECK(scalar != NULL);
     CHECK(scalar->backend == SOC_KERNEL_BACKEND_SCALAR);
     CHECK(scalar->clear_f32 != NULL);
+    CHECK(scalar->store_constant_depth_block_f32 != NULL);
     CHECK(scalar->reduce_hiz_level_f32 != NULL);
     CHECK(soc_kernel_table_for_backend(SOC_KERNEL_BACKEND_SCALAR) == scalar);
 
@@ -779,12 +1098,21 @@ int main(void)
     CHECK(neon != NULL);
     CHECK(neon->backend == SOC_KERNEL_BACKEND_NEON);
     CHECK(neon->clear_f32 != NULL);
+    CHECK(neon->store_constant_depth_block_f32 != NULL);
     CHECK(neon->reduce_hiz_level_f32 != NULL);
     CHECK(neon->clear_f32 == scalar->clear_f32);
+    CHECK(neon->store_constant_depth_block_f32 !=
+        scalar->store_constant_depth_block_f32);
     CHECK(neon->reduce_hiz_level_f32 != scalar->reduce_hiz_level_f32);
     CHECK(soc_kernel_table_for_backend(SOC_KERNEL_BACKEND_NEON) == neon);
 
     if (test_clear_differential(scalar, neon) != 0) {
+        return 1;
+    }
+    if (test_raster_depth_block_differential(scalar, neon) != 0) {
+        return 1;
+    }
+    if (test_raster_depth_block_redzones(scalar, neon) != 0) {
         return 1;
     }
     if (test_hiz_differential(scalar, neon) != 0) {

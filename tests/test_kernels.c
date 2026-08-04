@@ -28,6 +28,7 @@ static int test_scalar_table_contract(void)
     CHECK(scalar != NULL);
     CHECK(scalar->backend == SOC_KERNEL_BACKEND_SCALAR);
     CHECK(scalar->clear_f32 != NULL);
+    CHECK(scalar->store_constant_depth_block_f32 != NULL);
     CHECK(scalar->reduce_hiz_level_f32 != NULL);
     CHECK(scalar->test_aabbs != NULL);
     CHECK(soc_kernel_table_for_backend(SOC_KERNEL_BACKEND_SCALAR) == scalar);
@@ -39,6 +40,7 @@ static int test_scalar_table_contract(void)
     CHECK(neon != NULL);
     CHECK(neon->backend == SOC_KERNEL_BACKEND_NEON);
     CHECK(neon->clear_f32 != NULL);
+    CHECK(neon->store_constant_depth_block_f32 != NULL);
     CHECK(neon->reduce_hiz_level_f32 != NULL);
     CHECK(neon->test_aabbs != NULL);
     CHECK(soc_kernel_table_for_backend(SOC_KERNEL_BACKEND_NEON) == neon);

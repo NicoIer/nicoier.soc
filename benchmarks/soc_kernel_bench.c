@@ -30,6 +30,9 @@
 #define CLEAR_ELEMENT_COUNT ((size_t)1920u * 1080u)
 #define HIZ_SOURCE_WIDTH 1920u
 #define HIZ_SOURCE_HEIGHT 1080u
+#define RASTER_WIDTH 1920u
+#define RASTER_HEIGHT 1080u
+#define RASTER_PARTIAL_MASK UINT64_C(0x55aa55aa55aa55aa)
 
 #if !defined(SOC_KERNEL_BENCH_BUILD_TYPE)
 #define SOC_KERNEL_BENCH_BUILD_TYPE "unknown"
@@ -42,12 +45,16 @@
 #define REQUIRED_GATE_NONE UINT32_C(0)
 #define REQUIRED_GATE_CLEAR_F32 (UINT32_C(1) << 0u)
 #define REQUIRED_GATE_HIZ_REDUCE_LEVEL_F32 (UINT32_C(1) << 1u)
+#define REQUIRED_GATE_RASTER_DEPTH_BLOCK_F32 (UINT32_C(1) << 2u)
 #define REQUIRED_GATE_ALL \
-    (REQUIRED_GATE_CLEAR_F32 | REQUIRED_GATE_HIZ_REDUCE_LEVEL_F32)
+    (REQUIRED_GATE_CLEAR_F32 | REQUIRED_GATE_HIZ_REDUCE_LEVEL_F32 | \
+        REQUIRED_GATE_RASTER_DEPTH_BLOCK_F32)
 
 typedef enum benchmark_kind {
     BENCHMARK_CLEAR_F32 = 0,
     BENCHMARK_HIZ_REDUCE_LEVEL_F32,
+    BENCHMARK_RASTER_DEPTH_BLOCK_FULL_F32,
+    BENCHMARK_RASTER_DEPTH_BLOCK_PARTIAL_F32,
 } benchmark_kind;
 
 typedef struct options {
@@ -84,7 +91,7 @@ static void print_usage(FILE* stream, const char* executable)
         "  --samples N    Samples per backend and case (default: %u)\n"
         "  --sample-ms N  Minimum milliseconds per sample (default: %u)\n"
         "  --validate-only  Check Scalar/NEON outputs without timing\n"
-        "  --require-gate clear|hiz|all\n"
+        "  --require-gate clear|hiz|raster|all\n"
         "                  Require Release, default sampling, distinct kernel,\n"
         "                  and fail unless selected performance gate(s) pass\n"
         "  --help         Show this help\n",
@@ -223,6 +230,9 @@ static int parse_options(int argc, char** argv, options* out_options)
             } else if (strcmp(value, "hiz") == 0) {
                 out_options->required_gates |=
                     REQUIRED_GATE_HIZ_REDUCE_LEVEL_F32;
+            } else if (strcmp(value, "raster") == 0) {
+                out_options->required_gates |=
+                    REQUIRED_GATE_RASTER_DEPTH_BLOCK_F32;
             } else if (strcmp(value, "all") == 0) {
                 out_options->required_gates = REQUIRED_GATE_ALL;
             } else {
@@ -414,6 +424,54 @@ static void initialize_hiz_source(float* source, size_t count)
     }
 }
 
+static soc_bool benchmark_is_raster_depth_block(benchmark_kind kind)
+{
+    return kind == BENCHMARK_RASTER_DEPTH_BLOCK_FULL_F32 ||
+        kind == BENCHMARK_RASTER_DEPTH_BLOCK_PARTIAL_F32
+        ? SOC_TRUE
+        : SOC_FALSE;
+}
+
+static void execute_raster_depth_blocks(
+    kernel_workload* workload,
+    const soc_kernel_table* kernels,
+    uint64_t invocation
+)
+{
+    const soc_depth_direction depth_direction = (invocation & 1u) == 0u
+        ? SOC_DEPTH_FORWARD
+        : SOC_DEPTH_REVERSED;
+    const float candidate_depth = (invocation & 1u) == 0u
+        ? 0.25f
+        : 0.75f;
+    const uint64_t coverage_mask =
+        workload->kind == BENCHMARK_RASTER_DEPTH_BLOCK_FULL_F32
+            ? UINT64_MAX
+            : RASTER_PARTIAL_MASK;
+    uint32_t block_y;
+
+    for (block_y = 0u;
+         block_y < RASTER_HEIGHT;
+         block_y += SOC_KERNEL_RASTER_BLOCK_SIZE) {
+        uint32_t block_x;
+
+        for (block_x = 0u;
+             block_x < RASTER_WIDTH;
+             block_x += SOC_KERNEL_RASTER_BLOCK_SIZE) {
+            kernels->store_constant_depth_block_f32(
+                workload->destination +
+                    (size_t)block_y * RASTER_WIDTH + block_x,
+                RASTER_WIDTH,
+                SOC_KERNEL_RASTER_BLOCK_SIZE,
+                SOC_KERNEL_RASTER_BLOCK_SIZE,
+                coverage_mask,
+                candidate_depth,
+                depth_direction
+            );
+        }
+    }
+}
+
 static void execute_operation(
     kernel_workload* workload,
     const soc_kernel_table* kernels
@@ -431,13 +489,19 @@ static void execute_operation(
             workload->destination_count,
             value
         );
-    } else {
+    } else if (workload->kind == BENCHMARK_HIZ_REDUCE_LEVEL_F32) {
         kernels->reduce_hiz_level_f32(
             workload->source,
             workload->source_width,
             workload->source_height,
             workload->destination,
             SOC_DEPTH_FORWARD
+        );
+    } else {
+        execute_raster_depth_blocks(
+            workload,
+            kernels,
+            workload->invocation
         );
     }
 
@@ -498,7 +562,7 @@ static uint64_t capture_checksum(
             workload->destination_count,
             0.625f
         );
-    } else {
+    } else if (workload->kind == BENCHMARK_HIZ_REDUCE_LEVEL_F32) {
         kernels->reduce_hiz_level_f32(
             workload->source,
             workload->source_width,
@@ -506,6 +570,15 @@ static uint64_t capture_checksum(
             workload->destination,
             SOC_DEPTH_FORWARD
         );
+    } else {
+        size_t index;
+
+        for (index = 0u;
+             index < workload->destination_count;
+             ++index) {
+            workload->destination[index] = 0.75f;
+        }
+        execute_raster_depth_blocks(workload, kernels, 0u);
     }
     return checksum_f32(
         workload->destination,
@@ -539,7 +612,7 @@ static int initialize_case(
     neon_workload->kind = kind;
     if (kind == BENCHMARK_CLEAR_F32) {
         destination_count = CLEAR_ELEMENT_COUNT;
-    } else {
+    } else if (kind == BENCHMARK_HIZ_REDUCE_LEVEL_F32) {
         const uint32_t destination_width =
             HIZ_SOURCE_WIDTH / 2u + HIZ_SOURCE_WIDTH % 2u;
         const uint32_t destination_height =
@@ -559,6 +632,8 @@ static int initialize_case(
         scalar_workload->source_height = HIZ_SOURCE_HEIGHT;
         neon_workload->source_width = HIZ_SOURCE_WIDTH;
         neon_workload->source_height = HIZ_SOURCE_HEIGHT;
+    } else {
+        destination_count = (size_t)RASTER_WIDTH * RASTER_HEIGHT;
     }
 
     scalar_workload->destination_count = destination_count;
@@ -664,7 +739,10 @@ static int run_case(
             scalar_kernels->clear_f32 != neon_kernels->clear_f32) ||
         (kind == BENCHMARK_HIZ_REDUCE_LEVEL_F32 &&
             scalar_kernels->reduce_hiz_level_f32 !=
-                neon_kernels->reduce_hiz_level_f32)
+                neon_kernels->reduce_hiz_level_f32) ||
+        (benchmark_is_raster_depth_block(kind) == SOC_TRUE &&
+            scalar_kernels->store_constant_depth_block_f32 !=
+                neon_kernels->store_constant_depth_block_f32)
         ? SOC_TRUE
         : SOC_FALSE;
     kernel_workload scalar_workload;
@@ -848,6 +926,8 @@ int main(int argc, char** argv)
     const soc_kernel_table* neon_kernels;
     soc_bool clear_gate = SOC_FALSE;
     soc_bool hiz_gate = SOC_FALSE;
+    soc_bool raster_full_gate = SOC_FALSE;
+    soc_bool raster_partial_gate = SOC_FALSE;
     soc_bool required_gates_passed = SOC_TRUE;
     int parse_result;
 
@@ -891,12 +971,14 @@ int main(int argc, char** argv)
     neon_kernels = soc_kernel_table_neon();
     features = soc_cpu_features_detect();
     if (scalar_kernels == NULL || scalar_kernels->clear_f32 == NULL ||
+        scalar_kernels->store_constant_depth_block_f32 == NULL ||
         scalar_kernels->reduce_hiz_level_f32 == NULL) {
         (void)fprintf(stderr, "soc_kernel_bench: Scalar kernels unavailable\n");
         return EXIT_FAILURE;
     }
     if (neon_kernels == NULL ||
         neon_kernels->clear_f32 == NULL ||
+        neon_kernels->store_constant_depth_block_f32 == NULL ||
         neon_kernels->reduce_hiz_level_f32 == NULL ||
         features.architecture != SOC_CPU_ARCHITECTURE_ARM64 ||
         !soc_cpu_features_has(&features, SOC_CPU_FEATURE_NEON)) {
@@ -953,6 +1035,22 @@ int main(int argc, char** argv)
             scalar_kernels,
             neon_kernels,
             &hiz_gate
+        ) ||
+        !run_case(
+            BENCHMARK_RASTER_DEPTH_BLOCK_FULL_F32,
+            "raster_depth_block_f32.full.1920x1080",
+            &opts,
+            scalar_kernels,
+            neon_kernels,
+            &raster_full_gate
+        ) ||
+        !run_case(
+            BENCHMARK_RASTER_DEPTH_BLOCK_PARTIAL_F32,
+            "raster_depth_block_f32.partial.1920x1080",
+            &opts,
+            scalar_kernels,
+            neon_kernels,
+            &raster_partial_gate
         )) {
         return EXIT_FAILURE;
     }
@@ -969,11 +1067,20 @@ int main(int argc, char** argv)
         hiz_gate != SOC_TRUE) {
         required_gates_passed = SOC_FALSE;
     }
+    if ((opts.required_gates & REQUIRED_GATE_RASTER_DEPTH_BLOCK_F32) != 0u &&
+        (raster_full_gate != SOC_TRUE ||
+            raster_partial_gate != SOC_TRUE)) {
+        required_gates_passed = SOC_FALSE;
+    }
 
     (void)printf(
         "soc_kernel_bench status=complete performance_gate=%s"
         " required_gate=%s sink=%016" PRIx64 "\n",
-        clear_gate == SOC_TRUE && hiz_gate == SOC_TRUE ? "pass" : "fail",
+        clear_gate == SOC_TRUE && hiz_gate == SOC_TRUE &&
+            raster_full_gate == SOC_TRUE &&
+            raster_partial_gate == SOC_TRUE
+            ? "pass"
+            : "fail",
         opts.required_gates == REQUIRED_GATE_NONE
             ? "not_requested"
             : (required_gates_passed == SOC_TRUE ? "pass" : "fail"),

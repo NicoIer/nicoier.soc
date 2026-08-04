@@ -44,20 +44,27 @@ static soc_result build_snapshot(
     soc_kernel_backend backend,
     soc_clip_depth_range clip_depth_range,
     soc_depth_direction depth_direction,
+    soc_bool constant_depth,
     soc_snapshot** out_snapshot
 )
 {
-    static const float positions[] = {
+    static const float varying_positions[] = {
         -1.25f, -0.85f, 0.12f,
          0.90f, -0.95f, 0.30f,
          0.95f,  0.85f, 0.72f,
         -0.80f,  1.10f, 0.55f,
     };
-    static const uint16_t indices[] = {
+    static const uint16_t varying_indices[] = {
         0u, 1u, 2u,
         0u, 2u, 3u,
     };
-    static const soc_mat4 transforms[] = {
+    static const float constant_positions[] = {
+        -1.0f, -1.0f, 0.35f,
+         2.0f, -1.0f, 0.35f,
+        -1.0f,  2.0f, 0.35f,
+    };
+    static const uint16_t constant_indices[] = {0u, 1u, 2u};
+    static const soc_mat4 varying_transforms[] = {
         {
             .col0 = {0.84f, 0.02f, 0.00f, 0.00f},
             .col1 = {-0.03f, 0.82f, 0.00f, 0.00f},
@@ -71,6 +78,12 @@ static soc_result build_snapshot(
             .col3 = {0.31f, -0.16f, 0.08f, 1.00f},
         },
     };
+    static const soc_mat4 identity_transform = {
+        .col0 = {1.0f, 0.0f, 0.0f, 0.0f},
+        .col1 = {0.0f, 1.0f, 0.0f, 0.0f},
+        .col2 = {0.0f, 0.0f, 1.0f, 0.0f},
+        .col3 = {0.0f, 0.0f, 0.0f, 1.0f},
+    };
     const soc_config config = {
         .struct_size = sizeof(soc_config),
         .width = 17u,
@@ -81,15 +94,19 @@ static soc_result build_snapshot(
     const soc_mesh_desc mesh_desc = {
         .struct_size = sizeof(soc_mesh_desc),
         .flags = SOC_MESH_FLAG_TWO_SIDED,
-        .vertices = positions,
-        .indices = indices,
-        .vertex_count = 4u,
+        .vertices = constant_depth == SOC_TRUE
+            ? constant_positions
+            : varying_positions,
+        .indices = constant_depth == SOC_TRUE
+            ? constant_indices
+            : varying_indices,
+        .vertex_count = constant_depth == SOC_TRUE ? 3u : 4u,
         .vertex_stride = 3u * sizeof(float),
         .position_offset = 0u,
-        .index_count = 6u,
+        .index_count = constant_depth == SOC_TRUE ? 3u : 6u,
         .index_type = SOC_INDEX_UINT16,
     };
-    const soc_frame_desc frame = {
+    soc_frame_desc frame = {
         .struct_size = sizeof(soc_frame_desc),
         .clip_from_world = {
             .col0 = {0.92f, 0.03f, 0.02f, 0.01f},
@@ -104,8 +121,12 @@ static soc_result build_snapshot(
     };
     soc_occluder_group group = {
         .mesh = NULL,
-        .object_to_world = transforms,
-        .instance_count = (uint32_t)ARRAY_COUNT(transforms),
+        .object_to_world = constant_depth == SOC_TRUE
+            ? &identity_transform
+            : varying_transforms,
+        .instance_count = constant_depth == SOC_TRUE
+            ? 1u
+            : (uint32_t)ARRAY_COUNT(varying_transforms),
         .flags = SOC_OCCLUDER_GROUP_FLAG_NONE,
     };
     soc_occlusion_build_desc build = {
@@ -120,6 +141,10 @@ static soc_result build_snapshot(
     soc_mesh* mesh = NULL;
     soc_snapshot* snapshot = NULL;
     soc_result result;
+
+    if (constant_depth == SOC_TRUE) {
+        frame.clip_from_world = identity_transform;
+    }
 
     if (out_snapshot == NULL) {
         return SOC_RESULT_INVALID_ARGUMENT;
@@ -169,7 +194,8 @@ static int compare_build_stats(
 
 static int compare_snapshots(
     const soc_snapshot* scalar,
-    const soc_snapshot* neon
+    const soc_snapshot* neon,
+    uint64_t expected_input_triangle_count
 )
 {
     uint32_t clear_bits;
@@ -186,7 +212,8 @@ static int compare_snapshots(
     CHECK(scalar->kernels == soc_kernel_table_scalar());
     CHECK(neon->kernels == soc_kernel_table_neon());
     CHECK(compare_build_stats(&scalar->build_stats, &neon->build_stats) == 0);
-    CHECK(scalar->build_stats.input_triangle_count == 4u);
+    CHECK(scalar->build_stats.input_triangle_count ==
+        expected_input_triangle_count);
     CHECK(scalar->build_stats.rasterized_triangle_count != 0u);
     CHECK(scalar->depth_pyramid.level_count ==
         neon->depth_pyramid.level_count);
@@ -392,16 +419,68 @@ static int test_pipeline_differential(void)
                 SOC_KERNEL_BACKEND_SCALAR,
                 clip_depth_ranges[range_index],
                 depth_directions[direction_index],
+                SOC_FALSE,
                 &scalar
             ) == SOC_RESULT_OK);
             CHECK(build_snapshot(
                 SOC_KERNEL_BACKEND_NEON,
                 clip_depth_ranges[range_index],
                 depth_directions[direction_index],
+                SOC_FALSE,
                 &neon
             ) == SOC_RESULT_OK);
-            CHECK(compare_snapshots(scalar, neon) == 0);
+            CHECK(compare_snapshots(scalar, neon, 4u) == 0);
             CHECK(compare_queries(scalar, neon) == 0);
+
+            soc_snapshot_destroy_internal(neon);
+            soc_snapshot_destroy_internal(scalar);
+        }
+    }
+    return 0;
+}
+
+static int test_constant_depth_pipeline_differential(void)
+{
+    static const soc_clip_depth_range clip_depth_ranges[] = {
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE,
+    };
+    static const soc_depth_direction depth_directions[] = {
+        SOC_DEPTH_FORWARD,
+        SOC_DEPTH_REVERSED,
+    };
+    size_t range_index;
+
+    if (soc_kernel_table_neon() == NULL) {
+        return 0;
+    }
+
+    for (range_index = 0u;
+         range_index < ARRAY_COUNT(clip_depth_ranges);
+         ++range_index) {
+        size_t direction_index;
+
+        for (direction_index = 0u;
+             direction_index < ARRAY_COUNT(depth_directions);
+             ++direction_index) {
+            soc_snapshot* scalar = NULL;
+            soc_snapshot* neon = NULL;
+
+            CHECK(build_snapshot(
+                SOC_KERNEL_BACKEND_SCALAR,
+                clip_depth_ranges[range_index],
+                depth_directions[direction_index],
+                SOC_TRUE,
+                &scalar
+            ) == SOC_RESULT_OK);
+            CHECK(build_snapshot(
+                SOC_KERNEL_BACKEND_NEON,
+                clip_depth_ranges[range_index],
+                depth_directions[direction_index],
+                SOC_TRUE,
+                &neon
+            ) == SOC_RESULT_OK);
+            CHECK(compare_snapshots(scalar, neon, 1u) == 0);
 
             soc_snapshot_destroy_internal(neon);
             soc_snapshot_destroy_internal(scalar);
@@ -412,5 +491,8 @@ static int test_pipeline_differential(void)
 
 int main(void)
 {
-    return test_pipeline_differential();
+    if (test_pipeline_differential() != 0) {
+        return 1;
+    }
+    return test_constant_depth_pipeline_differential();
 }

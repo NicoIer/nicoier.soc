@@ -17,9 +17,21 @@ typedef uint32_t soc_kernel_backend;
 #define SOC_KERNEL_BACKEND_SCALAR ((soc_kernel_backend)0u)
 #define SOC_KERNEL_BACKEND_NEON ((soc_kernel_backend)1u)
 
+#define SOC_KERNEL_RASTER_BLOCK_SIZE 8u
+
 typedef struct soc_kernel_table {
     soc_kernel_backend backend;
     void (*clear_f32)(float* destination, size_t count, float value);
+    /* block dimensions are at most 8; mask bit = row * 8 + column. */
+    void (*store_constant_depth_block_f32)(
+        float* destination,
+        size_t row_stride,
+        uint32_t block_width,
+        uint32_t block_height,
+        uint64_t coverage_mask,
+        float candidate_depth,
+        soc_depth_direction depth_direction
+    );
     void (*reduce_hiz_level_f32)(
         const float* source,
         uint32_t source_width,
@@ -41,6 +53,16 @@ void soc_kernel_clear_f32_scalar(
     float* destination,
     size_t count,
     float value
+);
+
+void soc_kernel_store_constant_depth_block_f32_scalar(
+    float* destination,
+    size_t row_stride,
+    uint32_t block_width,
+    uint32_t block_height,
+    uint64_t coverage_mask,
+    float candidate_depth,
+    soc_depth_direction depth_direction
 );
 
 const soc_kernel_table* soc_kernel_table_scalar(void);

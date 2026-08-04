@@ -10,6 +10,14 @@
 #include <arm_neon.h>
 #endif
 
+#if defined(_MSC_VER)
+#define SOC_NEON_FORCE_INLINE __forceinline
+#elif defined(__clang__) || defined(__GNUC__)
+#define SOC_NEON_FORCE_INLINE inline __attribute__((always_inline))
+#else
+#define SOC_NEON_FORCE_INLINE inline
+#endif
+
 static float32x4_t reduce_depth_neon(
     float32x4_t accumulated,
     float32x4_t candidate,
@@ -33,6 +41,118 @@ static float reduce_depth_scalar(
         return candidate < accumulated ? candidate : accumulated;
     }
     return candidate > accumulated ? candidate : accumulated;
+}
+
+static SOC_NEON_FORCE_INLINE void store_constant_depth_block_f32_neon_impl(
+    float* destination,
+    size_t row_stride,
+    uint32_t block_width,
+    uint32_t block_height,
+    uint64_t coverage_mask,
+    float candidate_depth,
+    soc_bool reversed_depth
+)
+{
+    static const uint32_t lane_bits_values[4] = {1u, 2u, 4u, 8u};
+    const uint32x4_t lane_bits = vld1q_u32(lane_bits_values);
+    const float32x4_t candidates = vdupq_n_f32(candidate_depth);
+    uint32_t row;
+
+    for (row = 0u; row < block_height; ++row) {
+        float* destination_row = destination + (size_t)row * row_stride;
+        const uint32_t row_mask = (uint32_t)(
+            coverage_mask >> (row * SOC_KERNEL_RASTER_BLOCK_SIZE)
+        );
+        uint32_t column = 0u;
+
+        while (block_width - column >= 4u) {
+            const uint32_t lane_mask = (row_mask >> column) & 0x0fu;
+
+            if (lane_mask != 0u) {
+                const float32x4_t stored =
+                    vld1q_f32(destination_row + column);
+                float32x4_t compared_stored = stored;
+
+                if (lane_mask != 0x0fu) {
+                    const uint32x4_t covered = vtstq_u32(
+                        vdupq_n_u32(lane_mask),
+                        lane_bits
+                    );
+
+                    /*
+                     * Uncovered lanes did not participate in the old Scalar
+                     * path. Compare the candidate with itself in those lanes
+                     * so an uncovered stored NaN cannot affect FP status.
+                     */
+                    compared_stored = vbslq_f32(
+                        covered,
+                        stored,
+                        candidates
+                    );
+                }
+                const uint32x4_t store_mask =
+                    reversed_depth == SOC_TRUE
+                        ? vcgtq_f32(candidates, compared_stored)
+                        : vcltq_f32(candidates, compared_stored);
+
+                vst1q_f32(
+                    destination_row + column,
+                    vbslq_f32(store_mask, candidates, stored)
+                );
+            }
+            column += 4u;
+        }
+
+        for (; column < block_width; ++column) {
+            if ((row_mask & (UINT32_C(1) << column)) != 0u) {
+                const float stored_depth = destination_row[column];
+                const soc_bool passes_depth = reversed_depth == SOC_TRUE
+                    ? (candidate_depth > stored_depth
+                        ? SOC_TRUE
+                        : SOC_FALSE)
+                    : (candidate_depth < stored_depth
+                        ? SOC_TRUE
+                        : SOC_FALSE);
+
+                if (passes_depth == SOC_TRUE) {
+                    destination_row[column] = candidate_depth;
+                }
+            }
+        }
+    }
+}
+
+static void store_constant_depth_block_f32_neon(
+    float* destination,
+    size_t row_stride,
+    uint32_t block_width,
+    uint32_t block_height,
+    uint64_t coverage_mask,
+    float candidate_depth,
+    soc_depth_direction depth_direction
+)
+{
+    if (depth_direction == SOC_DEPTH_REVERSED) {
+        store_constant_depth_block_f32_neon_impl(
+            destination,
+            row_stride,
+            block_width,
+            block_height,
+            coverage_mask,
+            candidate_depth,
+            SOC_TRUE
+        );
+    } else {
+        store_constant_depth_block_f32_neon_impl(
+            destination,
+            row_stride,
+            block_width,
+            block_height,
+            coverage_mask,
+            candidate_depth,
+            SOC_FALSE
+        );
+    }
 }
 
 static void reduce_hiz_row_scalar(
@@ -160,6 +280,8 @@ static void reduce_hiz_level_f32_neon(
 static const soc_kernel_table neon_kernels = {
     .backend = SOC_KERNEL_BACKEND_NEON,
     .clear_f32 = soc_kernel_clear_f32_scalar,
+    .store_constant_depth_block_f32 =
+        store_constant_depth_block_f32_neon,
     .reduce_hiz_level_f32 = reduce_hiz_level_f32_neon,
     .test_aabbs = soc_occlusion_test_aabbs,
 };
