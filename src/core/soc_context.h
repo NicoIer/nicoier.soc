@@ -3,10 +3,13 @@
 
 #include <soc/soc.h>
 
+#include "core/soc_cpu_features.h"
+
 struct soc_context {
     uint32_t width;
     uint32_t height;
     uint32_t worker_count;
+    soc_cpu_features cpu_features;
     soc_mesh* meshes;
 };
 

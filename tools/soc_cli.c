@@ -1,3 +1,4 @@
+#include "soc_cli_depth.h"
 #include "soc_cli_obj.h"
 #include "soc_cli_png.h"
 
@@ -78,7 +79,7 @@ static void print_usage(FILE* stream, const char* executable)
         "\n"
         "Required:\n"
         "  --input PATH              Input Wavefront OBJ file\n"
-        "  --output PATH             Output 8-bit grayscale PNG file\n"
+        "  --output PATH             Output logarithmic grayscale PNG\n"
         "\n"
         "Image and camera:\n"
         "  --width N                 Image width (default: %u)\n"
@@ -797,61 +798,6 @@ static int check_result(
     return 0;
 }
 
-static void depth_to_grayscale(
-    const float* depth,
-    size_t pixel_count,
-    int reversed_z,
-    double near_plane,
-    double far_plane,
-    unsigned char* pixels,
-    uint64_t* out_drawn_pixel_count
-)
-{
-    uint64_t drawn_pixel_count = 0u;
-    size_t pixel;
-
-    for (pixel = 0u; pixel < pixel_count; ++pixel) {
-        double value = depth[pixel];
-        double forward_depth;
-        double reciprocal_distance;
-        double view_distance;
-        double linear_depth;
-
-        if (isfinite(value) == 0) {
-            value = reversed_z != 0 ? 0.0 : 1.0;
-        }
-        if ((reversed_z != 0 && value > 0.0) ||
-            (reversed_z == 0 && value < 1.0)) {
-            ++drawn_pixel_count;
-        }
-
-        forward_depth = reversed_z != 0 ? 1.0 - value : value;
-        if (forward_depth < 0.0) {
-            forward_depth = 0.0;
-        } else if (forward_depth > 1.0) {
-            forward_depth = 1.0;
-        }
-
-        reciprocal_distance =
-            (1.0 - forward_depth) / near_plane +
-            forward_depth / far_plane;
-        view_distance = reciprocal_distance > 0.0
-            ? 1.0 / reciprocal_distance
-            : far_plane;
-        linear_depth =
-            (view_distance - near_plane) / (far_plane - near_plane);
-        if (linear_depth < 0.0) {
-            linear_depth = 0.0;
-        } else if (linear_depth > 1.0) {
-            linear_depth = 1.0;
-        }
-        pixels[pixel] =
-            (unsigned char)floor(linear_depth * 255.0 + 0.5);
-    }
-
-    *out_drawn_pixel_count = drawn_pixel_count;
-}
-
 static int render(
     soc_cli_options* options,
     char* error,
@@ -1017,14 +963,13 @@ static int render(
         goto cleanup;
     }
 
-    depth_to_grayscale(
+    drawn_pixel_count = soc_cli_depth_to_gray8(
         depth,
         pixel_count,
         options->reversed_z,
         options->near_plane,
         options->far_plane,
-        pixels,
-        &drawn_pixel_count
+        pixels
     );
     if (!soc_cli_png_write_gray8(
             options->output_path,

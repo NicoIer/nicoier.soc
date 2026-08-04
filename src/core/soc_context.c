@@ -37,6 +37,7 @@ soc_result soc_context_create_internal(
     context->width = config->width;
     context->height = config->height;
     context->worker_count = config->worker_count;
+    context->cpu_features = soc_cpu_features_detect();
     *out_context = context;
     return SOC_RESULT_OK;
 }

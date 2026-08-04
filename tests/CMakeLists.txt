@@ -12,6 +12,28 @@ soc_enable_warnings(soc_test_types)
 
 add_test(NAME soc.types COMMAND soc_test_types)
 
+if(TARGET soc_cli_depth)
+    add_executable(soc_test_cli_depth test_cli_depth.c)
+    target_link_libraries(soc_test_cli_depth PRIVATE soc_cli_depth)
+    target_compile_features(soc_test_cli_depth PRIVATE c_std_17)
+    soc_enable_warnings(soc_test_cli_depth)
+
+    add_test(NAME soc.cli_depth COMMAND soc_test_cli_depth)
+endif()
+
+add_executable(soc_test_cpu_features test_cpu_features.c)
+target_link_libraries(soc_test_cpu_features PRIVATE soc_core)
+target_include_directories(
+    soc_test_cpu_features
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src"
+)
+target_compile_features(soc_test_cpu_features PRIVATE c_std_17)
+soc_enable_warnings(soc_test_cpu_features)
+
+add_test(NAME soc.cpu_features COMMAND soc_test_cpu_features)
+
 add_executable(soc_test_pipeline test_pipeline.c)
 target_link_libraries(soc_test_pipeline PRIVATE soc::soc)
 target_compile_features(soc_test_pipeline PRIVATE c_std_17)
