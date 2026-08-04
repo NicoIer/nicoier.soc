@@ -4,6 +4,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_ARM64)
+#include <arm64_neon.h>
+#endif
+
 #define SOC_AABB_CORNER_COUNT 8u
 #define SOC_PROJECTION_SAFETY_EPSILON (32.0 * DBL_EPSILON)
 #define SOC_TRANSFORM_ERROR_FACTOR (128.0 * DBL_EPSILON)
@@ -15,19 +19,35 @@
 #define SOC_CLIP_ALL_BITS \
     ((UINT32_C(1) << SOC_VISIBILITY_CLIP_PLANE_COUNT) - 1u)
 
-typedef struct soc_projected_aabb {
-    double minimum_ndc_x;
-    double maximum_ndc_x;
-    double minimum_ndc_y;
-    double maximum_ndc_y;
-    double nearest_depth;
-} soc_projected_aabb;
+#if defined(_MSC_VER)
+#define SOC_FORCE_INLINE static __forceinline
+#elif defined(__clang__) || defined(__GNUC__)
+#define SOC_FORCE_INLINE static inline __attribute__((always_inline))
+#else
+#define SOC_FORCE_INLINE static inline
+#endif
 
-typedef enum soc_aabb_projection {
-    SOC_AABB_PROJECTION_UNKNOWN = 0,
-    SOC_AABB_PROJECTION_OUTSIDE,
-    SOC_AABB_PROJECTION_VALID,
-} soc_aabb_projection;
+#if defined(__aarch64__) || defined(_M_ARM64)
+static double fused_multiply_add_double(
+    double left,
+    double right,
+    double addend
+)
+{
+#if defined(_MSC_VER) && !defined(__clang__)
+    float64x2_t result = vdupq_n_f64(addend);
+
+    result = vfmaq_f64(
+        result,
+        vdupq_n_f64(left),
+        vdupq_n_f64(right)
+    );
+    return vgetq_lane_f64(result, 0);
+#else
+    return __builtin_fma(left, right, addend);
+#endif
+}
+#endif
 
 static soc_bool finite_double(double value)
 {
@@ -44,6 +64,36 @@ static double absolute_double(double value)
 static double maximum_double(double left, double right)
 {
     return left > right ? left : right;
+}
+
+static double affine_component(
+    double col0,
+    double col1,
+    double col2,
+    double col3,
+    double x,
+    double y,
+    double z
+)
+{
+#if defined(__aarch64__) || defined(_M_ARM64)
+    double result = col1 * y;
+
+    result = fused_multiply_add_double(col0, x, result);
+    result = fused_multiply_add_double(col2, z, result);
+    return result + col3;
+#else
+    return col0 * x + col1 * y + col2 * z + col3;
+#endif
+}
+
+static double remap_negative_one_to_one_depth(double depth)
+{
+#if defined(__aarch64__) || defined(_M_ARM64)
+    return fused_multiply_add_double(depth, 0.5, 0.5);
+#else
+    return depth * 0.5 + 0.5;
+#endif
 }
 
 static soc_bool valid_aabb(const soc_aabb* bounds)
@@ -73,14 +123,42 @@ static soc_visibility_clip_vertex transform_point(
 )
 {
     const soc_visibility_clip_vertex result = {
-        query->col0.x * x + query->col1.x * y +
-            query->col2.x * z + query->col3.x,
-        query->col0.y * x + query->col1.y * y +
-            query->col2.y * z + query->col3.y,
-        query->col0.z * x + query->col1.z * y +
-            query->col2.z * z + query->col3.z,
-        query->col0.w * x + query->col1.w * y +
-            query->col2.w * z + query->col3.w,
+        affine_component(
+            query->col0.x,
+            query->col1.x,
+            query->col2.x,
+            query->col3.x,
+            x,
+            y,
+            z
+        ),
+        affine_component(
+            query->col0.y,
+            query->col1.y,
+            query->col2.y,
+            query->col3.y,
+            x,
+            y,
+            z
+        ),
+        affine_component(
+            query->col0.z,
+            query->col1.z,
+            query->col2.z,
+            query->col3.z,
+            x,
+            y,
+            z
+        ),
+        affine_component(
+            query->col0.w,
+            query->col1.w,
+            query->col2.w,
+            query->col3.w,
+            x,
+            y,
+            z
+        ),
     };
     return result;
 }
@@ -139,10 +217,15 @@ static double maximum_plane_distance(
     const soc_aabb* bounds
 )
 {
-    return plane->x * (plane->x >= 0.0 ? bounds->max.x : bounds->min.x) +
-        plane->y * (plane->y >= 0.0 ? bounds->max.y : bounds->min.y) +
-        plane->z * (plane->z >= 0.0 ? bounds->max.z : bounds->min.z) +
-        plane->d;
+    return affine_component(
+        plane->x,
+        plane->y,
+        plane->z,
+        plane->d,
+        plane->x >= 0.0 ? bounds->max.x : bounds->min.x,
+        plane->y >= 0.0 ? bounds->max.y : bounds->min.y,
+        plane->z >= 0.0 ? bounds->max.z : bounds->min.z
+    );
 }
 
 static double minimum_plane_distance(
@@ -150,10 +233,15 @@ static double minimum_plane_distance(
     const soc_aabb* bounds
 )
 {
-    return plane->x * (plane->x >= 0.0 ? bounds->min.x : bounds->max.x) +
-        plane->y * (plane->y >= 0.0 ? bounds->min.y : bounds->max.y) +
-        plane->z * (plane->z >= 0.0 ? bounds->min.z : bounds->max.z) +
-        plane->d;
+    return affine_component(
+        plane->x,
+        plane->y,
+        plane->z,
+        plane->d,
+        plane->x >= 0.0 ? bounds->min.x : bounds->max.x,
+        plane->y >= 0.0 ? bounds->min.y : bounds->max.y,
+        plane->z >= 0.0 ? bounds->min.z : bounds->max.z
+    );
 }
 
 void soc_aabb_query_context_initialize(
@@ -189,6 +277,7 @@ void soc_aabb_query_context_initialize(
         .clip_planes = {{0.0, 0.0, 0.0, 0.0}},
         .w_plane = {0.0, 0.0, 0.0, 0.0},
         .transform_error_scale = 0.0,
+        .all_finite = SOC_FALSE,
         .near_clip_plane_index =
             frame->depth_direction == SOC_DEPTH_REVERSED
             ? 5u
@@ -292,6 +381,13 @@ void soc_aabb_query_context_initialize(
         query.col2.w,
         query.col3.w
     );
+    query.all_finite =
+        finite_clip_vertex(&query.col0) == SOC_TRUE &&
+        finite_clip_vertex(&query.col1) == SOC_TRUE &&
+        finite_clip_vertex(&query.col2) == SOC_TRUE &&
+        finite_clip_vertex(&query.col3) == SOC_TRUE
+            ? SOC_TRUE
+            : SOC_FALSE;
     *out_query = query;
 }
 
@@ -306,7 +402,7 @@ static double clamp_double(double value, double minimum, double maximum)
     return value;
 }
 
-static soc_aabb_projection project_aabb(
+SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
     const soc_aabb_query_context* query,
     const soc_aabb* bounds,
     soc_projected_aabb* out_projected
@@ -548,7 +644,7 @@ static soc_aabb_projection project_aabb(
 
         if (query->clip_depth_range ==
             SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) {
-            depth = depth * 0.5 + 0.5;
+            depth = remap_negative_one_to_one_depth(depth);
         }
         if (finite_double(ndc_x) != SOC_TRUE ||
             finite_double(ndc_y) != SOC_TRUE ||
@@ -589,6 +685,7 @@ static soc_aabb_projection project_aabb(
                 (minimum_w - clip_error_margin);
     }
     if (finite_double(projection_margin) != SOC_TRUE ||
+        projection_margin < 0.0 ||
         projection_margin > 1.0) {
         projection_margin = 1.0;
     }
@@ -621,6 +718,15 @@ static soc_aabb_projection project_aabb(
         1.0
     );
     return SOC_AABB_PROJECTION_VALID;
+}
+
+soc_aabb_projection soc_project_aabb_scalar(
+    const soc_aabb_query_context* query,
+    const soc_aabb* bounds,
+    soc_projected_aabb* out_projected
+)
+{
+    return project_aabb_scalar_impl(query, bounds, out_projected);
 }
 
 static void projected_pixel_bounds(
@@ -679,7 +785,7 @@ static uint32_t select_hiz_level(
     return level;
 }
 
-static soc_visibility test_projected_aabb(
+SOC_FORCE_INLINE soc_visibility test_projected_aabb_scalar_impl(
     const soc_hiz* hiz,
     const soc_aabb_query_context* query,
     const soc_projected_aabb* projected
@@ -738,7 +844,16 @@ static soc_visibility test_projected_aabb(
     return SOC_VISIBILITY_OCCLUDED;
 }
 
-soc_result soc_occlusion_test_aabbs(
+soc_visibility soc_test_projected_aabb_scalar(
+    const soc_hiz* hiz,
+    const soc_aabb_query_context* query,
+    const soc_projected_aabb* projected
+)
+{
+    return test_projected_aabb_scalar_impl(hiz, query, projected);
+}
+
+soc_result soc_occlusion_validate_aabb_test(
     const soc_hiz* hiz,
     const soc_aabb_query_context* query,
     const soc_aabb* world_bounds,
@@ -748,7 +863,6 @@ soc_result soc_occlusion_test_aabbs(
 )
 {
     soc_occlusion_query_counts counts = {0u, 0u, 0u};
-    uint32_t index;
 
     if (hiz == NULL ||
         hiz->initialized != SOC_TRUE ||
@@ -774,32 +888,79 @@ soc_result soc_occlusion_test_aabbs(
     if (world_bounds == NULL || out_visibility == NULL) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
+    return SOC_RESULT_OK;
+}
+
+SOC_FORCE_INLINE soc_visibility occlusion_test_aabb_scalar_impl(
+    const soc_hiz* hiz,
+    const soc_aabb_query_context* query,
+    const soc_aabb* bounds
+)
+{
+    soc_projected_aabb projected;
+    const soc_aabb_projection projection = project_aabb_scalar_impl(
+        query,
+        bounds,
+        &projected
+    );
+
+    if (projection == SOC_AABB_PROJECTION_UNKNOWN) {
+        return SOC_VISIBILITY_UNKNOWN;
+    }
+    if (projection == SOC_AABB_PROJECTION_OUTSIDE) {
+        return SOC_VISIBILITY_VISIBLE;
+    }
+    return test_projected_aabb_scalar_impl(hiz, query, &projected);
+}
+
+soc_visibility soc_occlusion_test_aabb_scalar(
+    const soc_hiz* hiz,
+    const soc_aabb_query_context* query,
+    const soc_aabb* bounds
+)
+{
+    return occlusion_test_aabb_scalar_impl(hiz, query, bounds);
+}
+
+soc_result soc_occlusion_test_aabbs(
+    const soc_hiz* hiz,
+    const soc_aabb_query_context* query,
+    const soc_aabb* world_bounds,
+    uint32_t bounds_count,
+    soc_visibility* out_visibility,
+    soc_occlusion_query_counts* out_counts
+)
+{
+    soc_occlusion_query_counts counts = {0u, 0u, 0u};
+    soc_result result;
+    uint32_t index;
+
+    result = soc_occlusion_validate_aabb_test(
+        hiz,
+        query,
+        world_bounds,
+        bounds_count,
+        out_visibility,
+        out_counts
+    );
+    if (result != SOC_RESULT_OK || bounds_count == 0u) {
+        return result;
+    }
 
     for (index = 0u; index < bounds_count; ++index) {
-        soc_projected_aabb projected;
-        const soc_aabb_projection projection = project_aabb(
+        const soc_visibility visibility = occlusion_test_aabb_scalar_impl(
+            hiz,
             query,
-            &world_bounds[index],
-            &projected
+            &world_bounds[index]
         );
 
-        if (projection == SOC_AABB_PROJECTION_UNKNOWN) {
-            out_visibility[index] = SOC_VISIBILITY_UNKNOWN;
+        out_visibility[index] = visibility;
+        if (visibility == SOC_VISIBILITY_UNKNOWN) {
             ++counts.unknown;
-        } else if (projection == SOC_AABB_PROJECTION_OUTSIDE) {
-            out_visibility[index] = SOC_VISIBILITY_VISIBLE;
-            ++counts.visible;
+        } else if (visibility == SOC_VISIBILITY_OCCLUDED) {
+            ++counts.occluded;
         } else {
-            out_visibility[index] = test_projected_aabb(
-                hiz,
-                query,
-                &projected
-            );
-            if (out_visibility[index] == SOC_VISIBILITY_OCCLUDED) {
-                ++counts.occluded;
-            } else {
-                ++counts.visible;
-            }
+            ++counts.visible;
         }
     }
 

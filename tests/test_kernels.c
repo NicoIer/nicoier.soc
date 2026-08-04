@@ -45,6 +45,7 @@ static int test_scalar_table_contract(void)
     CHECK(neon->reduce_hiz_level_f32 != NULL);
     CHECK(neon->transform_triangle_f64 != NULL);
     CHECK(neon->test_aabbs != NULL);
+    CHECK(neon->test_aabbs != scalar->test_aabbs);
     CHECK(soc_kernel_table_for_backend(SOC_KERNEL_BACKEND_NEON) == neon);
 #else
     CHECK(soc_kernel_table_neon() == NULL);

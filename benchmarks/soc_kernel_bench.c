@@ -4,6 +4,8 @@
 
 #include "core/soc_cpu_features.h"
 #include "core/soc_kernels.h"
+#include "occlusion/soc_hiz.h"
+#include "occlusion/soc_visibility.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -16,6 +18,7 @@
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
+#include <intrin.h>
 #include <windows.h>
 #elif defined(__APPLE__)
 #include <mach/mach_time.h>
@@ -35,6 +38,9 @@
 #define RASTER_PARTIAL_MASK UINT64_C(0x55aa55aa55aa55aa)
 #define TRANSFORM_TRIANGLES_PER_OPERATION 16384u
 #define TRANSFORM_POSITION_SET_COUNT 64u
+#define QUERY_AABB_COUNT 65536u
+#define QUERY_WIDTH 640u
+#define QUERY_HEIGHT 360u
 
 #if !defined(SOC_KERNEL_BENCH_BUILD_TYPE)
 #define SOC_KERNEL_BENCH_BUILD_TYPE "unknown"
@@ -49,10 +55,11 @@
 #define REQUIRED_GATE_HIZ_REDUCE_LEVEL_F32 (UINT32_C(1) << 1u)
 #define REQUIRED_GATE_RASTER_DEPTH_BLOCK_F32 (UINT32_C(1) << 2u)
 #define REQUIRED_GATE_TRANSFORM_TRIANGLE_F64 (UINT32_C(1) << 3u)
+#define REQUIRED_GATE_AABB_QUERY (UINT32_C(1) << 4u)
 #define REQUIRED_GATE_ALL \
     (REQUIRED_GATE_CLEAR_F32 | REQUIRED_GATE_HIZ_REDUCE_LEVEL_F32 | \
         REQUIRED_GATE_RASTER_DEPTH_BLOCK_F32 | \
-        REQUIRED_GATE_TRANSFORM_TRIANGLE_F64)
+        REQUIRED_GATE_TRANSFORM_TRIANGLE_F64 | REQUIRED_GATE_AABB_QUERY)
 
 typedef enum benchmark_kind {
     BENCHMARK_CLEAR_F32 = 0,
@@ -94,7 +101,28 @@ typedef struct transform_workload {
     uint64_t invocation;
 } transform_workload;
 
+typedef struct query_workload {
+    soc_hiz hiz;
+    soc_aabb_query_context query;
+    soc_aabb* bounds;
+    soc_visibility* visibility;
+    soc_occlusion_query_counts counts;
+    uint64_t invocation;
+} query_workload;
+
 static volatile uint64_t benchmark_sink;
+
+static void observe_memory(const void* pointer)
+{
+#if defined(_MSC_VER)
+    (void)pointer;
+    _ReadWriteBarrier();
+#elif defined(__clang__) || defined(__GNUC__)
+    __asm__ __volatile__("" : : "r"(pointer) : "memory");
+#else
+    benchmark_sink ^= (uint64_t)(uintptr_t)pointer;
+#endif
+}
 
 static void print_usage(FILE* stream, const char* executable)
 {
@@ -104,7 +132,7 @@ static void print_usage(FILE* stream, const char* executable)
         "  --samples N    Samples per backend and case (default: %u)\n"
         "  --sample-ms N  Minimum milliseconds per sample (default: %u)\n"
         "  --validate-only  Check Scalar/NEON outputs without timing\n"
-        "  --require-gate clear|hiz|raster|transform|all\n"
+        "  --require-gate clear|hiz|raster|transform|query|all\n"
         "                  Require Release, default sampling, distinct kernel,\n"
         "                  and fail unless selected performance gate(s) pass\n"
         "  --help         Show this help\n",
@@ -249,6 +277,8 @@ static int parse_options(int argc, char** argv, options* out_options)
             } else if (strcmp(value, "transform") == 0) {
                 out_options->required_gates |=
                     REQUIRED_GATE_TRANSFORM_TRIANGLE_F64;
+            } else if (strcmp(value, "query") == 0) {
+                out_options->required_gates |= REQUIRED_GATE_AABB_QUERY;
             } else if (strcmp(value, "all") == 0) {
                 out_options->required_gates = REQUIRED_GATE_ALL;
             } else {
@@ -580,6 +610,209 @@ static int run_transform_timed_sample(
     do {
         execute_transform_operation(workload, kernels);
         if (iterations == UINT64_MAX) {
+            return 0;
+        }
+        ++iterations;
+        end = timer_now_ns();
+        if (end == UINT64_MAX || end < start) {
+            return 0;
+        }
+        elapsed = end - start;
+    } while (elapsed < target_ns);
+
+    *out_average_ns = (elapsed + iterations / 2u) / iterations;
+    return 1;
+}
+
+static uint64_t checksum_bytes(const void* data, size_t size)
+{
+    const unsigned char* bytes = (const unsigned char*)data;
+    uint64_t hash = UINT64_C(14695981039346656037);
+    size_t index;
+
+    for (index = 0u; index < size; ++index) {
+        hash ^= bytes[index];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static uint64_t checksum_query_outputs(const query_workload* workload)
+{
+    uint64_t hash = checksum_bytes(
+        workload->visibility,
+        QUERY_AABB_COUNT * sizeof(*workload->visibility)
+    );
+
+    hash = (hash ^ workload->counts.visible) * UINT64_C(1099511628211);
+    hash = (hash ^ workload->counts.occluded) * UINT64_C(1099511628211);
+    hash = (hash ^ workload->counts.unknown) * UINT64_C(1099511628211);
+    return hash;
+}
+
+static int initialize_query_workload(
+    query_workload* workload,
+    const soc_kernel_table* scalar_kernels
+)
+{
+    const soc_frame_desc frame = {
+        .struct_size = sizeof(soc_frame_desc),
+        .clip_from_world = {
+            .col0 = {1.0f, 0.0f, 0.0f, 0.0f},
+            .col1 = {0.0f, 1.0f, 0.0f, 0.0f},
+            .col2 = {0.0f, 0.0f, 1.0f, 0.0f},
+            .col3 = {0.0f, 0.0f, 0.0f, 1.0f},
+        },
+        .clip_depth_range = SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        .depth_direction = SOC_DEPTH_FORWARD,
+        .front_face = SOC_FRONT_FACE_CCW,
+        .flags = SOC_FRAME_FLAG_NONE,
+    };
+    size_t data_index;
+    uint32_t index;
+
+    memset(workload, 0, sizeof(*workload));
+    workload->bounds = (soc_aabb*)malloc(
+        QUERY_AABB_COUNT * sizeof(*workload->bounds)
+    );
+    workload->visibility = (soc_visibility*)malloc(
+        QUERY_AABB_COUNT * sizeof(*workload->visibility)
+    );
+    if (workload->bounds == NULL || workload->visibility == NULL ||
+        soc_hiz_initialize(
+            &workload->hiz,
+            QUERY_WIDTH,
+            QUERY_HEIGHT
+        ) != SOC_RESULT_OK) {
+        soc_hiz_shutdown(&workload->hiz);
+        free(workload->visibility);
+        free(workload->bounds);
+        memset(workload, 0, sizeof(*workload));
+        return 0;
+    }
+
+    for (data_index = 0u;
+         data_index < workload->hiz.levels[0].element_count;
+         ++data_index) {
+        workload->hiz.data[data_index] = 0.5f;
+    }
+    if (soc_hiz_build_with_kernels(
+            &workload->hiz,
+            SOC_DEPTH_FORWARD,
+            scalar_kernels
+        ) != SOC_RESULT_OK) {
+        soc_hiz_shutdown(&workload->hiz);
+        free(workload->visibility);
+        free(workload->bounds);
+        memset(workload, 0, sizeof(*workload));
+        return 0;
+    }
+    soc_aabb_query_context_initialize(&frame, &workload->query);
+
+    for (index = 0u; index < QUERY_AABB_COUNT; ++index) {
+        const uint32_t grid_x = index & UINT32_C(0xff);
+        const uint32_t grid_y = (index >> 8u) & UINT32_C(0xff);
+        const float center_x = -0.75f +
+            (float)grid_x * (1.5f / 255.0f);
+        const float center_y = -0.75f +
+            (float)grid_y * (1.5f / 255.0f);
+        const float radius = 0.0005f;
+        const float depth = (index & 1u) == 0u ? 0.15f : 0.85f;
+
+        workload->bounds[index].min.x = center_x - radius;
+        workload->bounds[index].min.y = center_y - radius;
+        workload->bounds[index].min.z = depth;
+        workload->bounds[index].max.x = center_x + radius;
+        workload->bounds[index].max.y = center_y + radius;
+        workload->bounds[index].max.z = depth + 0.002f;
+    }
+    return 1;
+}
+
+static void destroy_query_workload(query_workload* workload)
+{
+    if (workload == NULL) {
+        return;
+    }
+    soc_hiz_shutdown(&workload->hiz);
+    free(workload->visibility);
+    free(workload->bounds);
+    memset(workload, 0, sizeof(*workload));
+}
+
+static int execute_query_operation(
+    query_workload* workload,
+    const soc_kernel_table* kernels
+)
+{
+    const soc_result result = kernels->test_aabbs(
+        &workload->hiz,
+        &workload->query,
+        workload->bounds,
+        QUERY_AABB_COUNT,
+        workload->visibility,
+        &workload->counts
+    );
+    const size_t observed_index =
+        (size_t)(workload->invocation & (QUERY_AABB_COUNT - 1u));
+    uint64_t observed;
+
+    if (result != SOC_RESULT_OK) {
+        return 0;
+    }
+    observe_memory(workload->visibility);
+    observed = workload->visibility[observed_index];
+    observed ^= workload->counts.visible;
+    observed ^= workload->counts.occluded << 17u;
+    observed ^= workload->counts.unknown << 33u;
+    benchmark_sink =
+        (benchmark_sink ^ observed ^ workload->invocation) *
+        UINT64_C(1099511628211);
+    ++workload->invocation;
+    return 1;
+}
+
+static int capture_query_checksum(
+    query_workload* workload,
+    const soc_kernel_table* kernels,
+    int fill,
+    uint64_t* out_checksum
+)
+{
+    memset(
+        workload->visibility,
+        fill,
+        QUERY_AABB_COUNT * sizeof(*workload->visibility)
+    );
+    workload->counts.visible = 0u;
+    workload->counts.occluded = 0u;
+    workload->counts.unknown = 0u;
+    workload->invocation = 0u;
+    if (!execute_query_operation(workload, kernels)) {
+        return 0;
+    }
+    *out_checksum = checksum_query_outputs(workload);
+    return 1;
+}
+
+static int run_query_timed_sample(
+    query_workload* workload,
+    const soc_kernel_table* kernels,
+    uint64_t target_ns,
+    uint64_t* out_average_ns
+)
+{
+    const uint64_t start = timer_now_ns();
+    uint64_t end;
+    uint64_t elapsed;
+    uint64_t iterations = 0u;
+
+    if (start == UINT64_MAX) {
+        return 0;
+    }
+    do {
+        if (!execute_query_operation(workload, kernels) ||
+            iterations == UINT64_MAX) {
             return 0;
         }
         ++iterations;
@@ -1272,6 +1505,231 @@ cleanup:
     return success;
 }
 
+static int run_query_case(
+    const char* case_name,
+    const options* opts,
+    const soc_kernel_table* scalar_kernels,
+    const soc_kernel_table* neon_kernels,
+    soc_bool* out_gate_passed
+)
+{
+    query_workload scalar_workload;
+    query_workload neon_workload;
+    backend_result scalar_result = {0};
+    backend_result neon_result = {0};
+    uint64_t validation_scalar = 0u;
+    uint64_t validation_neon = 0u;
+    uint64_t bounds_checksum;
+    uint64_t hiz_checksum;
+    uint64_t warmup_average;
+    uint64_t target_ns;
+    uint32_t sample;
+    int success = 0;
+
+    memset(&scalar_workload, 0, sizeof(scalar_workload));
+    memset(&neon_workload, 0, sizeof(neon_workload));
+    if (!initialize_query_workload(&scalar_workload, scalar_kernels) ||
+        !initialize_query_workload(&neon_workload, scalar_kernels)) {
+        (void)fprintf(stderr, "%s: workload initialization failed\n", case_name);
+        goto cleanup;
+    }
+    bounds_checksum = checksum_bytes(
+        scalar_workload.bounds,
+        QUERY_AABB_COUNT * sizeof(*scalar_workload.bounds)
+    );
+    hiz_checksum = checksum_f32(
+        scalar_workload.hiz.data,
+        scalar_workload.hiz.element_count
+    );
+    if (bounds_checksum != checksum_bytes(
+            neon_workload.bounds,
+            QUERY_AABB_COUNT * sizeof(*neon_workload.bounds)
+        ) ||
+        hiz_checksum != checksum_f32(
+            neon_workload.hiz.data,
+            neon_workload.hiz.element_count
+        ) ||
+        !capture_query_checksum(
+            &scalar_workload,
+            scalar_kernels,
+            0xa5,
+            &validation_scalar
+        ) ||
+        !capture_query_checksum(
+            &neon_workload,
+            neon_kernels,
+            0x5a,
+            &validation_neon
+        ) ||
+        validation_scalar != validation_neon ||
+        memcmp(
+            scalar_workload.visibility,
+            neon_workload.visibility,
+            QUERY_AABB_COUNT * sizeof(*scalar_workload.visibility)
+        ) != 0 ||
+        memcmp(
+            &scalar_workload.counts,
+            &neon_workload.counts,
+            sizeof(scalar_workload.counts)
+        ) != 0 ||
+        scalar_workload.counts.visible != QUERY_AABB_COUNT / 2u ||
+        scalar_workload.counts.occluded != QUERY_AABB_COUNT / 2u ||
+        scalar_workload.counts.unknown != 0u ||
+        bounds_checksum != checksum_bytes(
+            scalar_workload.bounds,
+            QUERY_AABB_COUNT * sizeof(*scalar_workload.bounds)
+        ) ||
+        bounds_checksum != checksum_bytes(
+            neon_workload.bounds,
+            QUERY_AABB_COUNT * sizeof(*neon_workload.bounds)
+        ) ||
+        hiz_checksum != checksum_f32(
+            scalar_workload.hiz.data,
+            scalar_workload.hiz.element_count
+        ) ||
+        hiz_checksum != checksum_f32(
+            neon_workload.hiz.data,
+            neon_workload.hiz.element_count
+        )) {
+        (void)fprintf(stderr, "%s: Scalar/NEON validation mismatch\n", case_name);
+        goto cleanup;
+    }
+    if (opts->validate_only == SOC_TRUE) {
+        (void)printf(
+            "case=%s validation=pass checksum=%016" PRIx64 "\n",
+            case_name,
+            validation_scalar
+        );
+        success = 1;
+        goto cleanup;
+    }
+    if (scalar_kernels->test_aabbs == neon_kernels->test_aabbs) {
+        (void)printf(
+            "case=%s performance=unavailable reason=shared_implementation\n",
+            case_name
+        );
+        *out_gate_passed = SOC_FALSE;
+        success = 1;
+        goto cleanup;
+    }
+
+    scalar_result.samples_ns = (uint64_t*)calloc(
+        opts->sample_count,
+        sizeof(*scalar_result.samples_ns)
+    );
+    neon_result.samples_ns = (uint64_t*)calloc(
+        opts->sample_count,
+        sizeof(*neon_result.samples_ns)
+    );
+    if (scalar_result.samples_ns == NULL || neon_result.samples_ns == NULL) {
+        (void)fprintf(stderr, "%s: sample allocation failed\n", case_name);
+        goto cleanup;
+    }
+    if (!run_query_timed_sample(
+            &scalar_workload,
+            scalar_kernels,
+            WARMUP_TARGET_NS,
+            &warmup_average
+        ) ||
+        !run_query_timed_sample(
+            &neon_workload,
+            neon_kernels,
+            WARMUP_TARGET_NS,
+            &warmup_average
+        )) {
+        (void)fprintf(stderr, "%s: warmup failed\n", case_name);
+        goto cleanup;
+    }
+
+    target_ns = (uint64_t)opts->sample_ms * UINT64_C(1000000);
+    for (sample = 0u; sample < opts->sample_count; ++sample) {
+        backend_result* first_result = (sample & 1u) == 0u
+            ? &scalar_result : &neon_result;
+        backend_result* second_result = (sample & 1u) == 0u
+            ? &neon_result : &scalar_result;
+        query_workload* first_workload = (sample & 1u) == 0u
+            ? &scalar_workload : &neon_workload;
+        query_workload* second_workload = (sample & 1u) == 0u
+            ? &neon_workload : &scalar_workload;
+        const soc_kernel_table* first_kernels = (sample & 1u) == 0u
+            ? scalar_kernels : neon_kernels;
+        const soc_kernel_table* second_kernels = (sample & 1u) == 0u
+            ? neon_kernels : scalar_kernels;
+
+        if (!run_query_timed_sample(
+                first_workload,
+                first_kernels,
+                target_ns,
+                &first_result->samples_ns[sample]
+            ) ||
+            !run_query_timed_sample(
+                second_workload,
+                second_kernels,
+                target_ns,
+                &second_result->samples_ns[sample]
+            )) {
+            (void)fprintf(stderr, "%s: timed sample failed\n", case_name);
+            goto cleanup;
+        }
+    }
+
+    if (!capture_query_checksum(
+            &scalar_workload,
+            scalar_kernels,
+            0xa5,
+            &scalar_result.checksum
+        ) ||
+        !capture_query_checksum(
+            &neon_workload,
+            neon_kernels,
+            0x5a,
+            &neon_result.checksum
+        ) ||
+        scalar_result.checksum != validation_scalar ||
+        neon_result.checksum != validation_neon ||
+        scalar_result.checksum != neon_result.checksum ||
+        bounds_checksum != checksum_bytes(
+            scalar_workload.bounds,
+            QUERY_AABB_COUNT * sizeof(*scalar_workload.bounds)
+        ) ||
+        bounds_checksum != checksum_bytes(
+            neon_workload.bounds,
+            QUERY_AABB_COUNT * sizeof(*neon_workload.bounds)
+        ) ||
+        hiz_checksum != checksum_f32(
+            scalar_workload.hiz.data,
+            scalar_workload.hiz.element_count
+        ) ||
+        hiz_checksum != checksum_f32(
+            neon_workload.hiz.data,
+            neon_workload.hiz.element_count
+        )) {
+        (void)fprintf(stderr, "%s: post-sampling validation changed\n", case_name);
+        goto cleanup;
+    }
+    if (!summarize_result(&scalar_result, opts->sample_count) ||
+        !summarize_result(&neon_result, opts->sample_count)) {
+        (void)fprintf(stderr, "%s: result summary failed\n", case_name);
+        goto cleanup;
+    }
+
+    print_backend_result(case_name, "scalar", &scalar_result);
+    print_backend_result(case_name, "neon", &neon_result);
+    *out_gate_passed = print_comparison(
+        case_name,
+        &scalar_result,
+        &neon_result
+    );
+    success = 1;
+
+cleanup:
+    free(scalar_result.samples_ns);
+    free(neon_result.samples_ns);
+    destroy_query_workload(&scalar_workload);
+    destroy_query_workload(&neon_workload);
+    return success;
+}
+
 int main(int argc, char** argv)
 {
     options opts;
@@ -1283,6 +1741,7 @@ int main(int argc, char** argv)
     soc_bool raster_full_gate = SOC_FALSE;
     soc_bool raster_partial_gate = SOC_FALSE;
     soc_bool transform_gate = SOC_FALSE;
+    soc_bool query_gate = SOC_FALSE;
     soc_bool required_gates_passed = SOC_TRUE;
     int parse_result;
 
@@ -1328,7 +1787,8 @@ int main(int argc, char** argv)
     if (scalar_kernels == NULL || scalar_kernels->clear_f32 == NULL ||
         scalar_kernels->store_constant_depth_block_f32 == NULL ||
         scalar_kernels->reduce_hiz_level_f32 == NULL ||
-        scalar_kernels->transform_triangle_f64 == NULL) {
+        scalar_kernels->transform_triangle_f64 == NULL ||
+        scalar_kernels->test_aabbs == NULL) {
         (void)fprintf(stderr, "soc_kernel_bench: Scalar kernels unavailable\n");
         return EXIT_FAILURE;
     }
@@ -1337,6 +1797,7 @@ int main(int argc, char** argv)
         neon_kernels->store_constant_depth_block_f32 == NULL ||
         neon_kernels->reduce_hiz_level_f32 == NULL ||
         neon_kernels->transform_triangle_f64 == NULL ||
+        neon_kernels->test_aabbs == NULL ||
         features.architecture != SOC_CPU_ARCHITECTURE_ARM64 ||
         !soc_cpu_features_has(&features, SOC_CPU_FEATURE_NEON)) {
         (void)printf(
@@ -1415,6 +1876,13 @@ int main(int argc, char** argv)
             scalar_kernels,
             neon_kernels,
             &transform_gate
+        ) ||
+        !run_query_case(
+            "aabb_query.common.65536",
+            &opts,
+            scalar_kernels,
+            neon_kernels,
+            &query_gate
         )) {
         return EXIT_FAILURE;
     }
@@ -1440,6 +1908,10 @@ int main(int argc, char** argv)
         transform_gate != SOC_TRUE) {
         required_gates_passed = SOC_FALSE;
     }
+    if ((opts.required_gates & REQUIRED_GATE_AABB_QUERY) != 0u &&
+        query_gate != SOC_TRUE) {
+        required_gates_passed = SOC_FALSE;
+    }
 
     (void)printf(
         "soc_kernel_bench status=complete performance_gate=%s"
@@ -1447,7 +1919,7 @@ int main(int argc, char** argv)
         clear_gate == SOC_TRUE && hiz_gate == SOC_TRUE &&
             raster_full_gate == SOC_TRUE &&
             raster_partial_gate == SOC_TRUE &&
-            transform_gate == SOC_TRUE
+            transform_gate == SOC_TRUE && query_gate == SOC_TRUE
             ? "pass"
             : "fail",
         opts.required_gates == REQUIRED_GATE_NONE

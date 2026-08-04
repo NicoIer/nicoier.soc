@@ -277,7 +277,11 @@ static int test_empty_frame_and_fail_open_inputs(void)
         make_aabb(-0.1f, -0.1f, 0.2f, 0.1f, 0.1f, 0.3f);
     const soc_aabb reversed_near_crossing =
         make_aabb(-0.1f, -0.1f, 0.9f, 0.1f, 0.1f, 1.1f);
+    const soc_aabb origin = make_aabb(
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f
+    );
     soc_visibility w_zero_visibility = SOC_VISIBILITY_OCCLUDED;
+    soc_visibility tiny_w_visibility = SOC_VISIBILITY_OCCLUDED;
     soc_visibility reversed_near_visibility = SOC_VISIBILITY_OCCLUDED;
     soc_query_stats query_stats = {
         .struct_size = sizeof(soc_query_stats),
@@ -358,6 +362,35 @@ static int test_empty_frame_and_fail_open_inputs(void)
     );
     CHECK(w_zero_visibility == SOC_VISIBILITY_UNKNOWN);
     CHECK(check_query_stats(&query_stats, 1u, 0u, 0u, 1u) == 0);
+    soc_snapshot_destroy(snapshot);
+    snapshot = NULL;
+
+    /*
+     * A positive W smaller than the transform error margin must expand the
+     * projection conservatively. A negative safety margin could otherwise
+     * invert the pixel bounds and incorrectly report occlusion.
+     */
+    frame_desc = make_frame_desc(SOC_DEPTH_FORWARD);
+    frame_desc.clip_from_world.col2.z = 0.0f;
+    frame_desc.clip_from_world.col3.z = 5.0e-16f;
+    frame_desc.clip_from_world.col2.w = 0.0f;
+    frame_desc.clip_from_world.col3.w = 1.0e-15f;
+    CHECK_RESULT(
+        build_empty_snapshot(context, &frame_desc, &snapshot),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        soc_snapshot_test_aabbs(
+            snapshot,
+            &origin,
+            1u,
+            &tiny_w_visibility,
+            &query_stats
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK(tiny_w_visibility == SOC_VISIBILITY_VISIBLE);
+    CHECK(check_query_stats(&query_stats, 1u, 1u, 0u, 0u) == 0);
     soc_snapshot_destroy(snapshot);
     snapshot = NULL;
 

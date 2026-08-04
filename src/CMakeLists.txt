@@ -11,6 +11,7 @@ add_library(
         core/soc_snapshot.c
         occlusion/soc_hiz.c
         occlusion/soc_visibility.c
+        occlusion/soc_visibility_neon.c
         raster/soc_rasterizer.c
 )
 

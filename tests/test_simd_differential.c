@@ -1,5 +1,8 @@
 #include "core/soc_kernels.h"
+#include "occlusion/soc_hiz.h"
+#include "occlusion/soc_visibility.h"
 
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1727,6 +1730,880 @@ static int test_transform_differential(
     return 0;
 }
 
+static soc_frame_desc make_aabb_test_frame(
+    soc_clip_depth_range clip_depth_range,
+    soc_depth_direction depth_direction,
+    soc_bool perspective
+)
+{
+    soc_frame_desc frame = {
+        .struct_size = sizeof(soc_frame_desc),
+        .clip_from_world = {
+            .col0 = {1.0f, 0.0f, 0.0f, 0.0f},
+            .col1 = {0.0f, 1.0f, 0.0f, 0.0f},
+            .col2 = {0.0f, 0.0f, 1.0f, 0.0f},
+            .col3 = {0.0f, 0.0f, 0.0f, 1.0f},
+        },
+        .clip_depth_range = clip_depth_range,
+        .depth_direction = depth_direction,
+        .front_face = SOC_FRONT_FACE_CCW,
+        .flags = SOC_FRAME_FLAG_NONE,
+    };
+
+    if (perspective == SOC_TRUE) {
+        frame.clip_from_world.col2.w = 1.0f;
+        frame.clip_from_world.col3.w = 0.0f;
+        if (clip_depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE) {
+            frame.clip_from_world.col2.z =
+                depth_direction == SOC_DEPTH_FORWARD ? 1.0f : 0.0f;
+            frame.clip_from_world.col3.z =
+                depth_direction == SOC_DEPTH_FORWARD ? -1.0f : 1.0f;
+        } else {
+            frame.clip_from_world.col2.z =
+                depth_direction == SOC_DEPTH_FORWARD ? 1.0f : -1.0f;
+            frame.clip_from_world.col3.z =
+                depth_direction == SOC_DEPTH_FORWARD ? -2.0f : 2.0f;
+        }
+    }
+    return frame;
+}
+
+static soc_aabb make_kernel_aabb(
+    float minimum_x,
+    float minimum_y,
+    float minimum_z,
+    float maximum_x,
+    float maximum_y,
+    float maximum_z
+)
+{
+    const soc_aabb bounds = {
+        .min = {minimum_x, minimum_y, minimum_z},
+        .max = {maximum_x, maximum_y, maximum_z},
+    };
+    return bounds;
+}
+
+static int initialize_aabb_test_hiz(
+    const soc_kernel_table* scalar,
+    soc_depth_direction depth_direction,
+    uint32_t width,
+    uint32_t height,
+    soc_hiz* out_hiz
+)
+{
+    size_t index;
+
+    if (soc_hiz_initialize(out_hiz, width, height) != SOC_RESULT_OK) {
+        return 1;
+    }
+    for (index = 0u; index < out_hiz->levels[0].element_count; ++index) {
+        const float steps[] = {0.20f, 0.40f, 0.60f, 0.80f};
+
+        out_hiz->data[index] = depth_direction == SOC_DEPTH_REVERSED
+            ? 1.0f - steps[(index * 5u + 3u) & 3u]
+            : steps[(index * 5u + 3u) & 3u];
+    }
+    if (soc_hiz_build_with_kernels(
+            out_hiz,
+            depth_direction,
+            scalar
+        ) != SOC_RESULT_OK) {
+        soc_hiz_shutdown(out_hiz);
+        return 1;
+    }
+    return 0;
+}
+
+static float random_unit_f32(uint32_t* state)
+{
+    return (float)(random_u32(state) >> 8u) *
+        (1.0f / 16777216.0f);
+}
+
+static void initialize_aabb_test_bounds(
+    soc_aabb* bounds,
+    uint32_t count,
+    soc_clip_depth_range clip_depth_range,
+    soc_depth_direction depth_direction,
+    soc_bool perspective
+)
+{
+    uint32_t state = UINT32_C(0x41414242) ^
+        (uint32_t)clip_depth_range ^ ((uint32_t)depth_direction << 8u) ^
+        ((uint32_t)perspective << 16u);
+    uint32_t index;
+
+    for (index = 0u; index < count; ++index) {
+        const float center_x = (random_unit_f32(&state) * 2.0f - 1.0f) *
+            0.70f;
+        const float center_y = (random_unit_f32(&state) * 2.0f - 1.0f) *
+            0.70f;
+        const float radius = 0.002f + random_unit_f32(&state) * 0.08f;
+
+        if (perspective == SOC_TRUE) {
+            const float minimum_z = 1.25f +
+                random_unit_f32(&state) * 3.50f;
+            const float maximum_z = minimum_z + 0.05f + radius;
+
+            bounds[index] = make_kernel_aabb(
+                center_x * minimum_z - radius,
+                center_y * minimum_z - radius,
+                minimum_z,
+                center_x * minimum_z + radius,
+                center_y * minimum_z + radius,
+                maximum_z
+            );
+        } else {
+            const float normalized_depth = 0.10f +
+                random_unit_f32(&state) * 0.80f;
+            const float world_depth =
+                clip_depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE
+                    ? normalized_depth
+                    : normalized_depth * 2.0f - 1.0f;
+
+            bounds[index] = make_kernel_aabb(
+                center_x - radius,
+                center_y - radius,
+                world_depth,
+                center_x + radius,
+                center_y + radius,
+                world_depth + 0.01f
+            );
+        }
+
+        switch (index % 23u) {
+        case 0u:
+            bounds[index].min.x = NAN;
+            break;
+        case 1u:
+            bounds[index].max.y = INFINITY;
+            break;
+        case 2u:
+            bounds[index].min.z = bounds[index].max.z + 1.0f;
+            break;
+        case 3u:
+            bounds[index] = perspective == SOC_TRUE
+                ? make_kernel_aabb(2.0f, 0.0f, 2.0f, 2.0f, 0.0f, 2.0f)
+                : make_kernel_aabb(1.0f, 0.0f, 0.5f, 1.0f, 0.0f, 0.5f);
+            break;
+        case 4u:
+            bounds[index] = perspective == SOC_TRUE
+                ? make_kernel_aabb(-0.1f, -0.1f, 0.8f, 0.1f, 0.1f, 1.2f)
+                : make_kernel_aabb(-0.1f, -0.1f, -0.1f, 0.1f, 0.1f, 0.1f);
+            break;
+        case 5u:
+            bounds[index] = perspective == SOC_TRUE
+                ? make_kernel_aabb(-0.1f, -0.1f, 0.0f, 0.1f, 0.1f, 0.0f)
+                : make_kernel_aabb(1.2f, -0.1f, 0.2f, 1.5f, 0.1f, 0.4f);
+            break;
+        case 6u:
+            bounds[index] = perspective == SOC_TRUE
+                ? make_kernel_aabb(8.0f, -0.1f, 2.0f, 9.0f, 0.1f, 2.5f)
+                : make_kernel_aabb(-1.5f, -0.1f, 0.2f, -1.2f, 0.1f, 0.4f);
+            break;
+        case 7u:
+            bounds[index] = make_kernel_aabb(
+                -0.0f,
+                0.0f,
+                perspective == SOC_TRUE ? 2.0f :
+                    (depth_direction == SOC_DEPTH_REVERSED ? 0.75f : 0.25f),
+                0.0f,
+                -0.0f,
+                perspective == SOC_TRUE ? 2.0f :
+                    (depth_direction == SOC_DEPTH_REVERSED ? 0.75f : 0.25f)
+            );
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+static int run_aabb_kernel_differential_case(
+    const soc_kernel_table* scalar,
+    const soc_kernel_table* neon,
+    const soc_hiz* hiz,
+    const soc_aabb_query_context* query,
+    const soc_aabb* bounds,
+    uint32_t count,
+    const char* label
+)
+{
+    const soc_visibility canary = UINT8_C(0xa5);
+    soc_visibility* scalar_storage = malloc((size_t)count + 2u);
+    soc_visibility* neon_storage = malloc((size_t)count + 2u);
+    soc_aabb* input_copy = malloc((size_t)count * sizeof(*input_copy));
+    soc_occlusion_query_counts scalar_counts = {17u, 19u, 23u};
+    soc_occlusion_query_counts neon_counts = {29u, 31u, 37u};
+    soc_result scalar_result;
+    soc_result neon_result;
+    uint64_t visible = 0u;
+    uint64_t occluded = 0u;
+    uint64_t unknown = 0u;
+    uint32_t index;
+
+    if (scalar_storage == NULL || neon_storage == NULL ||
+        (count != 0u && input_copy == NULL)) {
+        free(input_copy);
+        free(neon_storage);
+        free(scalar_storage);
+        return 1;
+    }
+    memset(scalar_storage, canary, (size_t)count + 2u);
+    memset(neon_storage, canary, (size_t)count + 2u);
+    if (count != 0u) {
+        memcpy(input_copy, bounds, (size_t)count * sizeof(*input_copy));
+    }
+
+    scalar_result = scalar->test_aabbs(
+        hiz,
+        query,
+        bounds,
+        count,
+        scalar_storage + 1u,
+        &scalar_counts
+    );
+    neon_result = neon->test_aabbs(
+        hiz,
+        query,
+        bounds,
+        count,
+        neon_storage + 1u,
+        &neon_counts
+    );
+    if (scalar_result != neon_result || scalar_result != SOC_RESULT_OK ||
+        memcmp(scalar_storage, neon_storage, (size_t)count + 2u) != 0 ||
+        memcmp(&scalar_counts, &neon_counts, sizeof(scalar_counts)) != 0 ||
+        (count != 0u && memcmp(
+            input_copy,
+            bounds,
+            (size_t)count * sizeof(*input_copy)
+        ) != 0) ||
+        scalar_storage[0] != canary ||
+        scalar_storage[count + 1u] != canary ||
+        neon_storage[0] != canary ||
+        neon_storage[count + 1u] != canary) {
+        fprintf(stderr, "AABB kernel differential mismatch: %s count=%u\n",
+            label, (unsigned)count);
+        free(input_copy);
+        free(neon_storage);
+        free(scalar_storage);
+        return 1;
+    }
+
+    for (index = 0u; index < count; ++index) {
+        if (scalar_storage[index + 1u] == SOC_VISIBILITY_UNKNOWN) {
+            ++unknown;
+        } else if (scalar_storage[index + 1u] == SOC_VISIBILITY_OCCLUDED) {
+            ++occluded;
+        } else if (scalar_storage[index + 1u] == SOC_VISIBILITY_VISIBLE) {
+            ++visible;
+        } else {
+            fprintf(stderr, "invalid AABB visibility: %s index=%u\n",
+                label, (unsigned)index);
+            free(input_copy);
+            free(neon_storage);
+            free(scalar_storage);
+            return 1;
+        }
+    }
+    if (scalar_counts.visible != visible ||
+        scalar_counts.occluded != occluded ||
+        scalar_counts.unknown != unknown ||
+        visible + occluded + unknown != count) {
+        fprintf(stderr, "AABB count mismatch: %s count=%u\n",
+            label, (unsigned)count);
+        free(input_copy);
+        free(neon_storage);
+        free(scalar_storage);
+        return 1;
+    }
+
+    free(input_copy);
+    free(neon_storage);
+    free(scalar_storage);
+    return 0;
+}
+
+static int test_aabb_noncontiguous_hiz_sampling(
+    const soc_kernel_table* scalar,
+    const soc_kernel_table* neon,
+    soc_clip_depth_range clip_depth_range,
+    soc_depth_direction depth_direction
+)
+{
+    const float normalized_depth = depth_direction == SOC_DEPTH_REVERSED
+        ? 0.20f
+        : 0.80f;
+    const float world_depth =
+        clip_depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE
+            ? normalized_depth
+            : normalized_depth * 2.0f - 1.0f;
+    const soc_frame_desc frame = make_aabb_test_frame(
+        clip_depth_range,
+        depth_direction,
+        SOC_FALSE
+    );
+    const soc_aabb footprint = make_kernel_aabb(
+        -0.45f,
+        0.05f,
+        world_depth,
+        -0.05f,
+        0.45f,
+        world_depth
+    );
+    const soc_aabb control = make_kernel_aabb(
+        -0.125f,
+        0.125f,
+        world_depth,
+        -0.125f,
+        0.125f,
+        world_depth
+    );
+    const soc_aabb bounds[] = {footprint, control, control, footprint};
+    const soc_visibility expected[] = {
+        SOC_VISIBILITY_VISIBLE,
+        SOC_VISIBILITY_OCCLUDED,
+        SOC_VISIBILITY_OCCLUDED,
+        SOC_VISIBILITY_VISIBLE,
+    };
+    soc_visibility scalar_visibility[ARRAY_COUNT(bounds)] = {0};
+    soc_visibility neon_visibility[ARRAY_COUNT(bounds)] = {0};
+    soc_occlusion_query_counts scalar_counts;
+    soc_occlusion_query_counts neon_counts;
+    soc_aabb_query_context query;
+    soc_hiz hiz = {0};
+    size_t index;
+
+    soc_aabb_query_context_initialize(&frame, &query);
+    if (soc_hiz_initialize(&hiz, 8u, 8u) != SOC_RESULT_OK) {
+        return 1;
+    }
+    for (index = 0u; index < hiz.levels[0].element_count; ++index) {
+        hiz.data[index] = depth_direction == SOC_DEPTH_REVERSED
+            ? 0.60f
+            : 0.40f;
+    }
+    hiz.data[3u * 8u + 2u] = depth_direction == SOC_DEPTH_REVERSED
+        ? 0.0f
+        : 1.0f;
+    if (soc_hiz_build_with_kernels(&hiz, depth_direction, scalar) !=
+        SOC_RESULT_OK ||
+        scalar->test_aabbs(
+            &hiz,
+            &query,
+            bounds,
+            (uint32_t)ARRAY_COUNT(bounds),
+            scalar_visibility,
+            &scalar_counts
+        ) != SOC_RESULT_OK ||
+        neon->test_aabbs(
+            &hiz,
+            &query,
+            bounds,
+            (uint32_t)ARRAY_COUNT(bounds),
+            neon_visibility,
+            &neon_counts
+        ) != SOC_RESULT_OK ||
+        memcmp(scalar_visibility, expected, sizeof(expected)) != 0 ||
+        memcmp(neon_visibility, expected, sizeof(expected)) != 0 ||
+        memcmp(&scalar_counts, &neon_counts, sizeof(scalar_counts)) != 0) {
+        fprintf(
+            stderr,
+            "noncontiguous Hi-Z AABB mismatch: range=%u z=%u "
+            "scalar=%u,%u,%u,%u neon=%u,%u,%u,%u\n",
+            (unsigned)clip_depth_range,
+            (unsigned)depth_direction,
+            (unsigned)scalar_visibility[0],
+            (unsigned)scalar_visibility[1],
+            (unsigned)scalar_visibility[2],
+            (unsigned)scalar_visibility[3],
+            (unsigned)neon_visibility[0],
+            (unsigned)neon_visibility[1],
+            (unsigned)neon_visibility[2],
+            (unsigned)neon_visibility[3]
+        );
+        soc_hiz_shutdown(&hiz);
+        return 1;
+    }
+    soc_hiz_shutdown(&hiz);
+    return 0;
+}
+
+static int test_aabb_tiny_positive_w_fail_open(
+    const soc_kernel_table* scalar,
+    const soc_kernel_table* neon
+)
+{
+    soc_frame_desc frame = make_aabb_test_frame(
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        SOC_DEPTH_FORWARD,
+        SOC_FALSE
+    );
+    const soc_aabb point = make_kernel_aabb(
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f
+    );
+    soc_visibility scalar_visibility = SOC_VISIBILITY_OCCLUDED;
+    soc_visibility neon_visibility = SOC_VISIBILITY_OCCLUDED;
+    soc_occlusion_query_counts scalar_counts;
+    soc_occlusion_query_counts neon_counts;
+    soc_aabb_query_context query;
+    soc_hiz hiz = {0};
+    size_t index;
+
+    frame.clip_from_world.col2.z = 0.0f;
+    frame.clip_from_world.col3.z = 5.0e-16f;
+    frame.clip_from_world.col2.w = 0.0f;
+    frame.clip_from_world.col3.w = 1.0e-15f;
+    soc_aabb_query_context_initialize(&frame, &query);
+    if (soc_hiz_initialize(&hiz, 8u, 8u) != SOC_RESULT_OK) {
+        return 1;
+    }
+    for (index = 0u; index < hiz.element_count; ++index) {
+        hiz.data[index] = 0.40f;
+    }
+    if (scalar->test_aabbs(
+            &hiz,
+            &query,
+            &point,
+            1u,
+            &scalar_visibility,
+            &scalar_counts
+        ) != SOC_RESULT_OK ||
+        neon->test_aabbs(
+            &hiz,
+            &query,
+            &point,
+            1u,
+            &neon_visibility,
+            &neon_counts
+        ) != SOC_RESULT_OK ||
+        scalar_visibility != SOC_VISIBILITY_VISIBLE ||
+        neon_visibility != SOC_VISIBILITY_VISIBLE ||
+        memcmp(&scalar_counts, &neon_counts, sizeof(scalar_counts)) != 0) {
+        fprintf(stderr, "tiny-positive-W AABB was not fail-open\n");
+        soc_hiz_shutdown(&hiz);
+        return 1;
+    }
+    soc_hiz_shutdown(&hiz);
+    return 0;
+}
+
+static int test_aabb_fallback_lane_order(
+    const soc_kernel_table* scalar,
+    const soc_kernel_table* neon
+)
+{
+    const soc_frame_desc frame = make_aabb_test_frame(
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        SOC_DEPTH_FORWARD,
+        SOC_FALSE
+    );
+    const soc_aabb invalid = make_kernel_aabb(
+        NAN, -0.1f, 0.2f, 0.1f, 0.1f, 0.3f
+    );
+    const soc_aabb fast_visible = make_kernel_aabb(
+        -0.1f, -0.1f, 0.2f, 0.1f, 0.1f, 0.3f
+    );
+    const soc_aabb fast_occluded = make_kernel_aabb(
+        -0.1f, -0.1f, 0.8f, 0.1f, 0.1f, 0.9f
+    );
+    const soc_aabb boundary = make_kernel_aabb(
+        1.0f, 0.0f, 0.2f, 1.0f, 0.0f, 0.2f
+    );
+    const soc_aabb bounds[] = {
+        invalid,
+        fast_visible,
+        fast_occluded,
+        invalid,
+        boundary,
+        fast_visible,
+        fast_occluded,
+        boundary,
+    };
+    const soc_visibility expected[] = {
+        SOC_VISIBILITY_UNKNOWN,
+        SOC_VISIBILITY_VISIBLE,
+        SOC_VISIBILITY_OCCLUDED,
+        SOC_VISIBILITY_UNKNOWN,
+        SOC_VISIBILITY_VISIBLE,
+        SOC_VISIBILITY_VISIBLE,
+        SOC_VISIBILITY_OCCLUDED,
+        SOC_VISIBILITY_VISIBLE,
+    };
+    soc_visibility scalar_visibility[ARRAY_COUNT(bounds)] = {0};
+    soc_visibility neon_visibility[ARRAY_COUNT(bounds)] = {0};
+    soc_occlusion_query_counts scalar_counts;
+    soc_occlusion_query_counts neon_counts;
+    soc_aabb_query_context query;
+    soc_hiz hiz = {0};
+    size_t index;
+
+    soc_aabb_query_context_initialize(&frame, &query);
+    if (soc_hiz_initialize(&hiz, 8u, 8u) != SOC_RESULT_OK) {
+        return 1;
+    }
+    for (index = 0u; index < hiz.levels[0].element_count; ++index) {
+        hiz.data[index] = 0.5f;
+    }
+    if (soc_hiz_build_with_kernels(&hiz, SOC_DEPTH_FORWARD, scalar) !=
+        SOC_RESULT_OK ||
+        scalar->test_aabbs(
+            &hiz,
+            &query,
+            bounds,
+            (uint32_t)ARRAY_COUNT(bounds),
+            scalar_visibility,
+            &scalar_counts
+        ) != SOC_RESULT_OK ||
+        neon->test_aabbs(
+            &hiz,
+            &query,
+            bounds,
+            (uint32_t)ARRAY_COUNT(bounds),
+            neon_visibility,
+            &neon_counts
+        ) != SOC_RESULT_OK ||
+        memcmp(scalar_visibility, expected, sizeof(expected)) != 0 ||
+        memcmp(neon_visibility, expected, sizeof(expected)) != 0 ||
+        memcmp(&scalar_counts, &neon_counts, sizeof(scalar_counts)) != 0 ||
+        scalar_counts.visible != 4u || scalar_counts.occluded != 2u ||
+        scalar_counts.unknown != 2u) {
+        fprintf(stderr, "AABB fallback lane-order mismatch\n");
+        soc_hiz_shutdown(&hiz);
+        return 1;
+    }
+    soc_hiz_shutdown(&hiz);
+    return 0;
+}
+
+static int test_aabb_overlap_and_nonfinite_query(
+    const soc_kernel_table* scalar,
+    const soc_kernel_table* neon
+)
+{
+    typedef union aabb_overlap_storage {
+        max_align_t alignment;
+        soc_aabb bounds[4];
+    } aabb_overlap_storage;
+    soc_frame_desc frame = make_aabb_test_frame(
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        SOC_DEPTH_FORWARD,
+        SOC_FALSE
+    );
+    const soc_aabb source[] = {
+        {{-0.4f, -0.4f, 0.8f}, {-0.3f, -0.3f, 0.9f}},
+        {{-0.1f, -0.1f, 0.2f}, {0.1f, 0.1f, 0.3f}},
+        {{0.3f, 0.3f, 0.8f}, {0.4f, 0.4f, 0.9f}},
+        {{0.5f, 0.5f, 0.2f}, {0.6f, 0.6f, 0.3f}},
+    };
+    aabb_overlap_storage scalar_storage;
+    aabb_overlap_storage neon_storage;
+    soc_occlusion_query_counts scalar_counts;
+    soc_occlusion_query_counts neon_counts;
+    soc_aabb_query_context query;
+    soc_hiz hiz = {0};
+    soc_visibility scalar_nonfinite[3] = {0};
+    soc_visibility neon_nonfinite[3] = {0};
+
+    scalar_storage.bounds[0] = source[0];
+    scalar_storage.bounds[1] = source[1];
+    scalar_storage.bounds[2] = source[2];
+    scalar_storage.bounds[3] = source[3];
+    neon_storage = scalar_storage;
+    soc_aabb_query_context_initialize(&frame, &query);
+    if (initialize_aabb_test_hiz(
+            scalar,
+            SOC_DEPTH_FORWARD,
+            8u,
+            8u,
+            &hiz
+        ) != 0) {
+        return 1;
+    }
+    if (scalar->test_aabbs(
+            &hiz,
+            &query,
+            scalar_storage.bounds,
+            3u,
+            (soc_visibility*)&scalar_storage.bounds[1],
+            &scalar_counts
+        ) != SOC_RESULT_OK ||
+        neon->test_aabbs(
+            &hiz,
+            &query,
+            neon_storage.bounds,
+            3u,
+            (soc_visibility*)&neon_storage.bounds[1],
+            &neon_counts
+        ) != SOC_RESULT_OK ||
+        memcmp(&scalar_storage, &neon_storage, sizeof(scalar_storage)) != 0 ||
+        memcmp(&scalar_counts, &neon_counts, sizeof(scalar_counts)) != 0) {
+        fprintf(stderr, "overlapping AABB input/output mismatch\n");
+        soc_hiz_shutdown(&hiz);
+        return 1;
+    }
+
+    frame.clip_from_world.col1.y = NAN;
+    soc_aabb_query_context_initialize(&frame, &query);
+    if (query.all_finite != SOC_FALSE ||
+        scalar->test_aabbs(
+            &hiz,
+            &query,
+            source,
+            3u,
+            scalar_nonfinite,
+            &scalar_counts
+        ) != SOC_RESULT_OK ||
+        neon->test_aabbs(
+            &hiz,
+            &query,
+            source,
+            3u,
+            neon_nonfinite,
+            &neon_counts
+        ) != SOC_RESULT_OK ||
+        memcmp(scalar_nonfinite, neon_nonfinite, sizeof(scalar_nonfinite)) !=
+            0 ||
+        memcmp(&scalar_counts, &neon_counts, sizeof(scalar_counts)) != 0 ||
+        scalar_nonfinite[0] != SOC_VISIBILITY_UNKNOWN ||
+        scalar_nonfinite[1] != SOC_VISIBILITY_UNKNOWN ||
+        scalar_nonfinite[2] != SOC_VISIBILITY_UNKNOWN ||
+        scalar_counts.visible != 0u || scalar_counts.occluded != 0u ||
+        scalar_counts.unknown != 3u) {
+        fprintf(stderr, "nonfinite AABB query fallback mismatch\n");
+        soc_hiz_shutdown(&hiz);
+        return 1;
+    }
+    soc_hiz_shutdown(&hiz);
+    return 0;
+}
+
+static int test_aabb_query_differential(
+    const soc_kernel_table* scalar,
+    const soc_kernel_table* neon
+)
+{
+    static const uint32_t counts[] = {1u, 2u, 3u, 7u, 257u};
+    static const soc_clip_depth_range clip_depth_ranges[] = {
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE,
+    };
+    static const soc_depth_direction depth_directions[] = {
+        SOC_DEPTH_FORWARD,
+        SOC_DEPTH_REVERSED,
+    };
+    soc_aabb bounds_storage[259];
+    size_t range_index;
+    size_t direction_index;
+    size_t perspective_index;
+
+    for (range_index = 0u;
+         range_index < ARRAY_COUNT(clip_depth_ranges);
+         ++range_index) {
+        for (direction_index = 0u;
+             direction_index < ARRAY_COUNT(depth_directions);
+             ++direction_index) {
+            for (perspective_index = 0u; perspective_index < 2u;
+                 ++perspective_index) {
+                const soc_bool perspective = perspective_index != 0u
+                    ? SOC_TRUE
+                    : SOC_FALSE;
+                const soc_frame_desc frame = make_aabb_test_frame(
+                    clip_depth_ranges[range_index],
+                    depth_directions[direction_index],
+                    perspective
+                );
+                soc_aabb_query_context query;
+                soc_hiz hiz = {0};
+                size_t count_index;
+
+                soc_aabb_query_context_initialize(&frame, &query);
+                initialize_aabb_test_bounds(
+                    bounds_storage,
+                    (uint32_t)ARRAY_COUNT(bounds_storage),
+                    clip_depth_ranges[range_index],
+                    depth_directions[direction_index],
+                    perspective
+                );
+                if (initialize_aabb_test_hiz(
+                        scalar,
+                        depth_directions[direction_index],
+                        31u,
+                        19u,
+                        &hiz
+                    ) != 0) {
+                    return 1;
+                }
+                for (count_index = 0u;
+                     count_index < ARRAY_COUNT(counts);
+                     ++count_index) {
+                    const uint32_t offset = (uint32_t)(count_index & 1u);
+
+                    if (run_aabb_kernel_differential_case(
+                            scalar,
+                            neon,
+                            &hiz,
+                            &query,
+                            bounds_storage + offset,
+                            counts[count_index],
+                            perspective == SOC_TRUE
+                                ? "perspective"
+                                : "orthographic"
+                        ) != 0) {
+                        soc_hiz_shutdown(&hiz);
+                        return 1;
+                    }
+                    if ((counts[count_index] & 1u) != 0u) {
+                        const size_t exact_offset = _Alignof(soc_aabb);
+                        unsigned char* exact_storage = malloc(
+                            (size_t)counts[count_index] *
+                                sizeof(soc_aabb) + exact_offset
+                        );
+                        soc_aabb* exact_bounds;
+
+                        if (exact_storage == NULL) {
+                            soc_hiz_shutdown(&hiz);
+                            return 1;
+                        }
+                        exact_bounds = (soc_aabb*)(void*)(
+                            exact_storage + exact_offset
+                        );
+                        memcpy(
+                            exact_bounds,
+                            bounds_storage + offset,
+                            (size_t)counts[count_index] *
+                                sizeof(*exact_bounds)
+                        );
+                        if (run_aabb_kernel_differential_case(
+                                scalar,
+                                neon,
+                                &hiz,
+                                &query,
+                                exact_bounds,
+                                counts[count_index],
+                                "exact-odd-tail"
+                            ) != 0) {
+                            free(exact_storage);
+                            soc_hiz_shutdown(&hiz);
+                            return 1;
+                        }
+                        free(exact_storage);
+                    }
+                }
+                soc_hiz_shutdown(&hiz);
+            }
+            {
+                soc_frame_desc dense_frame = make_aabb_test_frame(
+                    clip_depth_ranges[range_index],
+                    depth_directions[direction_index],
+                    SOC_FALSE
+                );
+                soc_aabb_query_context dense_query;
+                soc_hiz dense_hiz = {0};
+
+                dense_frame.clip_from_world.col0 =
+                    (soc_vector4){0.713579f, -0.113271f, 0.047119f, 0.03125f};
+                dense_frame.clip_from_world.col1 =
+                    (soc_vector4){-0.217381f, 0.821357f, -0.029731f, -0.015625f};
+                dense_frame.clip_from_world.col2 =
+                    (soc_vector4){0.093173f, 0.151937f, 0.310913f, 0.0625f};
+                dense_frame.clip_from_world.col3 = (soc_vector4){
+                    0.125731f,
+                    -0.200173f,
+                    clip_depth_ranges[range_index] ==
+                        SOC_CLIP_DEPTH_ZERO_TO_ONE ? 0.8f : 0.0f,
+                    2.0f,
+                };
+                soc_aabb_query_context_initialize(
+                    &dense_frame,
+                    &dense_query
+                );
+                initialize_aabb_test_bounds(
+                    bounds_storage,
+                    257u,
+                    clip_depth_ranges[range_index],
+                    depth_directions[direction_index],
+                    SOC_FALSE
+                );
+                if (initialize_aabb_test_hiz(
+                        scalar,
+                        depth_directions[direction_index],
+                        31u,
+                        19u,
+                        &dense_hiz
+                    ) != 0 ||
+                    run_aabb_kernel_differential_case(
+                        scalar,
+                        neon,
+                        &dense_hiz,
+                        &dense_query,
+                        bounds_storage + 1u,
+                        257u,
+                        "dense-fma-query"
+                    ) != 0) {
+                    soc_hiz_shutdown(&dense_hiz);
+                    return 1;
+                }
+                soc_hiz_shutdown(&dense_hiz);
+            }
+            if (test_aabb_noncontiguous_hiz_sampling(
+                    scalar,
+                    neon,
+                    clip_depth_ranges[range_index],
+                    depth_directions[direction_index]
+                ) != 0) {
+                return 1;
+            }
+        }
+    }
+
+    {
+        const soc_frame_desc frame = make_aabb_test_frame(
+            SOC_CLIP_DEPTH_ZERO_TO_ONE,
+            SOC_DEPTH_FORWARD,
+            SOC_FALSE
+        );
+        soc_aabb_query_context query;
+        soc_hiz hiz = {0};
+        soc_occlusion_query_counts scalar_counts = {1u, 2u, 3u};
+        soc_occlusion_query_counts neon_counts = {4u, 5u, 6u};
+
+        soc_aabb_query_context_initialize(&frame, &query);
+        if (initialize_aabb_test_hiz(
+                scalar,
+                SOC_DEPTH_FORWARD,
+                3u,
+                3u,
+                &hiz
+            ) != 0) {
+            return 1;
+        }
+        if (scalar->test_aabbs(
+                &hiz, &query, NULL, 0u, NULL, &scalar_counts
+            ) != SOC_RESULT_OK ||
+            neon->test_aabbs(
+                &hiz, &query, NULL, 0u, NULL, &neon_counts
+            ) != SOC_RESULT_OK ||
+            memcmp(&scalar_counts, &neon_counts, sizeof(scalar_counts)) != 0 ||
+            scalar_counts.visible != 0u || scalar_counts.occluded != 0u ||
+            scalar_counts.unknown != 0u) {
+            fprintf(stderr, "zero-count AABB differential mismatch\n");
+            soc_hiz_shutdown(&hiz);
+            return 1;
+        }
+        soc_hiz_shutdown(&hiz);
+    }
+    if (test_aabb_tiny_positive_w_fail_open(scalar, neon) != 0) {
+        return 1;
+    }
+    if (test_aabb_fallback_lane_order(scalar, neon) != 0) {
+        return 1;
+    }
+    return test_aabb_overlap_and_nonfinite_query(scalar, neon);
+}
+
 #endif
 
 int main(void)
@@ -1749,11 +2626,13 @@ int main(void)
     CHECK(neon->store_constant_depth_block_f32 != NULL);
     CHECK(neon->reduce_hiz_level_f32 != NULL);
     CHECK(neon->transform_triangle_f64 != NULL);
+    CHECK(neon->test_aabbs != NULL);
     CHECK(neon->clear_f32 == scalar->clear_f32);
     CHECK(neon->store_constant_depth_block_f32 !=
         scalar->store_constant_depth_block_f32);
     CHECK(neon->reduce_hiz_level_f32 != scalar->reduce_hiz_level_f32);
     CHECK(neon->transform_triangle_f64 != scalar->transform_triangle_f64);
+    CHECK(neon->test_aabbs != scalar->test_aabbs);
     CHECK(soc_kernel_table_for_backend(SOC_KERNEL_BACKEND_NEON) == neon);
 
     if (test_clear_differential(scalar, neon) != 0) {
@@ -1772,6 +2651,9 @@ int main(void)
         return 1;
     }
     if (test_transform_differential(scalar, neon) != 0) {
+        return 1;
+    }
+    if (test_aabb_query_differential(scalar, neon) != 0) {
         return 1;
     }
 #else

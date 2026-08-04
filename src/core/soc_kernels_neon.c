@@ -478,7 +478,7 @@ static const soc_kernel_table neon_kernels = {
         store_constant_depth_block_f32_neon,
     .reduce_hiz_level_f32 = reduce_hiz_level_f32_neon,
     .transform_triangle_f64 = transform_triangle_f64_neon,
-    .test_aabbs = soc_occlusion_test_aabbs,
+    .test_aabbs = soc_occlusion_test_aabbs_neon,
 };
 
 #endif
