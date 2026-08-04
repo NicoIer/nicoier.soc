@@ -183,7 +183,8 @@ static int run_mesh_sequence(
         width,
         height,
         out_capture->depth,
-        pixel_count
+        pixel_count,
+        soc_kernel_table_scalar()
     );
     if (result == SOC_RESULT_OK) {
         result = soc_rasterizer_begin_frame(&rasterizer, frame);
@@ -952,7 +953,8 @@ static int check_canary_dimensions(
         width,
         height,
         storage + CANARY_WORD_COUNT,
-        pixel_count
+        pixel_count,
+        soc_kernel_table_scalar()
     ) == SOC_RESULT_OK);
     CHECK(soc_rasterizer_begin_frame(&rasterizer, &frame) == SOC_RESULT_OK);
     CHECK(soc_rasterizer_submit_occluders(

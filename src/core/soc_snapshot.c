@@ -36,7 +36,10 @@ soc_result soc_snapshot_test_aabbs_internal(
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 
-    result = soc_occlusion_test_aabbs(
+    if (snapshot->kernels == NULL || snapshot->kernels->test_aabbs == NULL) {
+        return SOC_RESULT_INTERNAL_ERROR;
+    }
+    result = snapshot->kernels->test_aabbs(
         &snapshot->depth_pyramid,
         &snapshot->query_context,
         world_bounds,

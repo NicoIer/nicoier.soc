@@ -34,6 +34,19 @@ soc_enable_warnings(soc_test_cpu_features)
 
 add_test(NAME soc.cpu_features COMMAND soc_test_cpu_features)
 
+add_executable(soc_test_kernels test_kernels.c)
+target_link_libraries(soc_test_kernels PRIVATE soc_core)
+target_include_directories(
+    soc_test_kernels
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src"
+)
+target_compile_features(soc_test_kernels PRIVATE c_std_17)
+soc_enable_warnings(soc_test_kernels)
+
+add_test(NAME soc.kernels COMMAND soc_test_kernels)
+
 add_executable(soc_test_pipeline test_pipeline.c)
 target_link_libraries(soc_test_pipeline PRIVATE soc::soc)
 target_compile_features(soc_test_pipeline PRIVATE c_std_17)

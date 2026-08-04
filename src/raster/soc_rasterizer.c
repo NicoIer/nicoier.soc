@@ -1645,7 +1645,8 @@ soc_result soc_rasterizer_initialize(
     uint32_t width,
     uint32_t height,
     float* depth,
-    size_t depth_element_count
+    size_t depth_element_count,
+    const soc_kernel_table* kernels
 )
 {
     size_t required_element_count;
@@ -1656,6 +1657,8 @@ soc_result soc_rasterizer_initialize(
         width > SOC_MAX_RASTER_DIMENSION ||
         height > SOC_MAX_RASTER_DIMENSION ||
         depth == NULL ||
+        kernels == NULL ||
+        kernels->clear_f32 == NULL ||
         !checked_size_multiply(
             (size_t)width,
             (size_t)height,
@@ -1670,6 +1673,7 @@ soc_result soc_rasterizer_initialize(
     rasterizer->height = height;
     rasterizer->depth_element_count = required_element_count;
     rasterizer->depth = depth;
+    rasterizer->kernels = kernels;
     rasterizer->clipped_triangle_count = 0u;
     rasterizer->rasterized_triangle_count = 0u;
     rasterizer->initialized = SOC_TRUE;
@@ -1729,7 +1733,6 @@ soc_result soc_rasterizer_begin_frame(
 )
 {
     float clear_depth;
-    size_t index;
 
     if (rasterizer == NULL ||
         rasterizer->initialized != SOC_TRUE ||
@@ -1745,9 +1748,11 @@ soc_result soc_rasterizer_begin_frame(
     clear_depth = desc->depth_direction == SOC_DEPTH_REVERSED
         ? 0.0f
         : 1.0f;
-    for (index = 0u; index < rasterizer->depth_element_count; ++index) {
-        rasterizer->depth[index] = clear_depth;
-    }
+    rasterizer->kernels->clear_f32(
+        rasterizer->depth,
+        rasterizer->depth_element_count,
+        clear_depth
+    );
     rasterizer->clipped_triangle_count = 0u;
     rasterizer->rasterized_triangle_count = 0u;
     rasterizer->frame_active = SOC_TRUE;

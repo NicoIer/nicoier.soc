@@ -199,6 +199,7 @@ soc_result soc_occlusion_build_internal(
     if (snapshot == NULL) {
         return SOC_RESULT_OUT_OF_MEMORY;
     }
+    snapshot->kernels = context->kernels;
 
     result = soc_hiz_initialize(
         &snapshot->depth_pyramid,
@@ -215,7 +216,8 @@ soc_result soc_occlusion_build_internal(
         context->width,
         context->height,
         soc_hiz_level_data(&snapshot->depth_pyramid, 0u),
-        snapshot->depth_pyramid.levels[0].element_count
+        snapshot->depth_pyramid.levels[0].element_count,
+        context->kernels
     );
     if (result != SOC_RESULT_OK) {
         soc_snapshot_destroy_internal(snapshot);
@@ -252,9 +254,10 @@ soc_result soc_occlusion_build_internal(
     if (result != SOC_RESULT_OK) {
         goto fail;
     }
-    result = soc_hiz_build(
+    result = soc_hiz_build_with_kernels(
         &snapshot->depth_pyramid,
-        frame.depth_direction
+        frame.depth_direction,
+        snapshot->kernels
     );
     if (result != SOC_RESULT_OK) {
         goto fail;

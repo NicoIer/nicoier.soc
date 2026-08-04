@@ -3,9 +3,11 @@
 
 #include <soc/soc.h>
 
+#include "core/soc_kernels.h"
 #include "occlusion/soc_visibility.h"
 
 struct soc_snapshot {
+    const soc_kernel_table* kernels;
     soc_hiz depth_pyramid;
     soc_frame_desc frame;
     soc_aabb_query_context query_context;

@@ -4,12 +4,14 @@
 #include <soc/soc.h>
 
 #include "core/soc_cpu_features.h"
+#include "core/soc_kernels.h"
 
 struct soc_context {
     uint32_t width;
     uint32_t height;
     uint32_t worker_count;
     soc_cpu_features cpu_features;
+    const soc_kernel_table* kernels;
     soc_mesh* meshes;
 };
 
@@ -24,6 +26,13 @@ soc_result soc_context_resize_internal(
     soc_context* context,
     uint32_t width,
     uint32_t height
+);
+
+/* Internal differential-test constructor; never exposed through the C ABI. */
+soc_result soc_context_create_for_backend_for_testing_internal(
+    const soc_config* config,
+    soc_kernel_backend backend,
+    soc_context** out_context
 );
 
 #endif

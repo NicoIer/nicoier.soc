@@ -5,6 +5,8 @@
 
 #include <stddef.h>
 
+struct soc_kernel_table;
+
 #define SOC_HIZ_MAX_LEVEL_COUNT 33u
 
 typedef struct soc_hiz_level {
@@ -39,6 +41,20 @@ soc_result soc_hiz_clear_level_zero(
 
 soc_result soc_hiz_build(
     soc_hiz* hiz,
+    soc_depth_direction depth_direction
+);
+
+soc_result soc_hiz_build_with_kernels(
+    soc_hiz* hiz,
+    soc_depth_direction depth_direction,
+    const struct soc_kernel_table* kernels
+);
+
+void soc_hiz_reduce_level_scalar(
+    const float* source,
+    uint32_t source_width,
+    uint32_t source_height,
+    float* destination,
     soc_depth_direction depth_direction
 );
 

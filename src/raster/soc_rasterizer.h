@@ -3,6 +3,8 @@
 
 #include <soc/soc.h>
 
+#include "core/soc_kernels.h"
+
 #include <stddef.h>
 
 typedef struct soc_rasterizer {
@@ -11,6 +13,7 @@ typedef struct soc_rasterizer {
     size_t depth_element_count;
     /* Borrowed Level 0 storage owned by the in-progress snapshot. */
     float* depth;
+    const soc_kernel_table* kernels;
     uint64_t clipped_triangle_count;
     uint64_t rasterized_triangle_count;
     soc_bool initialized;
@@ -23,7 +26,8 @@ soc_result soc_rasterizer_initialize(
     uint32_t width,
     uint32_t height,
     float* depth,
-    size_t depth_element_count
+    size_t depth_element_count,
+    const soc_kernel_table* kernels
 );
 
 void soc_rasterizer_shutdown(soc_rasterizer* rasterizer);

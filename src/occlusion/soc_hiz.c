@@ -1,5 +1,7 @@
 #include "occlusion/soc_hiz.h"
 
+#include "core/soc_kernels.h"
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -187,9 +189,67 @@ static float reduce_depth(
     return candidate > accumulated ? candidate : accumulated;
 }
 
-soc_result soc_hiz_build(
-    soc_hiz* hiz,
+void soc_hiz_reduce_level_scalar(
+    const float* source,
+    uint32_t source_width,
+    uint32_t source_height,
+    float* destination,
     soc_depth_direction depth_direction
+)
+{
+    const uint32_t destination_width = halve_ceil(source_width);
+    const uint32_t destination_height = halve_ceil(source_height);
+    uint32_t destination_y;
+
+    for (destination_y = 0u;
+         destination_y < destination_height;
+         ++destination_y) {
+        const uint32_t source_y = destination_y * 2u;
+        uint32_t destination_x;
+
+        for (destination_x = 0u;
+             destination_x < destination_width;
+             ++destination_x) {
+            const uint32_t source_x = destination_x * 2u;
+            const size_t source_index =
+                (size_t)source_y * source_width + source_x;
+            float reduced = source[source_index];
+
+            if (source_x + 1u < source_width) {
+                reduced = reduce_depth(
+                    reduced,
+                    source[source_index + 1u],
+                    depth_direction
+                );
+            }
+            if (source_y + 1u < source_height) {
+                const size_t next_row_index = source_index + source_width;
+
+                reduced = reduce_depth(
+                    reduced,
+                    source[next_row_index],
+                    depth_direction
+                );
+                if (source_x + 1u < source_width) {
+                    reduced = reduce_depth(
+                        reduced,
+                        source[next_row_index + 1u],
+                        depth_direction
+                    );
+                }
+            }
+
+            destination[
+                (size_t)destination_y * destination_width + destination_x
+            ] = reduced;
+        }
+    }
+}
+
+soc_result soc_hiz_build_with_kernels(
+    soc_hiz* hiz,
+    soc_depth_direction depth_direction,
+    const struct soc_kernel_table* kernels
 )
 {
     uint32_t level;
@@ -197,6 +257,8 @@ soc_result soc_hiz_build(
     if (hiz == NULL ||
         hiz->initialized != SOC_TRUE ||
         hiz->data == NULL ||
+        kernels == NULL ||
+        kernels->reduce_hiz_level_f32 == NULL ||
         (depth_direction != SOC_DEPTH_FORWARD &&
             depth_direction != SOC_DEPTH_REVERSED)) {
         return SOC_RESULT_INVALID_ARGUMENT;
@@ -205,58 +267,29 @@ soc_result soc_hiz_build(
     for (level = 1u; level < hiz->level_count; ++level) {
         const soc_hiz_level* source_level = &hiz->levels[level - 1u];
         const soc_hiz_level* destination_level = &hiz->levels[level];
-        const float* source = hiz->data + source_level->offset;
-        float* destination = hiz->data + destination_level->offset;
-        uint32_t destination_y;
 
-        for (destination_y = 0u;
-             destination_y < destination_level->height;
-             ++destination_y) {
-            const uint32_t source_y = destination_y * 2u;
-            uint32_t destination_x;
-
-            for (destination_x = 0u;
-                 destination_x < destination_level->width;
-                 ++destination_x) {
-                const uint32_t source_x = destination_x * 2u;
-                const size_t source_index =
-                    (size_t)source_y * source_level->width + source_x;
-                float reduced = source[source_index];
-
-                if (source_x + 1u < source_level->width) {
-                    reduced = reduce_depth(
-                        reduced,
-                        source[source_index + 1u],
-                        depth_direction
-                    );
-                }
-                if (source_y + 1u < source_level->height) {
-                    const size_t next_row_index =
-                        source_index + source_level->width;
-
-                    reduced = reduce_depth(
-                        reduced,
-                        source[next_row_index],
-                        depth_direction
-                    );
-                    if (source_x + 1u < source_level->width) {
-                        reduced = reduce_depth(
-                            reduced,
-                            source[next_row_index + 1u],
-                            depth_direction
-                        );
-                    }
-                }
-
-                destination[
-                    (size_t)destination_y * destination_level->width +
-                        destination_x
-                ] = reduced;
-            }
-        }
+        kernels->reduce_hiz_level_f32(
+            hiz->data + source_level->offset,
+            source_level->width,
+            source_level->height,
+            hiz->data + destination_level->offset,
+            depth_direction
+        );
     }
 
     return SOC_RESULT_OK;
+}
+
+soc_result soc_hiz_build(
+    soc_hiz* hiz,
+    soc_depth_direction depth_direction
+)
+{
+    return soc_hiz_build_with_kernels(
+        hiz,
+        depth_direction,
+        soc_kernel_table_scalar()
+    );
 }
 
 soc_result soc_hiz_query(

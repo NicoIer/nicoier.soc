@@ -3,6 +3,7 @@ add_library(
     OBJECT
         core/soc_context.c
         core/soc_cpu_features.c
+        core/soc_kernels.c
         core/soc_mesh.c
         core/soc_pipeline.c
         core/soc_snapshot.c
