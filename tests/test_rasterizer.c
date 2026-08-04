@@ -443,18 +443,25 @@ static int test_non_lattice_coverage_and_depth_are_conservative(void)
             for (x = 0u; x < WIDTH; ++x) {
                 const size_t pixel = (size_t)y * WIDTH + x;
                 const float stored_depth = capture.depth[pixel];
+                const int covered =
+                    float_bits(stored_depth) != clear_bits;
+                int reference_covered = 1;
                 uint32_t edge;
 
-                if (float_bits(stored_depth) == clear_bits) {
-                    continue;
-                }
                 for (edge = 0u; edge < 3u; ++edge) {
-                    CHECK(continuous_edge_contains_sample(
-                        &reconstructed[(edge + 1u) % 3u],
-                        &reconstructed[(edge + 2u) % 3u],
-                        (double)x + 0.5,
-                        (double)y + 0.5
-                    ));
+                    if (!continuous_edge_contains_sample(
+                            &reconstructed[(edge + 1u) % 3u],
+                            &reconstructed[(edge + 2u) % 3u],
+                            (double)x + 0.5,
+                            (double)y + 0.5
+                        )) {
+                        reference_covered = 0;
+                        break;
+                    }
+                }
+                CHECK(covered == reference_covered);
+                if (!covered) {
+                    continue;
                 }
                 {
                     const double point_x = (double)x + 0.5;
@@ -612,6 +619,531 @@ static int test_shared_edge_masks_are_a_partition(void)
 
     CHECK((first_mask & second_mask) == 0u);
     CHECK((first_mask | second_mask) == expected_union);
+    return 0;
+}
+
+static int capture_pixel_is_covered(
+    const raster_capture* capture,
+    soc_depth_direction depth_direction,
+    size_t pixel
+)
+{
+    return float_bits(capture->depth[pixel]) !=
+        float_bits(clear_depth_for(depth_direction));
+}
+
+static int check_non_lattice_shared_quad(
+    uint32_t width,
+    uint32_t height,
+    double minimum,
+    double maximum,
+    int opposite_diagonal,
+    int varying_depth,
+    soc_depth_direction depth_direction
+)
+{
+    screen_vertex vertices[4] = {
+        {minimum, minimum, 0.25f},
+        {maximum, minimum, varying_depth ? 0.35f : 0.25f},
+        {maximum, maximum, varying_depth ? 0.45f : 0.25f},
+        {minimum, maximum, varying_depth ? 0.55f : 0.25f},
+    };
+    uint32_t first_indices[3];
+    uint32_t second_indices[3];
+    uint32_t first_then_second[6];
+    uint32_t second_then_first[6];
+    float positions[12];
+    soc_mesh first_mesh;
+    soc_mesh second_mesh;
+    soc_mesh combined_first_mesh;
+    soc_mesh combined_second_mesh;
+    const soc_mesh* split_first_order[2];
+    const soc_mesh* split_second_order[2];
+    const soc_frame_desc frame = make_frame_desc(
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        depth_direction
+    );
+    raster_capture first_capture;
+    raster_capture second_capture;
+    raster_capture combined_first_capture;
+    raster_capture combined_second_capture;
+    raster_capture split_first_capture;
+    raster_capture split_second_capture;
+    uint32_t vertex;
+    uint32_t y;
+
+    if (opposite_diagonal) {
+        const uint32_t first[3] = {0u, 1u, 3u};
+        const uint32_t second[3] = {1u, 2u, 3u};
+
+        memcpy(first_indices, first, sizeof(first_indices));
+        memcpy(second_indices, second, sizeof(second_indices));
+    } else {
+        const uint32_t first[3] = {0u, 1u, 2u};
+        const uint32_t second[3] = {0u, 2u, 3u};
+
+        memcpy(first_indices, first, sizeof(first_indices));
+        memcpy(second_indices, second, sizeof(second_indices));
+    }
+    memcpy(first_then_second, first_indices, sizeof(first_indices));
+    memcpy(
+        first_then_second + ARRAY_COUNT(first_indices),
+        second_indices,
+        sizeof(second_indices)
+    );
+    memcpy(second_then_first, second_indices, sizeof(second_indices));
+    memcpy(
+        second_then_first + ARRAY_COUNT(second_indices),
+        first_indices,
+        sizeof(first_indices)
+    );
+
+    for (vertex = 0u; vertex < ARRAY_COUNT(vertices); ++vertex) {
+        write_screen_vertex(
+            positions,
+            vertex,
+            width,
+            height,
+            &vertices[vertex],
+            SOC_CLIP_DEPTH_ZERO_TO_ONE
+        );
+    }
+    first_mesh = make_mesh(positions, 4u, first_indices, 3u);
+    second_mesh = make_mesh(positions, 4u, second_indices, 3u);
+    combined_first_mesh = make_mesh(
+        positions,
+        4u,
+        first_then_second,
+        6u
+    );
+    combined_second_mesh = make_mesh(
+        positions,
+        4u,
+        second_then_first,
+        6u
+    );
+    split_first_order[0] = &first_mesh;
+    split_first_order[1] = &second_mesh;
+    split_second_order[0] = &second_mesh;
+    split_second_order[1] = &first_mesh;
+
+    CHECK(run_one_mesh(
+        &first_mesh,
+        &frame,
+        width,
+        height,
+        &first_capture
+    ) == 0);
+    CHECK(run_one_mesh(
+        &second_mesh,
+        &frame,
+        width,
+        height,
+        &second_capture
+    ) == 0);
+    CHECK(run_one_mesh(
+        &combined_first_mesh,
+        &frame,
+        width,
+        height,
+        &combined_first_capture
+    ) == 0);
+    CHECK(run_one_mesh(
+        &combined_second_mesh,
+        &frame,
+        width,
+        height,
+        &combined_second_capture
+    ) == 0);
+    CHECK(run_mesh_sequence(
+        split_first_order,
+        2u,
+        &frame,
+        width,
+        height,
+        &split_first_capture
+    ) == 0);
+    CHECK(run_mesh_sequence(
+        split_second_order,
+        2u,
+        &frame,
+        width,
+        height,
+        &split_second_capture
+    ) == 0);
+
+    CHECK(first_capture.rasterized_triangle_count == 1u);
+    CHECK(second_capture.rasterized_triangle_count == 1u);
+    CHECK(combined_first_capture.rasterized_triangle_count == 2u);
+    CHECK(combined_second_capture.rasterized_triangle_count == 2u);
+    CHECK(split_first_capture.rasterized_triangle_count == 2u);
+    CHECK(split_second_capture.rasterized_triangle_count == 2u);
+
+    for (y = 0u; y < height; ++y) {
+        uint32_t x;
+
+        for (x = 0u; x < width; ++x) {
+            const size_t pixel = (size_t)y * width + x;
+            const double sample_x = (double)x + 0.5;
+            const double sample_y = (double)y + 0.5;
+            const int expected = sample_x > minimum &&
+                sample_x < maximum &&
+                sample_y > minimum &&
+                sample_y < maximum;
+            const int first = capture_pixel_is_covered(
+                &first_capture,
+                depth_direction,
+                pixel
+            );
+            const int second = capture_pixel_is_covered(
+                &second_capture,
+                depth_direction,
+                pixel
+            );
+
+            CHECK(!(first && second));
+            CHECK((first || second) == expected);
+            CHECK(capture_pixel_is_covered(
+                &combined_first_capture,
+                depth_direction,
+                pixel
+            ) == expected);
+            CHECK(capture_pixel_is_covered(
+                &combined_second_capture,
+                depth_direction,
+                pixel
+            ) == expected);
+            CHECK(capture_pixel_is_covered(
+                &split_first_capture,
+                depth_direction,
+                pixel
+            ) == expected);
+            CHECK(capture_pixel_is_covered(
+                &split_second_capture,
+                depth_direction,
+                pixel
+            ) == expected);
+        }
+    }
+
+    release_capture(&first_capture);
+    release_capture(&second_capture);
+    release_capture(&combined_first_capture);
+    release_capture(&combined_second_capture);
+    release_capture(&split_first_capture);
+    release_capture(&split_second_capture);
+    return 0;
+}
+
+static int test_non_lattice_shared_edges_have_no_cracks(void)
+{
+    static const soc_depth_direction depth_directions[] = {
+        SOC_DEPTH_FORWARD,
+        SOC_DEPTH_REVERSED,
+    };
+    size_t direction_index;
+
+    for (direction_index = 0u;
+         direction_index < ARRAY_COUNT(depth_directions);
+         ++direction_index) {
+        const soc_depth_direction direction =
+            depth_directions[direction_index];
+
+        CHECK(check_non_lattice_shared_quad(
+            32u,
+            32u,
+            2.1,
+            29.1,
+            0,
+            0,
+            direction
+        ) == 0);
+        CHECK(check_non_lattice_shared_quad(
+            32u,
+            32u,
+            2.1,
+            28.9,
+            1,
+            0,
+            direction
+        ) == 0);
+        CHECK(check_non_lattice_shared_quad(
+            8u,
+            8u,
+            1.1,
+            6.9,
+            0,
+            0,
+            direction
+        ) == 0);
+        CHECK(check_non_lattice_shared_quad(
+            8u,
+            8u,
+            1.1,
+            6.9,
+            0,
+            1,
+            direction
+        ) == 0);
+    }
+    return 0;
+}
+
+static int check_q8_collapsed_triangle(
+    soc_depth_direction depth_direction
+)
+{
+    enum {
+        WIDTH = 16,
+        HEIGHT = 16,
+    };
+    static const screen_vertex vertices[3] = {
+        {3.5, 1.0, 0.375f},
+        {3.499, 14.0, 0.375f},
+        {3.501, 14.0, 0.375f},
+    };
+    uint32_t indices[] = {0u, 1u, 2u};
+    float positions[9];
+    screen_vertex reconstructed[3];
+    soc_mesh mesh;
+    const soc_frame_desc frame = make_frame_desc(
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        depth_direction
+    );
+    raster_capture capture;
+    int64_t fixed_x[3];
+    int64_t fixed_y[3];
+    int64_t fixed_area;
+    uint32_t covered_count = 0u;
+    uint32_t vertex;
+    uint32_t y;
+
+    write_triangle(
+        positions,
+        WIDTH,
+        HEIGHT,
+        vertices,
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
+    );
+    reconstruct_screen_triangle(
+        positions,
+        WIDTH,
+        HEIGHT,
+        reconstructed
+    );
+    for (vertex = 0u; vertex < 3u; ++vertex) {
+        fixed_x[vertex] = (int64_t)(
+            reconstructed[vertex].x * 256.0 + 0.5
+        );
+        fixed_y[vertex] = (int64_t)(
+            reconstructed[vertex].y * 256.0 + 0.5
+        );
+    }
+    fixed_area = (fixed_x[1] - fixed_x[0]) *
+            (fixed_y[2] - fixed_y[0]) -
+        (fixed_y[1] - fixed_y[0]) *
+            (fixed_x[2] - fixed_x[0]);
+    CHECK(fixed_area == 0);
+
+    mesh = make_mesh(positions, 3u, indices, 3u);
+    CHECK(run_one_mesh(
+        &mesh,
+        &frame,
+        WIDTH,
+        HEIGHT,
+        &capture
+    ) == 0);
+    CHECK(capture.rasterized_triangle_count == 1u);
+
+    for (y = 0u; y < HEIGHT; ++y) {
+        uint32_t x;
+
+        for (x = 0u; x < WIDTH; ++x) {
+            const size_t pixel = (size_t)y * WIDTH + x;
+            int expected = 1;
+            uint32_t edge;
+
+            for (edge = 0u; edge < 3u; ++edge) {
+                if (!continuous_edge_contains_sample(
+                        &reconstructed[(edge + 1u) % 3u],
+                        &reconstructed[(edge + 2u) % 3u],
+                        (double)x + 0.5,
+                        (double)y + 0.5
+                    )) {
+                    expected = 0;
+                    break;
+                }
+            }
+            CHECK(capture_pixel_is_covered(
+                &capture,
+                depth_direction,
+                pixel
+            ) == expected);
+            if (expected) {
+                ++covered_count;
+            }
+        }
+    }
+    release_capture(&capture);
+    CHECK(covered_count > 0u);
+    return 0;
+}
+
+static int test_q8_collapsed_triangle_uses_exact_coverage(void)
+{
+    CHECK(check_q8_collapsed_triangle(SOC_DEPTH_FORWARD) == 0);
+    CHECK(check_q8_collapsed_triangle(SOC_DEPTH_REVERSED) == 0);
+    return 0;
+}
+
+static double ndc_edge_value(
+    const float positions[9],
+    uint32_t start,
+    uint32_t end,
+    double point_x,
+    double point_y
+)
+{
+    const double start_x = positions[(size_t)start * 3u];
+    const double start_y = positions[(size_t)start * 3u + 1u];
+    const double end_x = positions[(size_t)end * 3u];
+    const double end_y = positions[(size_t)end * 3u + 1u];
+
+    return (end_x - start_x) * (point_y - start_y) -
+        (end_y - start_y) * (point_x - start_x);
+}
+
+static int check_clipped_fan_coverage(
+    const float source_positions[9],
+    uint64_t expected_rasterized_triangles,
+    soc_depth_direction depth_direction
+)
+{
+    enum {
+        WIDTH = 32,
+        HEIGHT = 32,
+    };
+    uint32_t indices[] = {0u, 1u, 2u};
+    float positions[9];
+    soc_mesh mesh;
+    const soc_frame_desc frame = make_frame_desc(
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        depth_direction
+    );
+    raster_capture capture;
+    const double area = ndc_edge_value(
+        source_positions,
+        0u,
+        1u,
+        source_positions[6],
+        source_positions[7]
+    );
+    uint32_t checked_count = 0u;
+    uint32_t covered_count = 0u;
+    uint32_t y;
+
+    memcpy(positions, source_positions, sizeof(positions));
+    mesh = make_mesh(positions, 3u, indices, 3u);
+    CHECK(run_one_mesh(
+        &mesh,
+        &frame,
+        WIDTH,
+        HEIGHT,
+        &capture
+    ) == 0);
+    CHECK(capture.clipped_triangle_count == 1u);
+    CHECK(capture.rasterized_triangle_count ==
+        expected_rasterized_triangles);
+    CHECK(area != 0.0);
+
+    for (y = 0u; y < HEIGHT; ++y) {
+        uint32_t x;
+
+        for (x = 0u; x < WIDTH; ++x) {
+            const size_t pixel = (size_t)y * WIDTH + x;
+            const double ndc_x =
+                ((double)x + 0.5) * 2.0 / WIDTH - 1.0;
+            const double ndc_y =
+                1.0 - ((double)y + 0.5) * 2.0 / HEIGHT;
+            const double edge0 = ndc_edge_value(
+                positions,
+                0u,
+                1u,
+                ndc_x,
+                ndc_y
+            );
+            const double edge1 = ndc_edge_value(
+                positions,
+                1u,
+                2u,
+                ndc_x,
+                ndc_y
+            );
+            const double edge2 = ndc_edge_value(
+                positions,
+                2u,
+                0u,
+                ndc_x,
+                ndc_y
+            );
+            int expected;
+
+            if (edge0 == 0.0 || edge1 == 0.0 || edge2 == 0.0) {
+                continue;
+            }
+            expected = area > 0.0
+                ? (edge0 > 0.0 && edge1 > 0.0 && edge2 > 0.0)
+                : (edge0 < 0.0 && edge1 < 0.0 && edge2 < 0.0);
+            CHECK(capture_pixel_is_covered(
+                &capture,
+                depth_direction,
+                pixel
+            ) == expected);
+            ++checked_count;
+            if (expected) {
+                ++covered_count;
+            }
+        }
+    }
+    release_capture(&capture);
+    CHECK(checked_count > 900u);
+    CHECK(covered_count > 64u);
+    return 0;
+}
+
+static int test_clipped_polygon_fans_have_no_cracks(void)
+{
+    static const float clipped_quad[9] = {
+        -1.5f, -0.5f, 0.375f,
+         0.8f, -0.8f, 0.375f,
+         0.8f,  0.8f, 0.375f,
+    };
+    static const float clipped_pentagon[9] = {
+         0.8f, -0.8f, 0.375f,
+         1.2f,  0.8f, 0.375f,
+        -1.8f,  2.0f, 0.375f,
+    };
+
+    CHECK(check_clipped_fan_coverage(
+        clipped_quad,
+        2u,
+        SOC_DEPTH_FORWARD
+    ) == 0);
+    CHECK(check_clipped_fan_coverage(
+        clipped_quad,
+        2u,
+        SOC_DEPTH_REVERSED
+    ) == 0);
+    CHECK(check_clipped_fan_coverage(
+        clipped_pentagon,
+        3u,
+        SOC_DEPTH_FORWARD
+    ) == 0);
+    CHECK(check_clipped_fan_coverage(
+        clipped_pentagon,
+        3u,
+        SOC_DEPTH_REVERSED
+    ) == 0);
     return 0;
 }
 
@@ -1042,6 +1574,15 @@ int main(void)
         return 1;
     }
     if (test_shared_edge_masks_are_a_partition() != 0) {
+        return 1;
+    }
+    if (test_non_lattice_shared_edges_have_no_cracks() != 0) {
+        return 1;
+    }
+    if (test_q8_collapsed_triangle_uses_exact_coverage() != 0) {
+        return 1;
+    }
+    if (test_clipped_polygon_fans_have_no_cracks() != 0) {
         return 1;
     }
     if (test_varying_depth_is_guarded_in_depth_direction() != 0) {

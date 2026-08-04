@@ -69,7 +69,15 @@ typedef struct soc_edge_equation {
     int64_t delta_y;
     int64_t step_x;
     int64_t step_y;
-    int64_t coverage_bias;
+    int64_t error_bound;
+    int64_t inside_threshold;
+    int64_t outside_threshold;
+    double exact_start_x;
+    double exact_start_y;
+    double exact_end_x;
+    double exact_end_y;
+    soc_bool top_left;
+    soc_bool exact_q8;
 } soc_edge_equation;
 
 typedef struct soc_raster_region {
@@ -94,6 +102,8 @@ typedef enum soc_raster_block_classification {
 typedef struct soc_raster_triangle_setup {
     soc_edge_equation edges[3];
     soc_raster_region bounds;
+    soc_bool exact_coverage_only;
+    soc_bool exact_q8;
     double depth_anchor_x;
     double depth_anchor_y;
     double depth_anchor;
@@ -345,16 +355,401 @@ static uint32_t clip_triangle(
     return vertex_count;
 }
 
-static double edge_function(
-    const soc_screen_vertex* start,
-    const soc_screen_vertex* end,
-    double point_x,
-    double point_y
+/*
+ * The expansion helpers and orient2d filter below are a compact adaptation
+ * of Jonathan Richard Shewchuk's public-domain robust predicates.  The fast
+ * determinant handles ordinary samples; exact expansion arithmetic is used
+ * only when its sign is not reliable.
+ * https://www.cs.cmu.edu/~quake/robust.html
+ */
+#define SOC_ROBUST_SPLITTER 134217729.0
+
+static void robust_fast_two_sum(
+    double left,
+    double right,
+    double* out_sum,
+    double* out_error
 )
 {
-    return (end->x - start->x) * (point_y - start->y) -
-        (end->y - start->y) * (point_x - start->x);
+    volatile double sum = left + right;
+    const double right_virtual = sum - left;
+
+    *out_sum = sum;
+    *out_error = right - right_virtual;
 }
+
+static void robust_two_sum(
+    double left,
+    double right,
+    double* out_sum,
+    double* out_error
+)
+{
+    volatile double sum = left + right;
+    const double right_virtual = sum - left;
+    const double left_virtual = sum - right_virtual;
+    const double right_roundoff = right - right_virtual;
+    const double left_roundoff = left - left_virtual;
+
+    *out_sum = sum;
+    *out_error = left_roundoff + right_roundoff;
+}
+
+static void robust_split(
+    double value,
+    double* out_high,
+    double* out_low
+)
+{
+    volatile double combined = SOC_ROBUST_SPLITTER * value;
+    const double large = combined - value;
+    const double high = combined - large;
+
+    *out_high = high;
+    *out_low = value - high;
+}
+
+static void robust_two_product(
+    double left,
+    double right,
+    double out_product[2]
+)
+{
+    double left_high;
+    double left_low;
+    double right_high;
+    double right_low;
+    double error1;
+    double error2;
+    double error3;
+    volatile double product = left * right;
+
+    robust_split(left, &left_high, &left_low);
+    robust_split(right, &right_high, &right_low);
+    error1 = product - left_high * right_high;
+    error2 = error1 - left_low * right_high;
+    error3 = error2 - left_high * right_low;
+    out_product[0] = left_low * right_low - error3;
+    out_product[1] = product;
+}
+
+static double robust_two_difference_tail(
+    double left,
+    double right,
+    double difference
+)
+{
+    const double right_virtual = left - difference;
+    const double left_virtual = difference + right_virtual;
+    const double right_roundoff = right_virtual - right;
+    const double left_roundoff = left - left_virtual;
+
+    return left_roundoff + right_roundoff;
+}
+
+static int robust_expansion_sum_zero_eliminate(
+    int left_length,
+    const double* left,
+    int right_length,
+    const double* right,
+    double* out_sum
+)
+{
+    int left_index = 0;
+    int right_index = 0;
+    int output_index = 0;
+    double left_now = left[0];
+    double right_now = right[0];
+    double accumulator;
+
+    if ((right_now > left_now) == (right_now > -left_now)) {
+        accumulator = left_now;
+        ++left_index;
+    } else {
+        accumulator = right_now;
+        ++right_index;
+    }
+
+    if (left_index < left_length && right_index < right_length) {
+        double next;
+        double roundoff;
+
+        left_now = left[left_index];
+        right_now = right[right_index];
+        if ((right_now > left_now) == (right_now > -left_now)) {
+            robust_fast_two_sum(
+                left_now,
+                accumulator,
+                &next,
+                &roundoff
+            );
+            ++left_index;
+        } else {
+            robust_fast_two_sum(
+                right_now,
+                accumulator,
+                &next,
+                &roundoff
+            );
+            ++right_index;
+        }
+        accumulator = next;
+        if (roundoff != 0.0) {
+            out_sum[output_index++] = roundoff;
+        }
+
+        while (left_index < left_length &&
+               right_index < right_length) {
+            left_now = left[left_index];
+            right_now = right[right_index];
+            if ((right_now > left_now) ==
+                (right_now > -left_now)) {
+                robust_two_sum(
+                    accumulator,
+                    left_now,
+                    &next,
+                    &roundoff
+                );
+                ++left_index;
+            } else {
+                robust_two_sum(
+                    accumulator,
+                    right_now,
+                    &next,
+                    &roundoff
+                );
+                ++right_index;
+            }
+            accumulator = next;
+            if (roundoff != 0.0) {
+                out_sum[output_index++] = roundoff;
+            }
+        }
+    }
+
+    while (left_index < left_length) {
+        double next;
+        double roundoff;
+
+        robust_two_sum(
+            accumulator,
+            left[left_index],
+            &next,
+            &roundoff
+        );
+        ++left_index;
+        accumulator = next;
+        if (roundoff != 0.0) {
+            out_sum[output_index++] = roundoff;
+        }
+    }
+    while (right_index < right_length) {
+        double next;
+        double roundoff;
+
+        robust_two_sum(
+            accumulator,
+            right[right_index],
+            &next,
+            &roundoff
+        );
+        ++right_index;
+        accumulator = next;
+        if (roundoff != 0.0) {
+            out_sum[output_index++] = roundoff;
+        }
+    }
+    if (accumulator != 0.0 || output_index == 0) {
+        out_sum[output_index++] = accumulator;
+    }
+    return output_index;
+}
+
+static int robust_product_difference(
+    double positive_left,
+    double positive_right,
+    double negative_left,
+    double negative_right,
+    double out_difference[4]
+)
+{
+    double positive[2];
+    double negative[2];
+
+    robust_two_product(positive_left, positive_right, positive);
+    robust_two_product(negative_left, negative_right, negative);
+    negative[0] = -negative[0];
+    negative[1] = -negative[1];
+    return robust_expansion_sum_zero_eliminate(
+        2,
+        positive,
+        2,
+        negative,
+        out_difference
+    );
+}
+
+static SOC_NOINLINE int exact_orient2d_sign(
+    double point0_x,
+    double point0_y,
+    double point1_x,
+    double point1_y,
+    double point2_x,
+    double point2_y
+)
+{
+    const double point0_delta_x = point0_x - point2_x;
+    const double point0_delta_y = point0_y - point2_y;
+    const double point1_delta_x = point1_x - point2_x;
+    const double point1_delta_y = point1_y - point2_y;
+    const double point0_tail_x = robust_two_difference_tail(
+        point0_x,
+        point2_x,
+        point0_delta_x
+    );
+    const double point0_tail_y = robust_two_difference_tail(
+        point0_y,
+        point2_y,
+        point0_delta_y
+    );
+    const double point1_tail_x = robust_two_difference_tail(
+        point1_x,
+        point2_x,
+        point1_delta_x
+    );
+    const double point1_tail_y = robust_two_difference_tail(
+        point1_y,
+        point2_y,
+        point1_delta_y
+    );
+    double base[4];
+    double correction[4];
+    double partial0[8];
+    double partial1[12];
+    double determinant[16];
+    const int base_length = robust_product_difference(
+        point0_delta_x,
+        point1_delta_y,
+        point0_delta_y,
+        point1_delta_x,
+        base
+    );
+    int partial0_length;
+    int partial1_length;
+    int determinant_length;
+    int correction_length;
+    double most_significant;
+
+    if (point0_tail_x == 0.0 && point0_tail_y == 0.0 &&
+        point1_tail_x == 0.0 && point1_tail_y == 0.0) {
+        most_significant = base[base_length - 1];
+        return most_significant > 0.0
+            ? 1
+            : (most_significant < 0.0 ? -1 : 0);
+    }
+
+    correction_length = robust_product_difference(
+        point0_tail_x,
+        point1_delta_y,
+        point0_tail_y,
+        point1_delta_x,
+        correction
+    );
+    partial0_length = robust_expansion_sum_zero_eliminate(
+        base_length,
+        base,
+        correction_length,
+        correction,
+        partial0
+    );
+    correction_length = robust_product_difference(
+        point0_delta_x,
+        point1_tail_y,
+        point0_delta_y,
+        point1_tail_x,
+        correction
+    );
+    partial1_length = robust_expansion_sum_zero_eliminate(
+        partial0_length,
+        partial0,
+        correction_length,
+        correction,
+        partial1
+    );
+    correction_length = robust_product_difference(
+        point0_tail_x,
+        point1_tail_y,
+        point0_tail_y,
+        point1_tail_x,
+        correction
+    );
+    determinant_length = robust_expansion_sum_zero_eliminate(
+        partial1_length,
+        partial1,
+        correction_length,
+        correction,
+        determinant
+    );
+    most_significant = determinant[determinant_length - 1];
+
+    return most_significant > 0.0
+        ? 1
+        : (most_significant < 0.0 ? -1 : 0);
+}
+
+static inline int robust_orient2d_sign(
+    double point0_x,
+    double point0_y,
+    double point1_x,
+    double point1_y,
+    double point2_x,
+    double point2_y
+)
+{
+    const double left =
+        (point0_x - point2_x) * (point1_y - point2_y);
+    const double right =
+        (point0_y - point2_y) * (point1_x - point2_x);
+    const double determinant = left - right;
+    double determinant_sum;
+
+    if (left > 0.0) {
+        if (right <= 0.0) {
+            return determinant > 0.0 ? 1 : -1;
+        }
+        determinant_sum = left + right;
+    } else if (left < 0.0) {
+        if (right >= 0.0) {
+            return determinant < 0.0 ? -1 : 1;
+        }
+        determinant_sum = -left - right;
+    } else {
+        return right > 0.0 ? -1 : (right < 0.0 ? 1 : 0);
+    }
+
+    {
+        const double epsilon = DBL_EPSILON * 0.5;
+        const double error_bound =
+            (3.0 + 16.0 * epsilon) * epsilon * determinant_sum;
+
+        if (determinant >= error_bound) {
+            return 1;
+        }
+        if (-determinant >= error_bound) {
+            return -1;
+        }
+    }
+    return exact_orient2d_sign(
+        point0_x,
+        point0_y,
+        point1_x,
+        point1_y,
+        point2_x,
+        point2_y
+    );
+}
+
+#undef SOC_ROBUST_SPLITTER
 
 static double clamp_double(double value, double minimum, double maximum)
 {
@@ -414,7 +809,7 @@ static soc_edge_equation make_edge_equation(
         .delta_y = delta_y,
         .step_x = -delta_y * SOC_RASTER_SUBPIXEL_SCALE,
         .step_y = delta_x * SOC_RASTER_SUBPIXEL_SCALE,
-        .coverage_bias = 0,
+        .error_bound = 0,
     };
     return edge;
 }
@@ -443,32 +838,40 @@ static double next_double_up(double value)
     return value;
 }
 
-static int64_t compute_edge_coverage_bias(
-    const soc_edge_equation* fixed_edge,
+static void configure_edge_coverage(
+    soc_edge_equation* fixed_edge,
     const soc_screen_vertex* exact_start,
     const soc_screen_vertex* exact_end,
     soc_bool endpoints_exact,
     int64_t position_error_bound
 )
 {
-    const double exact_delta_x = exact_end->x - exact_start->x;
-    const double exact_delta_y = exact_end->y - exact_start->y;
-    const soc_bool top_left =
-        exact_delta_y < 0.0 ||
-            (exact_delta_y == 0.0 && exact_delta_x > 0.0)
+    fixed_edge->exact_start_x = exact_start->x;
+    fixed_edge->exact_start_y = exact_start->y;
+    fixed_edge->exact_end_x = exact_end->x;
+    fixed_edge->exact_end_y = exact_end->y;
+    fixed_edge->top_left =
+        exact_end->y < exact_start->y ||
+            (exact_end->y == exact_start->y &&
+                exact_end->x > exact_start->x)
             ? SOC_TRUE
             : SOC_FALSE;
+    fixed_edge->exact_q8 = endpoints_exact;
 
     if (endpoints_exact == SOC_TRUE) {
-        return top_left == SOC_TRUE ? 0 : -1;
+        fixed_edge->error_bound = 0;
+        fixed_edge->inside_threshold =
+            fixed_edge->top_left == SOC_TRUE ? 0 : 1;
+        fixed_edge->outside_threshold = fixed_edge->inside_threshold;
+        return;
     }
 
     {
         /*
          * Nearest Q8 snapping moves each endpoint component by at most half
-         * a fixed-point unit.  Bound the resulting affine edge error over the
-         * complete bbox and subtract it once here.  Covered samples are then
-         * a subset of the unsnapped triangle without any per-sample fallback.
+         * a fixed-point unit.  This symmetric bound encloses the difference
+         * between the raw fixed edge and the unsnapped edge over the complete
+         * bbox.  Samples inside the uncertainty interval use exact orient2d.
          */
         const int64_t absolute_delta_x = fixed_edge->delta_x < 0
             ? -fixed_edge->delta_x
@@ -476,15 +879,13 @@ static int64_t compute_edge_coverage_bias(
         const int64_t absolute_delta_y = fixed_edge->delta_y < 0
             ? -fixed_edge->delta_y
             : fixed_edge->delta_y;
-        int64_t inward_bias = position_error_bound +
+        fixed_edge->error_bound = position_error_bound +
             (absolute_delta_x + absolute_delta_y + 1) /
                 2 +
             2;
-
-        if (top_left != SOC_TRUE) {
-            ++inward_bias;
-        }
-        return -inward_bias;
+        fixed_edge->inside_threshold = fixed_edge->error_bound +
+            (fixed_edge->top_left == SOC_TRUE ? 0 : 1);
+        fixed_edge->outside_threshold = -fixed_edge->error_bound;
     }
 }
 
@@ -706,7 +1107,7 @@ static soc_raster_setup_result prepare_screen_triangle(
 )
 {
     const soc_clip_vertex* clip_vertices[3] = {clip0, clip1, clip2};
-    double screen_area;
+    int screen_orientation;
     uint32_t index;
 
     /* Project only x/y until the cheap degeneracy and facing tests pass. */
@@ -731,20 +1132,22 @@ static soc_raster_setup_result prepare_screen_triangle(
             (0.5 - ndc_y * 0.5) * rasterizer->height;
     }
 
-    screen_area = edge_function(
-        &screen[0],
-        &screen[1],
+    screen_orientation = robust_orient2d_sign(
+        screen[0].x,
+        screen[0].y,
+        screen[1].x,
+        screen[1].y,
         screen[2].x,
         screen[2].y
     );
-    if (screen_area == 0.0) {
+    if (screen_orientation == 0) {
         return SOC_RASTER_SETUP_REJECTED;
     }
     if (two_sided != SOC_TRUE) {
         const soc_bool front_facing =
             rasterizer->frame.front_face == SOC_FRONT_FACE_CCW
-                ? (screen_area < 0.0 ? SOC_TRUE : SOC_FALSE)
-                : (screen_area > 0.0 ? SOC_TRUE : SOC_FALSE);
+                ? (screen_orientation < 0 ? SOC_TRUE : SOC_FALSE)
+                : (screen_orientation > 0 ? SOC_TRUE : SOC_FALSE);
 
         if (front_facing != SOC_TRUE) {
             return SOC_RASTER_SETUP_REJECTED;
@@ -763,7 +1166,7 @@ static soc_raster_setup_result prepare_screen_triangle(
         }
         screen[index].depth = clamp_double(depth, 0.0, 1.0);
     }
-    if (screen_area < 0.0) {
+    if (screen_orientation < 0) {
         swap_screen_vertices(&screen[1], &screen[2]);
     }
     return SOC_RASTER_SETUP_READY;
@@ -841,6 +1244,11 @@ static soc_raster_setup_result setup_raster_triangle(
     int64_t minimum_y;
     int64_t maximum_y;
     int64_t fixed_area;
+    double exact_minimum_x;
+    double exact_maximum_x;
+    double exact_minimum_y;
+    double exact_maximum_y;
+    soc_bool all_fixed_exact;
     uint32_t index;
 
     for (index = 0u; index < 3u; ++index) {
@@ -859,6 +1267,11 @@ static soc_raster_setup_result setup_raster_triangle(
             ? SOC_TRUE
             : SOC_FALSE;
     }
+    all_fixed_exact = fixed_exact[0] == SOC_TRUE &&
+        fixed_exact[1] == SOC_TRUE &&
+        fixed_exact[2] == SOC_TRUE
+        ? SOC_TRUE
+        : SOC_FALSE;
     {
         const soc_edge_equation area_edge = make_edge_equation(
             &fixed[0],
@@ -870,14 +1283,19 @@ static soc_raster_setup_result setup_raster_triangle(
             fixed[2].y
         );
     }
-    if (fixed_area <= 0) {
-        return SOC_RASTER_SETUP_REJECTED;
-    }
+    out_setup->exact_coverage_only = fixed_area <= 0
+        ? SOC_TRUE
+        : SOC_FALSE;
+    out_setup->exact_q8 = all_fixed_exact;
 
     minimum_x = fixed[0].x;
     maximum_x = fixed[0].x;
     minimum_y = fixed[0].y;
     maximum_y = fixed[0].y;
+    exact_minimum_x = screen[0].x;
+    exact_maximum_x = screen[0].x;
+    exact_minimum_y = screen[0].y;
+    exact_maximum_y = screen[0].y;
     for (index = 1u; index < 3u; ++index) {
         if (fixed[index].x < minimum_x) {
             minimum_x = fixed[index].x;
@@ -891,37 +1309,76 @@ static soc_raster_setup_result setup_raster_triangle(
         if (fixed[index].y > maximum_y) {
             maximum_y = fixed[index].y;
         }
+        if (screen[index].x < exact_minimum_x) {
+            exact_minimum_x = screen[index].x;
+        }
+        if (screen[index].x > exact_maximum_x) {
+            exact_maximum_x = screen[index].x;
+        }
+        if (screen[index].y < exact_minimum_y) {
+            exact_minimum_y = screen[index].y;
+        }
+        if (screen[index].y > exact_maximum_y) {
+            exact_maximum_y = screen[index].y;
+        }
     }
 
-    if (maximum_x < SOC_RASTER_SUBPIXEL_HALF ||
-        maximum_y < SOC_RASTER_SUBPIXEL_HALF) {
+    if ((all_fixed_exact == SOC_TRUE &&
+            (maximum_x < SOC_RASTER_SUBPIXEL_HALF ||
+                maximum_y < SOC_RASTER_SUBPIXEL_HALF)) ||
+        (all_fixed_exact != SOC_TRUE &&
+            (exact_maximum_x < 0.5 || exact_maximum_y < 0.5))) {
         return SOC_RASTER_SETUP_EMPTY;
     }
 
-    out_setup->bounds.minimum_x = minimum_x <= SOC_RASTER_SUBPIXEL_HALF
-        ? 0u
-        : (uint32_t)(
-            (minimum_x - SOC_RASTER_SUBPIXEL_HALF +
-                SOC_RASTER_SUBPIXEL_SCALE - 1) /
-            SOC_RASTER_SUBPIXEL_SCALE
+    if (all_fixed_exact == SOC_TRUE) {
+        out_setup->bounds.minimum_x =
+            minimum_x <= SOC_RASTER_SUBPIXEL_HALF
+            ? 0u
+            : (uint32_t)(
+                (minimum_x - SOC_RASTER_SUBPIXEL_HALF +
+                    SOC_RASTER_SUBPIXEL_SCALE - 1) /
+                SOC_RASTER_SUBPIXEL_SCALE
+            );
+        out_setup->bounds.minimum_y =
+            minimum_y <= SOC_RASTER_SUBPIXEL_HALF
+            ? 0u
+            : (uint32_t)(
+                (minimum_y - SOC_RASTER_SUBPIXEL_HALF +
+                    SOC_RASTER_SUBPIXEL_SCALE - 1) /
+                SOC_RASTER_SUBPIXEL_SCALE
+            );
+        out_setup->bounds.end_x = (uint32_t)(
+            (maximum_x - SOC_RASTER_SUBPIXEL_HALF) /
+                SOC_RASTER_SUBPIXEL_SCALE +
+            1
         );
-    out_setup->bounds.minimum_y = minimum_y <= SOC_RASTER_SUBPIXEL_HALF
-        ? 0u
-        : (uint32_t)(
-            (minimum_y - SOC_RASTER_SUBPIXEL_HALF +
-                SOC_RASTER_SUBPIXEL_SCALE - 1) /
-            SOC_RASTER_SUBPIXEL_SCALE
+        out_setup->bounds.end_y = (uint32_t)(
+            (maximum_y - SOC_RASTER_SUBPIXEL_HALF) /
+                SOC_RASTER_SUBPIXEL_SCALE +
+            1
         );
-    out_setup->bounds.end_x = (uint32_t)(
-        (maximum_x - SOC_RASTER_SUBPIXEL_HALF) /
-            SOC_RASTER_SUBPIXEL_SCALE +
-        1
-    );
-    out_setup->bounds.end_y = (uint32_t)(
-        (maximum_y - SOC_RASTER_SUBPIXEL_HALF) /
-            SOC_RASTER_SUBPIXEL_SCALE +
-        1
-    );
+    } else {
+        const double minimum_sample_x = exact_minimum_x - 0.5;
+        const double minimum_sample_y = exact_minimum_y - 0.5;
+
+        out_setup->bounds.minimum_x = minimum_sample_x <= 0.0
+            ? 0u
+            : (uint32_t)minimum_sample_x;
+        out_setup->bounds.minimum_y = minimum_sample_y <= 0.0
+            ? 0u
+            : (uint32_t)minimum_sample_y;
+        if ((double)out_setup->bounds.minimum_x < minimum_sample_x) {
+            ++out_setup->bounds.minimum_x;
+        }
+        if ((double)out_setup->bounds.minimum_y < minimum_sample_y) {
+            ++out_setup->bounds.minimum_y;
+        }
+        out_setup->bounds.end_x =
+            (uint32_t)(exact_maximum_x - 0.5) + 1u;
+        out_setup->bounds.end_y =
+            (uint32_t)(exact_maximum_y - 0.5) + 1u;
+    }
     if (out_setup->bounds.end_x > rasterizer->width) {
         out_setup->bounds.end_x = rasterizer->width;
     }
@@ -945,7 +1402,7 @@ static soc_raster_setup_result setup_raster_triangle(
         out_setup->edges[0] = make_edge_equation(&fixed[1], &fixed[2]);
         out_setup->edges[1] = make_edge_equation(&fixed[2], &fixed[0]);
         out_setup->edges[2] = make_edge_equation(&fixed[0], &fixed[1]);
-        out_setup->edges[0].coverage_bias = compute_edge_coverage_bias(
+        configure_edge_coverage(
             &out_setup->edges[0],
             &screen[1],
             &screen[2],
@@ -954,7 +1411,7 @@ static soc_raster_setup_result setup_raster_triangle(
                 : SOC_FALSE,
             position_error_bound
         );
-        out_setup->edges[1].coverage_bias = compute_edge_coverage_bias(
+        configure_edge_coverage(
             &out_setup->edges[1],
             &screen[2],
             &screen[0],
@@ -963,7 +1420,7 @@ static soc_raster_setup_result setup_raster_triangle(
                 : SOC_FALSE,
             position_error_bound
         );
-        out_setup->edges[2].coverage_bias = compute_edge_coverage_bias(
+        configure_edge_coverage(
             &out_setup->edges[2],
             &screen[0],
             &screen[1],
@@ -996,11 +1453,7 @@ static soc_raster_setup_result setup_raster_triangle(
             rasterizer,
             screen,
             fixed_area,
-            fixed_exact[0] == SOC_TRUE &&
-                fixed_exact[1] == SOC_TRUE &&
-                fixed_exact[2] == SOC_TRUE
-                ? SOC_TRUE
-                : SOC_FALSE,
+            all_fixed_exact,
             out_setup
         );
     }
@@ -1154,6 +1607,114 @@ static void rasterize_depth_sample(
     }
 }
 
+static soc_bool robust_triangle_contains_sample(
+    const soc_raster_triangle_setup* setup,
+    double sample_x,
+    double sample_y
+)
+{
+    uint32_t edge_index;
+
+    for (edge_index = 0u; edge_index < 3u; ++edge_index) {
+        const soc_edge_equation* edge = &setup->edges[edge_index];
+        const int orientation = robust_orient2d_sign(
+            edge->exact_start_x,
+            edge->exact_start_y,
+            edge->exact_end_x,
+            edge->exact_end_y,
+            sample_x,
+            sample_y
+        );
+
+        if (orientation < 0 ||
+            (orientation == 0 && edge->top_left != SOC_TRUE)) {
+            return SOC_FALSE;
+        }
+    }
+    return SOC_TRUE;
+}
+
+static inline soc_bool robust_edge_contains_sample(
+    const soc_edge_equation* edge,
+    double sample_x,
+    double sample_y
+)
+{
+    const int orientation = robust_orient2d_sign(
+        edge->exact_start_x,
+        edge->exact_start_y,
+        edge->exact_end_x,
+        edge->exact_end_y,
+        sample_x,
+        sample_y
+    );
+
+    return orientation > 0 ||
+        (orientation == 0 && edge->top_left == SOC_TRUE)
+        ? SOC_TRUE
+        : SOC_FALSE;
+}
+
+static inline soc_bool raster_triangle_contains_sample(
+    const soc_raster_triangle_setup* setup,
+    const int64_t edge_values[3],
+    uint32_t pixel_x,
+    uint32_t pixel_y
+)
+{
+    const soc_edge_equation* edge0 = &setup->edges[0];
+    const soc_edge_equation* edge1 = &setup->edges[1];
+    const soc_edge_equation* edge2 = &setup->edges[2];
+
+    if (setup->exact_coverage_only == SOC_TRUE) {
+        return robust_triangle_contains_sample(
+            setup,
+            (double)pixel_x + 0.5,
+            (double)pixel_y + 0.5
+        );
+    }
+    if (edge_values[0] >= edge0->inside_threshold &&
+        edge_values[1] >= edge1->inside_threshold &&
+        edge_values[2] >= edge2->inside_threshold) {
+        return SOC_TRUE;
+    }
+    if (edge_values[0] < edge0->outside_threshold ||
+        edge_values[1] < edge1->outside_threshold ||
+        edge_values[2] < edge2->outside_threshold) {
+        return SOC_FALSE;
+    }
+    {
+        const double sample_x = (double)pixel_x + 0.5;
+        const double sample_y = (double)pixel_y + 0.5;
+
+        if (edge_values[0] < edge0->inside_threshold &&
+            robust_edge_contains_sample(
+                edge0,
+                sample_x,
+                sample_y
+            ) != SOC_TRUE) {
+            return SOC_FALSE;
+        }
+        if (edge_values[1] < edge1->inside_threshold &&
+            robust_edge_contains_sample(
+                edge1,
+                sample_x,
+                sample_y
+            ) != SOC_TRUE) {
+            return SOC_FALSE;
+        }
+        if (edge_values[2] < edge2->inside_threshold &&
+            robust_edge_contains_sample(
+                edge2,
+                sample_x,
+                sample_y
+            ) != SOC_TRUE) {
+            return SOC_FALSE;
+        }
+    }
+    return SOC_TRUE;
+}
+
 static void rasterize_small_constant_triangle(
     soc_rasterizer* rasterizer,
     const soc_raster_triangle_setup* setup
@@ -1180,7 +1741,42 @@ static void rasterize_small_constant_triangle(
             &setup->edges[edge_index],
             sample_x,
             sample_y
-        ) + setup->edges[edge_index].coverage_bias;
+        );
+        if (setup->exact_q8 == SOC_TRUE &&
+            setup->edges[edge_index].top_left != SOC_TRUE) {
+            --row_edges[edge_index];
+        }
+    }
+
+    if (setup->exact_q8 == SOC_TRUE) {
+        for (pixel_y = region->minimum_y;
+             pixel_y < region->end_y;
+             ++pixel_y) {
+            int64_t edge0 = row_edges[0];
+            int64_t edge1 = row_edges[1];
+            int64_t edge2 = row_edges[2];
+            uint32_t pixel_x;
+
+            for (pixel_x = region->minimum_x;
+                 pixel_x < region->end_x;
+                 ++pixel_x) {
+                if (edge0 >= 0 && edge1 >= 0 && edge2 >= 0) {
+                    store_depth_candidate(
+                        rasterizer,
+                        pixel_x,
+                        pixel_y,
+                        candidate_depth
+                    );
+                }
+                edge0 += setup->edges[0].step_x;
+                edge1 += setup->edges[1].step_x;
+                edge2 += setup->edges[2].step_x;
+            }
+            row_edges[0] += setup->edges[0].step_y;
+            row_edges[1] += setup->edges[1].step_y;
+            row_edges[2] += setup->edges[2].step_y;
+        }
+        return;
     }
 
     for (pixel_y = region->minimum_y;
@@ -1194,7 +1790,14 @@ static void rasterize_small_constant_triangle(
         for (pixel_x = region->minimum_x;
              pixel_x < region->end_x;
              ++pixel_x) {
-            if (edge0 >= 0 && edge1 >= 0 && edge2 >= 0) {
+            const int64_t edge_values[3] = {edge0, edge1, edge2};
+
+            if (raster_triangle_contains_sample(
+                    setup,
+                    edge_values,
+                    pixel_x,
+                    pixel_y
+                ) == SOC_TRUE) {
                 store_depth_candidate(
                     rasterizer,
                     pixel_x,
@@ -1222,6 +1825,10 @@ static soc_raster_block_classification classify_raster_block(
     soc_bool fully_covered = SOC_TRUE;
     uint32_t edge_index;
 
+    if (setup->exact_coverage_only == SOC_TRUE) {
+        return SOC_RASTER_BLOCK_PARTIAL;
+    }
+
     for (edge_index = 0u; edge_index < 3u; ++edge_index) {
         const soc_edge_equation* edge = &setup->edges[edge_index];
         const int64_t extent_x =
@@ -1242,11 +1849,20 @@ static soc_raster_block_classification classify_raster_block(
             maximum += extent_y;
         }
 
-        if (maximum < 0) {
-            return SOC_RASTER_BLOCK_OUTSIDE;
-        }
-        if (minimum < 0) {
-            fully_covered = SOC_FALSE;
+        if (setup->exact_q8 == SOC_TRUE) {
+            if (maximum < 0) {
+                return SOC_RASTER_BLOCK_OUTSIDE;
+            }
+            if (minimum < 0) {
+                fully_covered = SOC_FALSE;
+            }
+        } else {
+            if (maximum < edge->outside_threshold) {
+                return SOC_RASTER_BLOCK_OUTSIDE;
+            }
+            if (minimum < edge->inside_threshold) {
+                fully_covered = SOC_FALSE;
+            }
         }
     }
 
@@ -1258,6 +1874,8 @@ static soc_raster_block_classification classify_raster_block(
 static uint64_t make_raster_block_mask(
     const soc_raster_triangle_setup* setup,
     const int64_t edge_values[3],
+    uint32_t block_x,
+    uint32_t block_y,
     uint32_t block_width,
     uint32_t block_height,
     soc_raster_block_classification classification
@@ -1276,6 +1894,29 @@ static uint64_t make_raster_block_mask(
         return coverage_mask;
     }
 
+    if (setup->exact_q8 == SOC_TRUE) {
+        for (row = 0u; row < block_height; ++row) {
+            int64_t edge0 = edge_values[0] +
+                setup->edges[0].step_y * (int64_t)row;
+            int64_t edge1 = edge_values[1] +
+                setup->edges[1].step_y * (int64_t)row;
+            int64_t edge2 = edge_values[2] +
+                setup->edges[2].step_y * (int64_t)row;
+            uint32_t column;
+
+            for (column = 0u; column < block_width; ++column) {
+                if (edge0 >= 0 && edge1 >= 0 && edge2 >= 0) {
+                    coverage_mask |= UINT64_C(1) <<
+                        (row * SOC_RASTER_BLOCK_SIZE + column);
+                }
+                edge0 += setup->edges[0].step_x;
+                edge1 += setup->edges[1].step_x;
+                edge2 += setup->edges[2].step_x;
+            }
+        }
+        return coverage_mask;
+    }
+
     for (row = 0u; row < block_height; ++row) {
         int64_t edge0 = edge_values[0] +
             setup->edges[0].step_y * (int64_t)row;
@@ -1286,7 +1927,14 @@ static uint64_t make_raster_block_mask(
         uint32_t column;
 
         for (column = 0u; column < block_width; ++column) {
-            if (edge0 >= 0 && edge1 >= 0 && edge2 >= 0) {
+            const int64_t pixel_edges[3] = {edge0, edge1, edge2};
+
+            if (raster_triangle_contains_sample(
+                    setup,
+                    pixel_edges,
+                    block_x + column,
+                    block_y + row
+                ) == SOC_TRUE) {
                 coverage_mask |= UINT64_C(1) <<
                     (row * SOC_RASTER_BLOCK_SIZE + column);
             }
@@ -1387,11 +2035,17 @@ static void rasterize_triangle_blocks(
                 &setup->edges[edge_index],
                 sample_x,
                 sample_y
-            ) + setup->edges[edge_index].coverage_bias;
+            );
+            if (setup->exact_q8 == SOC_TRUE &&
+                setup->edges[edge_index].top_left != SOC_TRUE) {
+                --edge_values[edge_index];
+            }
         }
         coverage_mask = make_raster_block_mask(
             setup,
             edge_values,
+            region->minimum_x,
+            region->minimum_y,
             bounds_width,
             bounds_height,
             SOC_RASTER_BLOCK_PARTIAL
@@ -1451,7 +2105,11 @@ static void rasterize_triangle_blocks(
                     &setup->edges[edge_index],
                     sample_x,
                     sample_y
-                ) + setup->edges[edge_index].coverage_bias;
+                );
+                if (setup->exact_q8 == SOC_TRUE &&
+                    setup->edges[edge_index].top_left != SOC_TRUE) {
+                    --edge_values[edge_index];
+                }
             }
             classification = classify_raster_block(
                 setup,
@@ -1465,6 +2123,8 @@ static void rasterize_triangle_blocks(
             coverage_mask = make_raster_block_mask(
                 setup,
                 edge_values,
+                block_x,
+                block_y,
                 block_width,
                 block_height,
                 classification
