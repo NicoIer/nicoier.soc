@@ -47,6 +47,35 @@ soc_enable_warnings(soc_test_kernels)
 
 add_test(NAME soc.kernels COMMAND soc_test_kernels)
 
+add_executable(
+    soc_test_simd_differential
+    test_simd_differential.c
+)
+target_link_libraries(soc_test_simd_differential PRIVATE soc_core)
+target_include_directories(
+    soc_test_simd_differential
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src"
+)
+target_compile_features(soc_test_simd_differential PRIVATE c_std_17)
+soc_enable_warnings(soc_test_simd_differential)
+
+add_test(NAME soc.simd_differential COMMAND soc_test_simd_differential)
+
+add_executable(soc_test_simd_pipeline test_simd_pipeline.c)
+target_link_libraries(soc_test_simd_pipeline PRIVATE soc_core)
+target_include_directories(
+    soc_test_simd_pipeline
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src"
+)
+target_compile_features(soc_test_simd_pipeline PRIVATE c_std_17)
+soc_enable_warnings(soc_test_simd_pipeline)
+
+add_test(NAME soc.simd_pipeline COMMAND soc_test_simd_pipeline)
+
 add_executable(soc_test_pipeline test_pipeline.c)
 target_link_libraries(soc_test_pipeline PRIVATE soc::soc)
 target_compile_features(soc_test_pipeline PRIVATE c_std_17)
@@ -112,6 +141,17 @@ if(TARGET soc_bench)
         COMMAND soc_bench --validate-only
     )
     set_tests_properties(soc.bench.validate PROPERTIES LABELS validation)
+endif()
+
+if(TARGET soc_kernel_bench)
+    add_test(
+        NAME soc.kernel_bench.validate
+        COMMAND soc_kernel_bench --validate-only
+    )
+    set_tests_properties(
+        soc.kernel_bench.validate
+        PROPERTIES LABELS validation
+    )
 endif()
 
 if(TARGET soc_cli)

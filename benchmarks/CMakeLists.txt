@@ -3,6 +3,33 @@ target_link_libraries(soc_bench PRIVATE soc::soc)
 target_compile_features(soc_bench PRIVATE c_std_17)
 soc_enable_warnings(soc_bench)
 
+add_executable(soc_kernel_bench soc_kernel_bench.c)
+target_link_libraries(soc_kernel_bench PRIVATE soc_core)
+target_include_directories(
+    soc_kernel_bench
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src"
+)
+target_compile_features(soc_kernel_bench PRIVATE c_std_17)
+soc_enable_warnings(soc_kernel_bench)
+target_compile_definitions(
+    soc_kernel_bench
+    PRIVATE
+        SOC_KERNEL_BENCH_BUILD_TYPE="$<CONFIG>"
+)
+if(SOC_BUILD_SHARED)
+    target_compile_definitions(
+        soc_kernel_bench
+        PRIVATE SOC_KERNEL_BENCH_LINKAGE="shared"
+    )
+else()
+    target_compile_definitions(
+        soc_kernel_bench
+        PRIVATE SOC_KERNEL_BENCH_LINKAGE="static"
+    )
+endif()
+
 add_executable(
     soc_obj_bench
     soc_obj_bench.c
