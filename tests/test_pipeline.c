@@ -455,6 +455,14 @@ static int test_error_paths(void)
         soc_context_resize(owner, 32u, 0u),
         SOC_RESULT_INVALID_ARGUMENT
     );
+    CHECK_RESULT(
+        soc_context_resize(
+            owner,
+            SOC_MAX_RASTER_DIMENSION + 1u,
+            16u
+        ),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
 
     build_desc = make_build_desc(&frame, NULL, 0u);
     CHECK_RESULT(

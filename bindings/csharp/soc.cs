@@ -285,6 +285,9 @@ namespace soc
         [NativeTypeName("#define SOC_ABI_VERSION ((SOC_ABI_VERSION_MAJOR << 16u) | SOC_ABI_VERSION_MINOR)")]
         public const uint SOC_ABI_VERSION = ((2U << 16) | 0U);
 
+        [NativeTypeName("#define SOC_MAX_RASTER_DIMENSION UINT32_C(1048576)")]
+        public const uint SOC_MAX_RASTER_DIMENSION = 1048576U;
+
         [NativeTypeName("#define SOC_FALSE ((soc_bool)0u)")]
         public const byte SOC_FALSE = ((byte)(0U));
 

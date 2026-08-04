@@ -19,7 +19,9 @@ soc_result soc_context_create_internal(
     if (config == NULL ||
         config->struct_size < SOC_CONFIG_SIZE_V1 ||
         config->width == 0u ||
-        config->height == 0u) {
+        config->height == 0u ||
+        config->width > SOC_MAX_RASTER_DIMENSION ||
+        config->height > SOC_MAX_RASTER_DIMENSION) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 
@@ -55,7 +57,11 @@ soc_result soc_context_resize_internal(
     uint32_t height
 )
 {
-    if (context == NULL || width == 0u || height == 0u) {
+    if (context == NULL ||
+        width == 0u ||
+        height == 0u ||
+        width > SOC_MAX_RASTER_DIMENSION ||
+        height > SOC_MAX_RASTER_DIMENSION) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 

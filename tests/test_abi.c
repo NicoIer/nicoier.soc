@@ -46,6 +46,13 @@ static int test_invalid_arguments(void)
         .worker_count = 0u,
         .flags = 0u,
     };
+    const soc_config oversized_config = {
+        .struct_size = sizeof(soc_config),
+        .width = SOC_MAX_RASTER_DIMENSION + 1u,
+        .height = 180u,
+        .worker_count = 0u,
+        .flags = 0u,
+    };
     const soc_config undersized_config = {
         .struct_size = SOC_CONFIG_SIZE_V1 - 1u,
         .width = 320u,
@@ -88,6 +95,12 @@ static int test_invalid_arguments(void)
     }
     context = (soc_context*)(uintptr_t)1u;
     if (soc_context_create(&zero_height_config, &context) !=
+            SOC_RESULT_INVALID_ARGUMENT ||
+        context != NULL) {
+        return 1;
+    }
+    context = (soc_context*)(uintptr_t)1u;
+    if (soc_context_create(&oversized_config, &context) !=
             SOC_RESULT_INVALID_ARGUMENT ||
         context != NULL) {
         return 1;

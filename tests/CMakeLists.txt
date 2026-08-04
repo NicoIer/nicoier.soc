@@ -58,6 +58,19 @@ soc_enable_warnings(soc_test_hiz)
 
 add_test(NAME soc.hiz COMMAND soc_test_hiz)
 
+add_executable(soc_test_rasterizer test_rasterizer.c)
+target_link_libraries(soc_test_rasterizer PRIVATE soc_core)
+target_include_directories(
+    soc_test_rasterizer
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src"
+)
+target_compile_features(soc_test_rasterizer PRIVATE c_std_17)
+soc_enable_warnings(soc_test_rasterizer)
+
+add_test(NAME soc.rasterizer COMMAND soc_test_rasterizer)
+
 if(TARGET soc_bench)
     add_test(
         NAME soc.bench.validate

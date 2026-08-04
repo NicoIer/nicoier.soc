@@ -9,6 +9,9 @@
 #define SOC_ABI_VERSION \
     ((SOC_ABI_VERSION_MAJOR << 16u) | SOC_ABI_VERSION_MINOR)
 
+/* Q8 raster coordinates are defined for each viewport axis up to this size. */
+#define SOC_MAX_RASTER_DIMENSION UINT32_C(1048576)
+
 typedef uint8_t soc_bool;
 
 #define SOC_FALSE ((soc_bool)0u)
