@@ -3,6 +3,7 @@
 #include "core/soc_context.h"
 #include "core/soc_mesh.h"
 #include "core/soc_snapshot.h"
+#include "platform/soc_memory.h"
 #include "platform/soc_thread_pool.h"
 #include "raster/soc_rasterizer.h"
 
@@ -18,6 +19,9 @@
 #define SOC_PARALLEL_HOT_TILE_MINIMUM_REFERENCES ((size_t)1024u)
 #define SOC_PARALLEL_TILE_REFERENCES_PER_LANE ((size_t)256u)
 #define SOC_PARALLEL_TILE_ELEMENT_COUNT ((size_t)1024u)
+#define SOC_PARALLEL_TILE_BLOCK_SUMMARY_COUNT \
+    ((size_t)(SOC_RASTER_LOCK_TILE_SIZE / SOC_KERNEL_RASTER_BLOCK_SIZE) * \
+        (size_t)(SOC_RASTER_LOCK_TILE_SIZE / SOC_KERNEL_RASTER_BLOCK_SIZE))
 #define SOC_PARALLEL_TILE_BIN_INLINE_REFERENCE_COUNT UINT32_C(3)
 #define SOC_PARALLEL_TILE_REFERENCE_CHUNK_CAPACITY UINT32_C(15)
 #define SOC_PARALLEL_TILE_REFERENCE_CHUNK_INITIAL_CAPACITY UINT32_C(64)
@@ -408,6 +412,11 @@ _Static_assert(
     "raster tile rows must align to lower HiZ bands"
 );
 
+_Static_assert(
+    SOC_RASTER_LOCK_TILE_SIZE % SOC_KERNEL_RASTER_BLOCK_SIZE == 0u,
+    "raster tiles must contain complete early-Z blocks"
+);
+
 static void build_parallel_tile_row_hiz(
     soc_parallel_tile_state* state,
     size_t tile_row
@@ -550,7 +559,7 @@ static soc_result reserve_parallel_tile_reference_chunks(
         )) {
         return SOC_RESULT_OUT_OF_MEMORY;
     }
-    allocation = aligned_alloc(64u, allocation_bytes);
+    allocation = soc_aligned_alloc(64u, allocation_bytes);
     if (allocation == NULL) {
         return SOC_RESULT_OUT_OF_MEMORY;
     }
@@ -561,7 +570,7 @@ static soc_result reserve_parallel_tile_reference_chunks(
             (size_t)arena->count * sizeof(*allocation)
         );
     }
-    free(arena->chunks);
+    soc_aligned_free(arena->chunks);
     arena->chunks = allocation;
     arena->capacity = new_capacity;
     return SOC_RESULT_OK;
@@ -986,6 +995,9 @@ static void parallel_rasterize_tiles(
     soc_rasterizer* rasterizer = &state->rasterizers[worker_index];
     const size_t lane_index = (size_t)worker_index;
     const size_t lane_count = (size_t)worker_count;
+    float target_block_depth_summaries[
+        SOC_PARALLEL_TILE_BLOCK_SUMMARY_COUNT
+    ];
     size_t hot_index;
 
     for (hot_index = 0u;
@@ -1026,8 +1038,16 @@ static void parallel_rasterize_tiles(
         target.element_count = SOC_PARALLEL_TILE_ELEMENT_COUNT;
         target.origin_x = region.minimum_x;
         target.origin_y = region.minimum_y;
-        target.width = SOC_RASTER_LOCK_TILE_SIZE;
-        target.height = SOC_RASTER_LOCK_TILE_SIZE;
+        target.width = region.end_x - region.minimum_x;
+        target.height = region.end_y - region.minimum_y;
+        target.block_depth_summaries = target_block_depth_summaries;
+        target.block_depth_summary_count =
+            SOC_PARALLEL_TILE_BLOCK_SUMMARY_COUNT;
+        state->kernels->clear_f32(
+            target_block_depth_summaries,
+            SOC_PARALLEL_TILE_BLOCK_SUMMARY_COUNT,
+            state->depth_direction == SOC_DEPTH_REVERSED ? 0.0f : 1.0f
+        );
 
         rasterize_parallel_hot_tile_range(
             state,
@@ -1362,7 +1382,7 @@ static void cleanup_parallel_tile_reference_arenas(
         return;
     }
     for (lane = 0u; lane < arena_count; ++lane) {
-        free(arenas[lane].chunks);
+        soc_aligned_free(arenas[lane].chunks);
     }
 }
 

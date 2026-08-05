@@ -12,6 +12,7 @@ add_library(
         occlusion/soc_hiz.c
         occlusion/soc_visibility.c
         occlusion/soc_visibility_neon.c
+        platform/soc_memory.c
         platform/soc_thread_pool.c
         raster/soc_rasterizer.c
 )

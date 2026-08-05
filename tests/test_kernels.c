@@ -41,6 +41,239 @@ static float float_from_bits(uint32_t bits)
     return value;
 }
 
+static uint64_t make_full_depth_block_mask(
+    uint32_t width,
+    uint32_t height
+)
+{
+    const uint64_t row_mask = (UINT64_C(1) << width) - UINT64_C(1);
+    uint64_t mask = 0u;
+    uint32_t row;
+
+    for (row = 0u; row < height; ++row) {
+        mask |= row_mask << (row * SOC_KERNEL_RASTER_BLOCK_SIZE);
+    }
+    return mask;
+}
+
+static float reduce_depth_block_reference(
+    const float* depth,
+    size_t row_stride,
+    uint32_t width,
+    uint32_t height,
+    soc_depth_direction depth_direction
+)
+{
+    float summary = depth[0];
+    uint32_t row;
+
+    for (row = 0u; row < height; ++row) {
+        const float* depth_row = depth + (size_t)row * row_stride;
+        uint32_t column;
+
+        for (column = 0u; column < width; ++column) {
+            const float candidate = depth_row[column];
+
+            if (depth_direction == SOC_DEPTH_REVERSED) {
+                if (candidate < summary) {
+                    summary = candidate;
+                }
+            } else if (candidate > summary) {
+                summary = candidate;
+            }
+        }
+    }
+    return summary == 0.0f ? 0.0f : summary;
+}
+
+static int initialize_depth_summary_storage(
+    float* storage,
+    size_t row_stride,
+    uint32_t width,
+    uint32_t height,
+    float padding
+)
+{
+    static const float logical_values[] = {
+        0.10f, 0.90f, 0.20f, 0.80f, 0.30f,
+        0.70f, 0.40f, 0.60f, 0.50f, 0.15f,
+        0.85f, 0.25f, 0.75f, 0.35f, 0.65f,
+    };
+    const size_t storage_count = row_stride * (size_t)height;
+    size_t index;
+    uint32_t row;
+
+    CHECK(width * height ==
+        (uint32_t)(sizeof(logical_values) / sizeof(logical_values[0])));
+    for (index = 0u; index < storage_count; ++index) {
+        storage[index] = padding;
+    }
+    for (row = 0u; row < height; ++row) {
+        uint32_t column;
+
+        for (column = 0u; column < width; ++column) {
+            storage[(size_t)row * row_stride + column] =
+                logical_values[(size_t)row * width + column];
+        }
+    }
+    return 0;
+}
+
+static int check_depth_summary_padding(
+    const float* storage,
+    size_t row_stride,
+    uint32_t width,
+    uint32_t height,
+    float expected_padding
+)
+{
+    uint32_t row;
+
+    for (row = 0u; row < height; ++row) {
+        size_t column;
+
+        for (column = width; column < row_stride; ++column) {
+            CHECK(float_bits(storage[(size_t)row * row_stride + column]) ==
+                float_bits(expected_padding));
+        }
+    }
+    return 0;
+}
+
+static int test_scalar_depth_block_summaries(void)
+{
+    enum {
+        WIDTH = 5,
+        HEIGHT = 3,
+        ROW_STRIDE = 8,
+        STORAGE_COUNT = ROW_STRIDE * HEIGHT,
+    };
+    static const soc_depth_direction depth_directions[] = {
+        SOC_DEPTH_FORWARD,
+        SOC_DEPTH_REVERSED,
+    };
+    const uint64_t partial_mask =
+        UINT64_C(1) |
+        (UINT64_C(1) << (SOC_KERNEL_RASTER_BLOCK_SIZE + 2u)) |
+        (UINT64_C(1) << (2u * SOC_KERNEL_RASTER_BLOCK_SIZE + 4u));
+    const uint64_t masks[] = {
+        UINT64_C(0),
+        partial_mask,
+        make_full_depth_block_mask(WIDTH, HEIGHT),
+    };
+    const soc_kernel_table* scalar = soc_kernel_table_scalar();
+    size_t direction_index;
+
+    for (direction_index = 0u;
+         direction_index <
+            sizeof(depth_directions) / sizeof(depth_directions[0]);
+         ++direction_index) {
+        const soc_depth_direction depth_direction =
+            depth_directions[direction_index];
+        const float padding = depth_direction == SOC_DEPTH_REVERSED
+            ? -10.0f
+            : 10.0f;
+        const float constant_candidate =
+            depth_direction == SOC_DEPTH_REVERSED ? 0.55f : 0.45f;
+        size_t mask_index;
+
+        for (mask_index = 0u;
+             mask_index < sizeof(masks) / sizeof(masks[0]);
+             ++mask_index) {
+            float storage[STORAGE_COUNT];
+            float summary;
+            float expected_summary;
+
+            CHECK(initialize_depth_summary_storage(
+                storage,
+                ROW_STRIDE,
+                WIDTH,
+                HEIGHT,
+                padding
+            ) == 0);
+            summary = scalar->store_constant_depth_block_f32(
+                storage,
+                ROW_STRIDE,
+                WIDTH,
+                HEIGHT,
+                masks[mask_index],
+                constant_candidate,
+                depth_direction
+            );
+            expected_summary = reduce_depth_block_reference(
+                storage,
+                ROW_STRIDE,
+                WIDTH,
+                HEIGHT,
+                depth_direction
+            );
+            CHECK(float_bits(summary) == float_bits(expected_summary));
+            CHECK(check_depth_summary_padding(
+                storage,
+                ROW_STRIDE,
+                WIDTH,
+                HEIGHT,
+                padding
+            ) == 0);
+
+            if (depth_direction == SOC_DEPTH_REVERSED) {
+                const float expected_by_mask[] = {0.10f, 0.15f, 0.55f};
+
+                CHECK(float_bits(summary) ==
+                    float_bits(expected_by_mask[mask_index]));
+            } else {
+                const float expected_by_mask[] = {0.90f, 0.90f, 0.45f};
+
+                CHECK(float_bits(summary) ==
+                    float_bits(expected_by_mask[mask_index]));
+            }
+        }
+
+        for (mask_index = 0u;
+             mask_index < sizeof(masks) / sizeof(masks[0]);
+             ++mask_index) {
+            float storage[STORAGE_COUNT];
+            float summary;
+            float expected_summary;
+
+            CHECK(initialize_depth_summary_storage(
+                storage,
+                ROW_STRIDE,
+                WIDTH,
+                HEIGHT,
+                padding
+            ) == 0);
+            summary = scalar->store_depth_plane_block_f32(
+                storage,
+                ROW_STRIDE,
+                WIDTH,
+                HEIGHT,
+                masks[mask_index],
+                depth_direction == SOC_DEPTH_REVERSED ? 0.80f : 0.20f,
+                depth_direction == SOC_DEPTH_REVERSED ? -0.05f : 0.05f,
+                depth_direction == SOC_DEPTH_REVERSED ? -0.07f : 0.07f,
+                depth_direction
+            );
+            expected_summary = reduce_depth_block_reference(
+                storage,
+                ROW_STRIDE,
+                WIDTH,
+                HEIGHT,
+                depth_direction
+            );
+            CHECK(float_bits(summary) == float_bits(expected_summary));
+            CHECK(check_depth_summary_padding(
+                storage,
+                ROW_STRIDE,
+                WIDTH,
+                HEIGHT,
+                padding
+            ) == 0);
+        }
+    }
+    return 0;
+}
+
 static void merge_depth_planes_reference(
     float* level_zero,
     const float* scratch_planes,
@@ -385,6 +618,9 @@ static int test_snapshot_keeps_kernel_table(void)
 int main(void)
 {
     if (test_scalar_table_contract() != 0) {
+        return 1;
+    }
+    if (test_scalar_depth_block_summaries() != 0) {
         return 1;
     }
     if (test_kernel_selection() != 0) {

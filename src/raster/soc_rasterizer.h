@@ -49,6 +49,13 @@ typedef struct soc_raster_target {
     uint32_t origin_y;
     uint32_t width;
     uint32_t height;
+    /*
+     * Optional borrowed farthest-depth summaries for the global 8x8 cells
+     * intersecting this target, packed from the cell containing the origin.
+     * The caller initializes each entry to a conservative bound for depth.
+     */
+    float* block_depth_summaries;
+    size_t block_depth_summary_count;
 } soc_raster_target;
 
 typedef struct soc_raster_prepared_triangle {
@@ -78,6 +85,11 @@ typedef struct soc_rasterizer {
     size_t depth_element_count;
     /* Borrowed Level 0 storage owned by the in-progress snapshot. */
     float* depth;
+    uint32_t block_column_count;
+    uint32_t block_row_count;
+    size_t block_depth_summary_count;
+    /* Owned farthest-depth summaries for the fixed 8x8 block grid. */
+    float* block_depth_summaries;
     const soc_kernel_table* kernels;
     /* Optional borrowed grid; NULL keeps the original lock-free path. */
     soc_raster_tile_locks* tile_locks;

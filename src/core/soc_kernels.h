@@ -47,8 +47,12 @@ typedef struct soc_kernel_table {
         uint32_t lane_count,
         soc_depth_direction depth_direction
     );
-    /* block dimensions are at most 8; mask bit = row * 8 + column. */
-    void (*store_constant_depth_block_f32)(
+    /*
+     * Block dimensions are at most 8; mask bit = row * 8 + column.
+     * Stores return the farthest depth remaining in the addressed rectangle:
+     * maximum for forward-Z and minimum for reversed-Z.
+     */
+    float (*store_constant_depth_block_f32)(
         float* destination,
         size_t row_stride,
         uint32_t block_width,
@@ -57,7 +61,7 @@ typedef struct soc_kernel_table {
         float candidate_depth,
         soc_depth_direction depth_direction
     );
-    void (*store_depth_plane_block_f32)(
+    float (*store_depth_plane_block_f32)(
         float* destination,
         size_t row_stride,
         uint32_t block_width,
@@ -110,7 +114,7 @@ void soc_kernel_merge_depth_planes_f32_scalar(
     soc_depth_direction depth_direction
 );
 
-void soc_kernel_store_constant_depth_block_f32_scalar(
+float soc_kernel_store_constant_depth_block_f32_scalar(
     float* destination,
     size_t row_stride,
     uint32_t block_width,
@@ -120,7 +124,7 @@ void soc_kernel_store_constant_depth_block_f32_scalar(
     soc_depth_direction depth_direction
 );
 
-void soc_kernel_store_depth_plane_block_f32_scalar(
+float soc_kernel_store_depth_plane_block_f32_scalar(
     float* destination,
     size_t row_stride,
     uint32_t block_width,

@@ -230,6 +230,36 @@ static uint64_t make_full_raster_coverage_mask(
     return coverage_mask;
 }
 
+static float reduce_raster_depth_block_reference(
+    const float* depth,
+    size_t row_stride,
+    uint32_t width,
+    uint32_t height,
+    soc_depth_direction depth_direction
+)
+{
+    float summary = depth[0];
+    uint32_t row;
+
+    for (row = 0u; row < height; ++row) {
+        const float* depth_row = depth + (size_t)row * row_stride;
+        uint32_t column;
+
+        for (column = 0u; column < width; ++column) {
+            const float candidate = depth_row[column];
+
+            if (depth_direction == SOC_DEPTH_REVERSED) {
+                if (candidate < summary) {
+                    summary = candidate;
+                }
+            } else if (candidate > summary) {
+                summary = candidate;
+            }
+        }
+    }
+    return summary == 0.0f ? 0.0f : summary;
+}
+
 static int run_raster_depth_block_case(
     const soc_kernel_table* scalar,
     const soc_kernel_table* neon,
@@ -256,6 +286,9 @@ static int run_raster_depth_block_case(
     float neon_storage[RASTER_DEPTH_STORAGE_COUNT];
     const size_t begin = RASTER_DEPTH_GUARD_COUNT + offset;
     const float candidate_depth = float_from_bits(candidate_bits);
+    float expected_summary;
+    float scalar_summary;
+    float neon_summary;
     size_t index;
     uint32_t row;
 
@@ -294,7 +327,14 @@ static int run_raster_depth_block_case(
         }
     }
 
-    scalar->store_constant_depth_block_f32(
+    expected_summary = reduce_raster_depth_block_reference(
+        expected + begin,
+        row_stride,
+        width,
+        height,
+        depth_direction
+    );
+    scalar_summary = scalar->store_constant_depth_block_f32(
         scalar_storage + begin,
         row_stride,
         width,
@@ -303,7 +343,7 @@ static int run_raster_depth_block_case(
         candidate_depth,
         depth_direction
     );
-    neon->store_constant_depth_block_f32(
+    neon_summary = neon->store_constant_depth_block_f32(
         neon_storage + begin,
         row_stride,
         width,
@@ -312,6 +352,27 @@ static int run_raster_depth_block_case(
         candidate_depth,
         depth_direction
     );
+
+    if (float_bits(scalar_summary) != float_bits(expected_summary) ||
+        float_bits(neon_summary) != float_bits(expected_summary)) {
+        fprintf(
+            stderr,
+            "raster depth summary mismatch: %ux%u stride=%zu offset=%zu "
+            "mask=%016llx candidate=%08x direction=%u expected=%08x "
+            "scalar=%08x neon=%08x\n",
+            (unsigned)width,
+            (unsigned)height,
+            row_stride,
+            offset,
+            (unsigned long long)coverage_mask,
+            (unsigned)candidate_bits,
+            (unsigned)depth_direction,
+            (unsigned)float_bits(expected_summary),
+            (unsigned)float_bits(scalar_summary),
+            (unsigned)float_bits(neon_summary)
+        );
+        return 1;
+    }
 
     for (index = 0u; index < ARRAY_COUNT(expected); ++index) {
         const uint32_t expected_bits = float_bits(expected[index]);
@@ -474,6 +535,9 @@ static int test_raster_depth_plane_block_differential(
                         float scalar_storage[RASTER_DEPTH_STORAGE_COUNT];
                         float neon_storage[RASTER_DEPTH_STORAGE_COUNT];
                         const size_t begin = RASTER_DEPTH_GUARD_COUNT + 3u;
+                        float scalar_summary;
+                        float neon_summary;
+                        float expected_summary;
                         size_t index;
 
                         for (index = 0u;
@@ -486,7 +550,8 @@ static int test_raster_depth_plane_block_differential(
                             scalar_storage[index] = float_from_bits(bits);
                             neon_storage[index] = float_from_bits(bits);
                         }
-                        scalar->store_depth_plane_block_f32(
+                        scalar_summary =
+                            scalar->store_depth_plane_block_f32(
                             scalar_storage + begin,
                             9u,
                             width,
@@ -497,7 +562,7 @@ static int test_raster_depth_plane_block_differential(
                             plane_parameters[plane_index][2],
                             depth_directions[direction_index]
                         );
-                        neon->store_depth_plane_block_f32(
+                        neon_summary = neon->store_depth_plane_block_f32(
                             neon_storage + begin,
                             9u,
                             width,
@@ -508,6 +573,34 @@ static int test_raster_depth_plane_block_differential(
                             plane_parameters[plane_index][2],
                             depth_directions[direction_index]
                         );
+                        expected_summary =
+                            reduce_raster_depth_block_reference(
+                                scalar_storage + begin,
+                                9u,
+                                width,
+                                height,
+                                depth_directions[direction_index]
+                            );
+                        if (float_bits(scalar_summary) !=
+                                float_bits(expected_summary) ||
+                            float_bits(neon_summary) !=
+                                float_bits(expected_summary)) {
+                            fprintf(
+                                stderr,
+                                "raster plane summary mismatch: %ux%u "
+                                "mask=%zu plane=%zu direction=%zu "
+                                "expected=%08x scalar=%08x neon=%08x\n",
+                                (unsigned)width,
+                                (unsigned)height,
+                                mask_index,
+                                plane_index,
+                                direction_index,
+                                (unsigned)float_bits(expected_summary),
+                                (unsigned)float_bits(scalar_summary),
+                                (unsigned)float_bits(neon_summary)
+                            );
+                            return 1;
+                        }
                         for (index = 0u;
                              index < ARRAY_COUNT(scalar_storage);
                              ++index) {
