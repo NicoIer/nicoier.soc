@@ -39,6 +39,14 @@ typedef struct soc_kernel_clip_metadata {
 typedef struct soc_kernel_table {
     soc_kernel_backend backend;
     void (*clear_f32)(float* destination, size_t count, float value);
+    void (*merge_depth_planes_f32)(
+        float* level_zero,
+        const float* scratch_planes,
+        size_t element_count,
+        size_t scratch_plane_stride,
+        uint32_t lane_count,
+        soc_depth_direction depth_direction
+    );
     /* block dimensions are at most 8; mask bit = row * 8 + column. */
     void (*store_constant_depth_block_f32)(
         float* destination,
@@ -90,6 +98,16 @@ void soc_kernel_clear_f32_scalar(
     float* destination,
     size_t count,
     float value
+);
+
+/* lane_count includes level_zero; scratch_planes contains lanes 1..N-1. */
+void soc_kernel_merge_depth_planes_f32_scalar(
+    float* level_zero,
+    const float* scratch_planes,
+    size_t element_count,
+    size_t scratch_plane_stride,
+    uint32_t lane_count,
+    soc_depth_direction depth_direction
 );
 
 void soc_kernel_store_constant_depth_block_f32_scalar(

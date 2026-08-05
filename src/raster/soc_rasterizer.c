@@ -92,8 +92,21 @@ typedef struct soc_raster_depth_plane {
 } soc_raster_depth_plane;
 
 _Static_assert(
-    sizeof(soc_raster_prepared_triangle) == 232u,
-    "prepared triangle layout must remain 232 bytes"
+    sizeof(soc_raster_prepared_edge) == 24u,
+    "prepared edge layout must remain 24 bytes"
+);
+_Static_assert(
+    sizeof(soc_raster_prepared_triangle) == 128u,
+    "prepared triangle layout must remain two cache lines"
+);
+_Static_assert(
+    SOC_MAX_RASTER_DIMENSION <= (UINT32_C(1) << 20u),
+    "compact fixed edges require raster dimensions at most 2^20"
+);
+_Static_assert(
+    (SOC_MAX_RASTER_DIMENSION + SOC_RASTER_LOCK_TILE_SIZE - 1u) /
+        SOC_RASTER_LOCK_TILE_SIZE <= UINT16_MAX,
+    "prepared tile ranges must fit in uint16_t"
 );
 
 static soc_bool checked_size_multiply(
@@ -147,10 +160,18 @@ soc_result soc_raster_prepared_list_reserve(
         return SOC_RESULT_OUT_OF_MEMORY;
     }
 
-    allocation = realloc(list->data, allocation_size);
+    allocation = aligned_alloc(128u, allocation_size);
     if (allocation == NULL) {
         return SOC_RESULT_OUT_OF_MEMORY;
     }
+    if (list->count != 0u) {
+        memcpy(
+            allocation,
+            list->data,
+            list->count * sizeof(*allocation)
+        );
+    }
+    free(list->data);
     list->data = allocation;
     list->capacity = minimum_capacity;
     return SOC_RESULT_OK;
@@ -482,14 +503,15 @@ static int64_t quantize_screen_coordinate(double coordinate)
     return (int64_t)(scaled + 0.5);
 }
 
-static int64_t fixed_edge_value(
+static int64_t fixed_edge_value_at_pixel(
     const soc_edge_equation* edge,
-    int64_t point_x,
-    int64_t point_y
+    uint32_t pixel_x,
+    uint32_t pixel_y
 )
 {
-    return edge->delta_x * (point_y - edge->start_y) -
-        edge->delta_y * (point_x - edge->start_x);
+    return edge->sample_origin +
+        edge->step_x * (int64_t)pixel_x +
+        edge->step_y * (int64_t)pixel_y;
 }
 
 static soc_edge_equation make_edge_equation(
@@ -503,14 +525,14 @@ static soc_edge_equation make_edge_equation(
             (delta_y == 0 && delta_x > 0)
         ? SOC_TRUE
         : SOC_FALSE;
+    const int64_t bias = top_left == SOC_TRUE ? 0 : -1;
     const soc_edge_equation edge = {
-        .start_x = start->x,
-        .start_y = start->y,
-        .delta_x = delta_x,
-        .delta_y = delta_y,
+        .sample_origin =
+            delta_x * (SOC_RASTER_SUBPIXEL_HALF - start->y) -
+            delta_y * (SOC_RASTER_SUBPIXEL_HALF - start->x) +
+            bias,
         .step_x = -delta_y * SOC_RASTER_SUBPIXEL_SCALE,
         .step_y = delta_x * SOC_RASTER_SUBPIXEL_SCALE,
-        .bias = top_left == SOC_TRUE ? 0 : -1,
     };
     return edge;
 }
@@ -544,7 +566,7 @@ static void configure_snapped_depth_plane(
     int64_t fixed_area,
     double extent_x,
     double extent_y,
-    soc_raster_triangle_setup* out_setup
+    soc_raster_depth_plane* out_plane
 )
 {
     const double inverse_subpixel_scale =
@@ -575,20 +597,48 @@ static void configure_snapped_depth_plane(
         const double numerator_y_term0 = delta_x10 * delta_depth20;
         const double numerator_y_term1 = delta_x20 * delta_depth10;
 
-        out_setup->depth_step_x =
+        out_plane->step_x =
             (numerator_x_term0 - numerator_x_term1) / area;
-        out_setup->depth_step_y =
+        out_plane->step_y =
             (numerator_y_term0 - numerator_y_term1) / area;
 
         evaluation_magnitude =
-            absolute_double(out_setup->depth_anchor) +
-            absolute_double(out_setup->depth_step_x) * extent_x +
-            absolute_double(out_setup->depth_step_y) * extent_y + 1.0;
-        out_setup->depth_error_bound = next_double_up(
+            absolute_double(out_plane->anchor) +
+            absolute_double(out_plane->step_x) * extent_x +
+            absolute_double(out_plane->step_y) * extent_y + 1.0;
+        out_plane->error_bound = next_double_up(
             evaluation_magnitude * DBL_EPSILON *
                 SOC_RASTER_EVALUATION_ERROR_SCALE
         );
     }
+}
+
+static void store_prepared_depth_plane(
+    soc_raster_triangle_setup* out_setup,
+    const soc_raster_depth_plane* plane
+)
+{
+    const double origin_offset_x =
+        plane->step_x * (0.5 - plane->anchor_x);
+    const double origin_offset_y =
+        plane->step_y * (0.5 - plane->anchor_y);
+    const double sample_origin =
+        (plane->anchor + origin_offset_x) + origin_offset_y;
+    const double origin_evaluation_magnitude =
+        absolute_double(plane->anchor) +
+        absolute_double(origin_offset_x) +
+        absolute_double(origin_offset_y) +
+        absolute_double(sample_origin) + 1.0;
+    const double origin_error_bound = next_double_up(
+        origin_evaluation_magnitude * DBL_EPSILON * 8.0
+    );
+
+    out_setup->depth_sample_origin = sample_origin;
+    out_setup->depth_step_x = plane->step_x;
+    out_setup->depth_step_y = plane->step_y;
+    out_setup->depth_error_bound = next_double_up(
+        plane->error_bound + origin_error_bound
+    );
 }
 
 static void configure_depth_plane(
@@ -597,6 +647,7 @@ static void configure_depth_plane(
     soc_raster_triangle_setup* out_setup
 )
 {
+    soc_raster_depth_plane plane;
     const double anchor_x =
         (double)screen[0].fixed_x / (double)SOC_RASTER_SUBPIXEL_SCALE;
     const double anchor_y =
@@ -624,16 +675,17 @@ static void configure_depth_plane(
             : maximum_offset_y
     );
 
-    out_setup->depth_anchor_x = anchor_x;
-    out_setup->depth_anchor_y = anchor_y;
-    out_setup->depth_anchor = screen[0].depth;
+    plane.anchor_x = anchor_x;
+    plane.anchor_y = anchor_y;
+    plane.anchor = screen[0].depth;
     configure_snapped_depth_plane(
         screen,
         fixed_area,
         extent_x,
         extent_y,
-        out_setup
+        &plane
     );
+    store_prepared_depth_plane(out_setup, &plane);
 }
 
 static soc_raster_setup_result prepare_screen_triangle(
@@ -709,46 +761,44 @@ static void configure_shared_fan_depth_plane(
     soc_raster_depth_plane* out_plane
 )
 {
-    soc_raster_triangle_setup plane_setup;
     int64_t fixed_area;
     double extent_x;
     double extent_y;
 
-    memset(&plane_setup, 0, sizeof(plane_setup));
     fixed_area =
         (plane_triangle[1].fixed_x - plane_triangle[0].fixed_x) *
             (plane_triangle[2].fixed_y - plane_triangle[0].fixed_y) -
         (plane_triangle[1].fixed_y - plane_triangle[0].fixed_y) *
             (plane_triangle[2].fixed_x - plane_triangle[0].fixed_x);
-    plane_setup.depth_anchor_x =
+    out_plane->anchor_x =
         (double)plane_triangle[0].fixed_x /
         (double)SOC_RASTER_SUBPIXEL_SCALE;
-    plane_setup.depth_anchor_y =
+    out_plane->anchor_y =
         (double)plane_triangle[0].fixed_y /
         (double)SOC_RASTER_SUBPIXEL_SCALE;
-    plane_setup.depth_anchor = plane_triangle[0].depth;
+    out_plane->anchor = plane_triangle[0].depth;
     extent_x = next_double_up(
-        absolute_double(0.5 - plane_setup.depth_anchor_x) >
+        absolute_double(0.5 - out_plane->anchor_x) >
             absolute_double(
                 (double)rasterizer->width - 0.5 -
-                plane_setup.depth_anchor_x
+                out_plane->anchor_x
             )
-            ? absolute_double(0.5 - plane_setup.depth_anchor_x)
+            ? absolute_double(0.5 - out_plane->anchor_x)
             : absolute_double(
                 (double)rasterizer->width - 0.5 -
-                plane_setup.depth_anchor_x
+                out_plane->anchor_x
             )
     );
     extent_y = next_double_up(
-        absolute_double(0.5 - plane_setup.depth_anchor_y) >
+        absolute_double(0.5 - out_plane->anchor_y) >
             absolute_double(
                 (double)rasterizer->height - 0.5 -
-                plane_setup.depth_anchor_y
+                out_plane->anchor_y
             )
-            ? absolute_double(0.5 - plane_setup.depth_anchor_y)
+            ? absolute_double(0.5 - out_plane->anchor_y)
             : absolute_double(
                 (double)rasterizer->height - 0.5 -
-                plane_setup.depth_anchor_y
+                out_plane->anchor_y
             )
     );
     configure_snapped_depth_plane(
@@ -756,15 +806,8 @@ static void configure_shared_fan_depth_plane(
         fixed_area,
         extent_x,
         extent_y,
-        &plane_setup
+        out_plane
     );
-
-    out_plane->anchor_x = plane_setup.depth_anchor_x;
-    out_plane->anchor_y = plane_setup.depth_anchor_y;
-    out_plane->anchor = plane_setup.depth_anchor;
-    out_plane->step_x = plane_setup.depth_step_x;
-    out_plane->step_y = plane_setup.depth_step_y;
-    out_plane->error_bound = plane_setup.depth_error_bound;
 }
 
 static soc_raster_setup_result setup_raster_triangle(
@@ -786,17 +829,11 @@ static soc_raster_setup_result setup_raster_triangle(
         fixed[index].x = screen[index].fixed_x;
         fixed[index].y = screen[index].fixed_y;
     }
-    {
-        const soc_edge_equation area_edge = make_edge_equation(
-            &fixed[0],
-            &fixed[1]
-        );
-        fixed_area = fixed_edge_value(
-            &area_edge,
-            fixed[2].x,
-            fixed[2].y
-        );
-    }
+    fixed_area =
+        (fixed[1].x - fixed[0].x) *
+            (fixed[2].y - fixed[0].y) -
+        (fixed[1].y - fixed[0].y) *
+            (fixed[2].x - fixed[0].x);
     if (fixed_area <= 0) {
         return SOC_RASTER_SETUP_REJECTED;
     }
@@ -862,26 +899,34 @@ static soc_raster_setup_result setup_raster_triangle(
         return SOC_RASTER_SETUP_EMPTY;
     }
 
+    out_setup->first_tile_column = (uint16_t)(
+        out_setup->bounds.minimum_x / SOC_RASTER_LOCK_TILE_SIZE
+    );
+    out_setup->first_tile_row = (uint16_t)(
+        out_setup->bounds.minimum_y / SOC_RASTER_LOCK_TILE_SIZE
+    );
+    out_setup->end_tile_column = (uint16_t)(
+        (out_setup->bounds.end_x - 1u) /
+            SOC_RASTER_LOCK_TILE_SIZE + 1u
+    );
+    out_setup->end_tile_row = (uint16_t)(
+        (out_setup->bounds.end_y - 1u) /
+            SOC_RASTER_LOCK_TILE_SIZE + 1u
+    );
+
     out_setup->edges[0] = make_edge_equation(&fixed[1], &fixed[2]);
     out_setup->edges[1] = make_edge_equation(&fixed[2], &fixed[0]);
     out_setup->edges[2] = make_edge_equation(&fixed[0], &fixed[1]);
 
     if (shared_depth_plane != NULL) {
-        out_setup->depth_anchor_x = shared_depth_plane->anchor_x;
-        out_setup->depth_anchor_y = shared_depth_plane->anchor_y;
-        out_setup->depth_anchor = shared_depth_plane->anchor;
-        out_setup->depth_step_x = shared_depth_plane->step_x;
-        out_setup->depth_step_y = shared_depth_plane->step_y;
-        out_setup->depth_error_bound = shared_depth_plane->error_bound;
+        store_prepared_depth_plane(out_setup, shared_depth_plane);
     } else if (screen[0].depth == screen[1].depth &&
         screen[0].depth == screen[2].depth) {
-        out_setup->depth_anchor_x = screen[0].x;
-        out_setup->depth_anchor_y = screen[0].y;
-        out_setup->depth_anchor = screen[0].depth;
+        out_setup->depth_sample_origin = screen[0].depth;
         out_setup->depth_step_x = 0.0;
         out_setup->depth_step_y = 0.0;
         out_setup->depth_error_bound =
-            (absolute_double(out_setup->depth_anchor) + 1.0) *
+            (absolute_double(out_setup->depth_sample_origin) + 1.0) *
             DBL_EPSILON * 64.0;
     } else {
         configure_depth_plane(
@@ -971,15 +1016,9 @@ static void rasterize_small_constant_triangle(
 )
 {
     const soc_raster_region* region = &setup->bounds;
-    const int64_t sample_x =
-        (int64_t)region->minimum_x * SOC_RASTER_SUBPIXEL_SCALE +
-        SOC_RASTER_SUBPIXEL_HALF;
-    const int64_t sample_y =
-        (int64_t)region->minimum_y * SOC_RASTER_SUBPIXEL_SCALE +
-        SOC_RASTER_SUBPIXEL_HALF;
     const float candidate_depth = make_conservative_depth(
         rasterizer,
-        setup->depth_anchor,
+        setup->depth_sample_origin,
         setup->depth_error_bound
     );
     int64_t row_edges[3];
@@ -987,11 +1026,11 @@ static void rasterize_small_constant_triangle(
     uint32_t pixel_y;
 
     for (edge_index = 0u; edge_index < 3u; ++edge_index) {
-        row_edges[edge_index] = fixed_edge_value(
+        row_edges[edge_index] = fixed_edge_value_at_pixel(
             &setup->edges[edge_index],
-            sample_x,
-            sample_y
-        ) + setup->edges[edge_index].bias;
+            region->minimum_x,
+            region->minimum_y
+        );
     }
 
     for (pixel_y = region->minimum_y; pixel_y < region->end_y; ++pixel_y) {
@@ -1117,11 +1156,9 @@ static void rasterize_depth_block(
     uint64_t coverage_mask
 )
 {
-    double block_depth = setup->depth_anchor +
-        setup->depth_step_x *
-            ((double)block_x + 0.5 - setup->depth_anchor_x) +
-        setup->depth_step_y *
-            ((double)block_y + 0.5 - setup->depth_anchor_y);
+    double block_depth = setup->depth_sample_origin +
+        setup->depth_step_x * (double)block_x +
+        setup->depth_step_y * (double)block_y;
     if (setup->depth_step_x == 0.0 && setup->depth_step_y == 0.0) {
         const float candidate_depth = make_conservative_depth(
             rasterizer,
@@ -1171,24 +1208,16 @@ static void rasterize_triangle_blocks(
 
     if (bounds_width <= SOC_RASTER_BLOCK_SIZE &&
         bounds_height <= SOC_RASTER_BLOCK_SIZE) {
-        const int64_t sample_x =
-            (int64_t)region->minimum_x *
-                SOC_RASTER_SUBPIXEL_SCALE +
-            SOC_RASTER_SUBPIXEL_HALF;
-        const int64_t sample_y =
-            (int64_t)region->minimum_y *
-                SOC_RASTER_SUBPIXEL_SCALE +
-            SOC_RASTER_SUBPIXEL_HALF;
         int64_t edge_values[3];
         uint64_t coverage_mask;
         uint32_t edge_index;
 
         for (edge_index = 0u; edge_index < 3u; ++edge_index) {
-            edge_values[edge_index] = fixed_edge_value(
+            edge_values[edge_index] = fixed_edge_value_at_pixel(
                 &setup->edges[edge_index],
-                sample_x,
-                sample_y
-            ) + setup->edges[edge_index].bias;
+                region->minimum_x,
+                region->minimum_y
+            );
         }
         coverage_mask = make_raster_block_mask(
             setup,
@@ -1236,23 +1265,17 @@ static void rasterize_triangle_blocks(
                 ? aligned_end_x
                 : region->end_x;
             const uint32_t block_width = block_end_x - block_x;
-            const int64_t sample_x =
-                (int64_t)block_x * SOC_RASTER_SUBPIXEL_SCALE +
-                SOC_RASTER_SUBPIXEL_HALF;
-            const int64_t sample_y =
-                (int64_t)block_y * SOC_RASTER_SUBPIXEL_SCALE +
-                SOC_RASTER_SUBPIXEL_HALF;
             int64_t edge_values[3];
             soc_raster_block_classification classification;
             uint64_t coverage_mask;
             uint32_t edge_index;
 
             for (edge_index = 0u; edge_index < 3u; ++edge_index) {
-                edge_values[edge_index] = fixed_edge_value(
+                edge_values[edge_index] = fixed_edge_value_at_pixel(
                     &setup->edges[edge_index],
-                    sample_x,
-                    sample_y
-                ) + setup->edges[edge_index].bias;
+                    block_x,
+                    block_y
+                );
             }
             classification = classify_raster_block(
                 setup,
@@ -1274,6 +1297,176 @@ static void rasterize_triangle_blocks(
                 rasterize_depth_block(
                     rasterizer,
                     setup,
+                    block_x,
+                    block_y,
+                    block_width,
+                    block_height,
+                    coverage_mask
+                );
+            }
+        }
+    }
+}
+
+static void rasterize_depth_block_to_target(
+    soc_rasterizer* rasterizer,
+    const soc_raster_triangle_setup* setup,
+    const soc_raster_target* target,
+    uint32_t block_x,
+    uint32_t block_y,
+    uint32_t block_width,
+    uint32_t block_height,
+    uint64_t coverage_mask
+)
+{
+    const size_t local_x = (size_t)(block_x - target->origin_x);
+    const size_t local_y = (size_t)(block_y - target->origin_y);
+    float* destination = target->depth +
+        local_y * target->row_stride + local_x;
+    double block_depth = setup->depth_sample_origin +
+        setup->depth_step_x * (double)block_x +
+        setup->depth_step_y * (double)block_y;
+
+    if (setup->depth_step_x == 0.0 && setup->depth_step_y == 0.0) {
+        const float candidate_depth = make_conservative_depth(
+            rasterizer,
+            block_depth,
+            setup->depth_error_bound
+        );
+
+        rasterizer->kernels->store_constant_depth_block_f32(
+            destination,
+            target->row_stride,
+            block_width,
+            block_height,
+            coverage_mask,
+            candidate_depth,
+            rasterizer->frame.depth_direction
+        );
+        return;
+    }
+
+    block_depth = rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
+        ? block_depth - setup->depth_error_bound
+        : block_depth + setup->depth_error_bound;
+    rasterizer->kernels->store_depth_plane_block_f32(
+        destination,
+        target->row_stride,
+        block_width,
+        block_height,
+        coverage_mask,
+        (float)block_depth,
+        (float)setup->depth_step_x,
+        (float)setup->depth_step_y,
+        rasterizer->frame.depth_direction
+    );
+}
+
+static void rasterize_triangle_blocks_to_target(
+    soc_rasterizer* rasterizer,
+    const soc_raster_triangle_setup* setup,
+    const soc_raster_region* region,
+    const soc_raster_target* target
+)
+{
+    const uint32_t bounds_width = region->end_x - region->minimum_x;
+    const uint32_t bounds_height = region->end_y - region->minimum_y;
+    uint32_t aligned_y = region->minimum_y &
+        ~(SOC_RASTER_BLOCK_SIZE - 1u);
+
+    if (bounds_width <= SOC_RASTER_BLOCK_SIZE &&
+        bounds_height <= SOC_RASTER_BLOCK_SIZE) {
+        int64_t edge_values[3];
+        uint64_t coverage_mask;
+        uint32_t edge_index;
+
+        for (edge_index = 0u; edge_index < 3u; ++edge_index) {
+            edge_values[edge_index] = fixed_edge_value_at_pixel(
+                &setup->edges[edge_index],
+                region->minimum_x,
+                region->minimum_y
+            );
+        }
+        coverage_mask = make_raster_block_mask(
+            setup,
+            edge_values,
+            bounds_width,
+            bounds_height,
+            SOC_RASTER_BLOCK_PARTIAL
+        );
+        if (coverage_mask != 0u) {
+            rasterize_depth_block_to_target(
+                rasterizer,
+                setup,
+                target,
+                region->minimum_x,
+                region->minimum_y,
+                bounds_width,
+                bounds_height,
+                coverage_mask
+            );
+        }
+        return;
+    }
+
+    for (; aligned_y < region->end_y;
+         aligned_y += SOC_RASTER_BLOCK_SIZE) {
+        const uint32_t block_y = aligned_y < region->minimum_y
+            ? region->minimum_y
+            : aligned_y;
+        const uint32_t aligned_end_y =
+            aligned_y + SOC_RASTER_BLOCK_SIZE;
+        const uint32_t block_end_y = aligned_end_y < region->end_y
+            ? aligned_end_y
+            : region->end_y;
+        const uint32_t block_height = block_end_y - block_y;
+        uint32_t aligned_x = region->minimum_x &
+            ~(SOC_RASTER_BLOCK_SIZE - 1u);
+
+        for (; aligned_x < region->end_x;
+             aligned_x += SOC_RASTER_BLOCK_SIZE) {
+            const uint32_t block_x = aligned_x < region->minimum_x
+                ? region->minimum_x
+                : aligned_x;
+            const uint32_t aligned_end_x =
+                aligned_x + SOC_RASTER_BLOCK_SIZE;
+            const uint32_t block_end_x = aligned_end_x < region->end_x
+                ? aligned_end_x
+                : region->end_x;
+            const uint32_t block_width = block_end_x - block_x;
+            int64_t edge_values[3];
+            soc_raster_block_classification classification;
+            uint64_t coverage_mask;
+            uint32_t edge_index;
+
+            for (edge_index = 0u; edge_index < 3u; ++edge_index) {
+                edge_values[edge_index] = fixed_edge_value_at_pixel(
+                    &setup->edges[edge_index],
+                    block_x,
+                    block_y
+                );
+            }
+            classification = classify_raster_block(
+                setup,
+                edge_values,
+                block_width,
+                block_height
+            );
+            if (classification == SOC_RASTER_BLOCK_OUTSIDE) {
+                continue;
+            }
+            coverage_mask = make_raster_block_mask(
+                setup,
+                edge_values,
+                block_width,
+                block_height,
+                classification
+            );
+            if (coverage_mask != 0u) {
+                rasterize_depth_block_to_target(
+                    rasterizer,
+                    setup,
+                    target,
                     block_x,
                     block_y,
                     block_width,
@@ -1396,6 +1589,23 @@ static void rasterize_triangle_tiles_locked(
     }
 }
 
+static void rasterize_triangle_setup_unlocked(
+    soc_rasterizer* rasterizer,
+    const soc_raster_triangle_setup* setup
+)
+{
+    if (setup->bounds.end_x - setup->bounds.minimum_x <=
+            SOC_RASTER_BLOCK_SIZE &&
+        setup->bounds.end_y - setup->bounds.minimum_y <=
+            SOC_RASTER_BLOCK_SIZE &&
+        setup->depth_step_x == 0.0 && setup->depth_step_y == 0.0) {
+        rasterize_small_constant_triangle(rasterizer, setup);
+        return;
+    }
+
+    rasterize_triangle_blocks(rasterizer, setup, &setup->bounds);
+}
+
 static SOC_NOINLINE void rasterize_triangle_setup(
     soc_rasterizer* rasterizer,
     const soc_raster_triangle_setup* setup
@@ -1412,16 +1622,7 @@ static SOC_NOINLINE void rasterize_triangle_setup(
         return;
     }
 
-    if (setup->bounds.end_x - setup->bounds.minimum_x <=
-            SOC_RASTER_BLOCK_SIZE &&
-        setup->bounds.end_y - setup->bounds.minimum_y <=
-            SOC_RASTER_BLOCK_SIZE &&
-        setup->depth_step_x == 0.0 && setup->depth_step_y == 0.0) {
-        rasterize_small_constant_triangle(rasterizer, setup);
-        return;
-    }
-
-    rasterize_triangle_blocks(rasterizer, setup, &setup->bounds);
+    rasterize_triangle_setup_unlocked(rasterizer, setup);
 }
 
 static soc_result process_screen_triangle(
@@ -1992,6 +2193,200 @@ soc_result soc_rasterizer_rasterize_prepared_triangles(
     for (index = 0u; index < prepared_count; ++index) {
         rasterize_triangle_setup(rasterizer, &prepared[index]);
     }
+    return SOC_RESULT_OK;
+}
+
+void soc_rasterizer_rasterize_prepared_region_unchecked(
+    soc_rasterizer* rasterizer,
+    const soc_raster_prepared_triangle* prepared,
+    const soc_raster_prepared_region* region
+)
+{
+    soc_raster_region intersection;
+
+    intersection.minimum_x =
+        prepared->bounds.minimum_x > region->minimum_x
+            ? prepared->bounds.minimum_x
+            : region->minimum_x;
+    intersection.minimum_y =
+        prepared->bounds.minimum_y > region->minimum_y
+            ? prepared->bounds.minimum_y
+            : region->minimum_y;
+    intersection.end_x = prepared->bounds.end_x < region->end_x
+        ? prepared->bounds.end_x
+        : region->end_x;
+    intersection.end_y = prepared->bounds.end_y < region->end_y
+        ? prepared->bounds.end_y
+        : region->end_y;
+
+    if (intersection.minimum_x >= intersection.end_x ||
+        intersection.minimum_y >= intersection.end_y) {
+        return;
+    }
+    if (intersection.minimum_x == prepared->bounds.minimum_x &&
+        intersection.minimum_y == prepared->bounds.minimum_y &&
+        intersection.end_x == prepared->bounds.end_x &&
+        intersection.end_y == prepared->bounds.end_y) {
+        rasterize_triangle_setup_unlocked(rasterizer, prepared);
+        return;
+    }
+
+    rasterize_triangle_blocks(rasterizer, prepared, &intersection);
+}
+
+soc_result soc_rasterizer_rasterize_prepared_region(
+    soc_rasterizer* rasterizer,
+    const soc_raster_prepared_triangle* prepared,
+    const soc_raster_prepared_region* region
+)
+{
+    if (rasterizer == NULL || rasterizer->initialized != SOC_TRUE) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+    if (rasterizer->frame_active != SOC_TRUE) {
+        return SOC_RESULT_INVALID_STATE;
+    }
+    if (prepared == NULL ||
+        region == NULL ||
+        region->minimum_x > region->end_x ||
+        region->minimum_y > region->end_y ||
+        prepared->bounds.minimum_x >= prepared->bounds.end_x ||
+        prepared->bounds.minimum_y >= prepared->bounds.end_y ||
+        prepared->bounds.end_x > rasterizer->width ||
+        prepared->bounds.end_y > rasterizer->height) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+
+    soc_rasterizer_rasterize_prepared_region_unchecked(
+        rasterizer,
+        prepared,
+        region
+    );
+    return SOC_RESULT_OK;
+}
+
+static soc_bool raster_target_is_valid(
+    const soc_raster_target* target
+)
+{
+    size_t last_row_offset;
+    size_t required_elements;
+
+    if (target == NULL ||
+        target->depth == NULL ||
+        target->width == 0u ||
+        target->height == 0u ||
+        target->row_stride < (size_t)target->width ||
+        target->width > UINT32_MAX - target->origin_x ||
+        target->height > UINT32_MAX - target->origin_y ||
+        !checked_size_multiply(
+            (size_t)(target->height - 1u),
+            target->row_stride,
+            &last_row_offset
+        ) ||
+        (size_t)target->width > SIZE_MAX - last_row_offset) {
+        return SOC_FALSE;
+    }
+
+    required_elements = last_row_offset + (size_t)target->width;
+    return target->element_count >= required_elements
+        ? SOC_TRUE
+        : SOC_FALSE;
+}
+
+void soc_rasterizer_rasterize_prepared_region_to_target_unchecked(
+    soc_rasterizer* rasterizer,
+    const soc_raster_prepared_triangle* prepared,
+    const soc_raster_prepared_region* region,
+    const soc_raster_target* target
+)
+{
+    soc_raster_region intersection;
+
+    intersection.minimum_x =
+        prepared->bounds.minimum_x > region->minimum_x
+            ? prepared->bounds.minimum_x
+            : region->minimum_x;
+    intersection.minimum_y =
+        prepared->bounds.minimum_y > region->minimum_y
+            ? prepared->bounds.minimum_y
+            : region->minimum_y;
+    intersection.end_x = prepared->bounds.end_x < region->end_x
+        ? prepared->bounds.end_x
+        : region->end_x;
+    intersection.end_y = prepared->bounds.end_y < region->end_y
+        ? prepared->bounds.end_y
+        : region->end_y;
+    if (intersection.minimum_x >= intersection.end_x ||
+        intersection.minimum_y >= intersection.end_y) {
+        return;
+    }
+
+    rasterize_triangle_blocks_to_target(
+        rasterizer,
+        prepared,
+        &intersection,
+        target
+    );
+}
+
+soc_result soc_rasterizer_rasterize_prepared_region_to_target(
+    soc_rasterizer* rasterizer,
+    const soc_raster_prepared_triangle* prepared,
+    const soc_raster_prepared_region* region,
+    const soc_raster_target* target
+)
+{
+    soc_raster_region framebuffer_region;
+    uint32_t target_end_x;
+    uint32_t target_end_y;
+
+    if (rasterizer == NULL || rasterizer->initialized != SOC_TRUE) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+    if (rasterizer->frame_active != SOC_TRUE) {
+        return SOC_RESULT_INVALID_STATE;
+    }
+    if (prepared == NULL ||
+        region == NULL ||
+        region->minimum_x > region->end_x ||
+        region->minimum_y > region->end_y ||
+        prepared->bounds.minimum_x >= prepared->bounds.end_x ||
+        prepared->bounds.minimum_y >= prepared->bounds.end_y ||
+        prepared->bounds.end_x > rasterizer->width ||
+        prepared->bounds.end_y > rasterizer->height ||
+        raster_target_is_valid(target) != SOC_TRUE) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+
+    framebuffer_region.minimum_x = region->minimum_x;
+    framebuffer_region.minimum_y = region->minimum_y;
+    framebuffer_region.end_x = region->end_x < rasterizer->width
+        ? region->end_x
+        : rasterizer->width;
+    framebuffer_region.end_y = region->end_y < rasterizer->height
+        ? region->end_y
+        : rasterizer->height;
+    if (framebuffer_region.minimum_x >= framebuffer_region.end_x ||
+        framebuffer_region.minimum_y >= framebuffer_region.end_y) {
+        return SOC_RESULT_OK;
+    }
+
+    target_end_x = target->origin_x + target->width;
+    target_end_y = target->origin_y + target->height;
+    if (target->origin_x > framebuffer_region.minimum_x ||
+        target->origin_y > framebuffer_region.minimum_y ||
+        target_end_x < framebuffer_region.end_x ||
+        target_end_y < framebuffer_region.end_y) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+
+    soc_rasterizer_rasterize_prepared_region_to_target_unchecked(
+        rasterizer,
+        prepared,
+        &framebuffer_region,
+        target
+    );
     return SOC_RESULT_OK;
 }
 

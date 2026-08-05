@@ -3,6 +3,10 @@
 #include "core/soc_pipeline.h"
 #include "core/soc_snapshot.h"
 
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
 #define CHECK(condition) \
     do { \
         if (!(condition)) { \
@@ -21,6 +25,179 @@ static soc_mat4 identity_matrix(void)
     return matrix;
 }
 
+static uint32_t float_bits(float value)
+{
+    uint32_t bits;
+
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static float float_from_bits(uint32_t bits)
+{
+    float value;
+
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static void merge_depth_planes_reference(
+    float* level_zero,
+    const float* scratch_planes,
+    size_t element_count,
+    size_t scratch_plane_stride,
+    uint32_t lane_count,
+    soc_depth_direction depth_direction
+)
+{
+    size_t element_index;
+
+    for (element_index = 0u;
+         element_index < element_count;
+         ++element_index) {
+        float merged = level_zero[element_index];
+        uint32_t lane_index;
+
+        for (lane_index = 1u; lane_index < lane_count; ++lane_index) {
+            const float candidate = scratch_planes[
+                (size_t)(lane_index - 1u) * scratch_plane_stride +
+                element_index
+            ];
+
+            if (depth_direction == SOC_DEPTH_REVERSED) {
+                if (candidate > merged) {
+                    merged = candidate;
+                }
+            } else if (candidate < merged) {
+                merged = candidate;
+            }
+        }
+        level_zero[element_index] = merged;
+    }
+}
+
+static int test_merge_depth_planes_for_table(
+    const soc_kernel_table* kernels,
+    soc_depth_direction depth_direction
+)
+{
+    enum {
+        ELEMENT_COUNT = 71,
+        SCRATCH_PLANE_STRIDE = 83,
+        LANE_COUNT = 6,
+        SCRATCH_ELEMENT_COUNT =
+            SCRATCH_PLANE_STRIDE * (LANE_COUNT - 1)
+    };
+    float initial[ELEMENT_COUNT];
+    float expected[ELEMENT_COUNT];
+    float actual[ELEMENT_COUNT];
+    float scratch[SCRATCH_ELEMENT_COUNT];
+    size_t element_index;
+    uint32_t lane_index;
+
+    for (element_index = 0u;
+         element_index < ELEMENT_COUNT;
+         ++element_index) {
+        initial[element_index] =
+            (float)((element_index * 17u + 13u) % 101u) / 100.0f;
+    }
+    for (lane_index = 1u; lane_index < LANE_COUNT; ++lane_index) {
+        float* plane = scratch +
+            (size_t)(lane_index - 1u) * SCRATCH_PLANE_STRIDE;
+
+        for (element_index = 0u;
+             element_index < SCRATCH_PLANE_STRIDE;
+             ++element_index) {
+            plane[element_index] = (float)(
+                (element_index * 29u + (size_t)lane_index * 11u + 7u) %
+                103u
+            ) / 102.0f;
+        }
+    }
+
+    initial[3u] = float_from_bits(UINT32_C(0x7fc12345));
+    scratch[5u] = float_from_bits(UINT32_C(0x7fc54321));
+    initial[7u] = 0.0f;
+    initial[9u] = float_from_bits(UINT32_C(0x80000000));
+    for (lane_index = 1u; lane_index < LANE_COUNT; ++lane_index) {
+        float* plane = scratch +
+            (size_t)(lane_index - 1u) * SCRATCH_PLANE_STRIDE;
+
+        plane[7u] = float_from_bits(UINT32_C(0x80000000));
+        plane[9u] = 0.0f;
+    }
+
+    memcpy(expected, initial, sizeof(expected));
+    memcpy(actual, initial, sizeof(actual));
+    merge_depth_planes_reference(
+        expected,
+        scratch,
+        ELEMENT_COUNT,
+        SCRATCH_PLANE_STRIDE,
+        LANE_COUNT,
+        depth_direction
+    );
+    kernels->merge_depth_planes_f32(
+        actual,
+        scratch,
+        ELEMENT_COUNT,
+        SCRATCH_PLANE_STRIDE,
+        LANE_COUNT,
+        depth_direction
+    );
+    for (element_index = 0u;
+         element_index < ELEMENT_COUNT;
+         ++element_index) {
+        CHECK(float_bits(actual[element_index]) ==
+            float_bits(expected[element_index]));
+    }
+
+    memcpy(actual, initial, sizeof(actual));
+    kernels->merge_depth_planes_f32(
+        actual,
+        NULL,
+        ELEMENT_COUNT,
+        0u,
+        1u,
+        depth_direction
+    );
+    for (element_index = 0u;
+         element_index < ELEMENT_COUNT;
+         ++element_index) {
+        CHECK(float_bits(actual[element_index]) ==
+            float_bits(initial[element_index]));
+    }
+    return 0;
+}
+
+static int test_merge_depth_planes(void)
+{
+    const soc_kernel_table* scalar = soc_kernel_table_scalar();
+
+    CHECK(test_merge_depth_planes_for_table(
+        scalar,
+        SOC_DEPTH_FORWARD
+    ) == 0);
+    CHECK(test_merge_depth_planes_for_table(
+        scalar,
+        SOC_DEPTH_REVERSED
+    ) == 0);
+#if defined(__aarch64__) || defined(_M_ARM64)
+    const soc_kernel_table* neon = soc_kernel_table_neon();
+
+    CHECK(neon != NULL);
+    CHECK(test_merge_depth_planes_for_table(
+        neon,
+        SOC_DEPTH_FORWARD
+    ) == 0);
+    CHECK(test_merge_depth_planes_for_table(
+        neon,
+        SOC_DEPTH_REVERSED
+    ) == 0);
+#endif
+    return 0;
+}
+
 static int test_scalar_table_contract(void)
 {
     const soc_kernel_table* scalar = soc_kernel_table_scalar();
@@ -28,6 +205,7 @@ static int test_scalar_table_contract(void)
     CHECK(scalar != NULL);
     CHECK(scalar->backend == SOC_KERNEL_BACKEND_SCALAR);
     CHECK(scalar->clear_f32 != NULL);
+    CHECK(scalar->merge_depth_planes_f32 != NULL);
     CHECK(scalar->store_constant_depth_block_f32 != NULL);
     CHECK(scalar->store_depth_plane_block_f32 != NULL);
     CHECK(scalar->reduce_hiz_level_f32 != NULL);
@@ -42,6 +220,7 @@ static int test_scalar_table_contract(void)
     CHECK(neon != NULL);
     CHECK(neon->backend == SOC_KERNEL_BACKEND_NEON);
     CHECK(neon->clear_f32 != NULL);
+    CHECK(neon->merge_depth_planes_f32 != NULL);
     CHECK(neon->store_constant_depth_block_f32 != NULL);
     CHECK(neon->store_depth_plane_block_f32 != NULL);
     CHECK(neon->reduce_hiz_level_f32 != NULL);
@@ -215,6 +394,9 @@ int main(void)
         return 1;
     }
     if (test_snapshot_keeps_kernel_table() != 0) {
+        return 1;
+    }
+    if (test_merge_depth_planes() != 0) {
         return 1;
     }
     return 0;

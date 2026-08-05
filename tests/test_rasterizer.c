@@ -413,6 +413,122 @@ static double random_unit(uint32_t* state)
         (1.0 / 16777216.0);
 }
 
+static int compact_edge_matches_reference(
+    int64_t start_x,
+    int64_t start_y,
+    int64_t end_x,
+    int64_t end_y,
+    uint32_t pixel_x,
+    uint32_t pixel_y
+)
+{
+    const int64_t subpixel_scale = INT64_C(256);
+    const int64_t subpixel_half = INT64_C(128);
+    const int64_t delta_x = end_x - start_x;
+    const int64_t delta_y = end_y - start_y;
+    const int64_t sample_x =
+        (int64_t)pixel_x * subpixel_scale + subpixel_half;
+    const int64_t sample_y =
+        (int64_t)pixel_y * subpixel_scale + subpixel_half;
+    const int64_t bias = delta_y < 0 ||
+            (delta_y == 0 && delta_x > 0)
+        ? 0
+        : -1;
+    const int64_t reference =
+        delta_x * (sample_y - start_y) -
+        delta_y * (sample_x - start_x) + bias;
+    const soc_raster_prepared_edge compact = {
+        .sample_origin =
+            delta_x * (subpixel_half - start_y) -
+            delta_y * (subpixel_half - start_x) + bias,
+        .step_x = -delta_y * subpixel_scale,
+        .step_y = delta_x * subpixel_scale,
+    };
+    const int64_t actual = compact.sample_origin +
+        compact.step_x * (int64_t)pixel_x +
+        compact.step_y * (int64_t)pixel_y;
+
+    CHECK(actual == reference);
+    return 0;
+}
+
+static int test_compact_prepared_edges_are_integer_exact(void)
+{
+    static const uint32_t boundary_pixels[][2] = {
+        {0u, 0u},
+        {SOC_MAX_RASTER_DIMENSION - 1u, 0u},
+        {0u, SOC_MAX_RASTER_DIMENSION - 1u},
+        {
+            SOC_MAX_RASTER_DIMENSION - 1u,
+            SOC_MAX_RASTER_DIMENSION - 1u,
+        },
+        {
+            SOC_MAX_RASTER_DIMENSION / 2u,
+            SOC_MAX_RASTER_DIMENSION / 2u,
+        },
+    };
+    const int64_t maximum_fixed =
+        (int64_t)SOC_MAX_RASTER_DIMENSION * INT64_C(256);
+    const int64_t boundary_edges[][4] = {
+        {0, 0, maximum_fixed, maximum_fixed},
+        {maximum_fixed, 0, 0, maximum_fixed},
+        {0, maximum_fixed, maximum_fixed, 0},
+        {maximum_fixed, maximum_fixed, 0, 0},
+        {0, 0, maximum_fixed, 0},
+        {maximum_fixed, maximum_fixed, maximum_fixed, 0},
+    };
+    uint32_t random_state = UINT32_C(0x91e10da5);
+    size_t edge_index;
+
+    CHECK(sizeof(soc_raster_prepared_edge) == 24u);
+    CHECK(sizeof(soc_raster_prepared_triangle) == 128u);
+    for (edge_index = 0u;
+         edge_index < ARRAY_COUNT(boundary_edges);
+         ++edge_index) {
+        size_t pixel_index;
+
+        for (pixel_index = 0u;
+             pixel_index < ARRAY_COUNT(boundary_pixels);
+             ++pixel_index) {
+            CHECK(compact_edge_matches_reference(
+                boundary_edges[edge_index][0],
+                boundary_edges[edge_index][1],
+                boundary_edges[edge_index][2],
+                boundary_edges[edge_index][3],
+                boundary_pixels[pixel_index][0],
+                boundary_pixels[pixel_index][1]
+            ) == 0);
+        }
+    }
+
+    for (edge_index = 0u; edge_index < 16384u; ++edge_index) {
+        const uint32_t fixed_modulus =
+            (uint32_t)maximum_fixed + 1u;
+        const int64_t start_x =
+            (int64_t)(random_u32(&random_state) % fixed_modulus);
+        const int64_t start_y =
+            (int64_t)(random_u32(&random_state) % fixed_modulus);
+        const int64_t end_x =
+            (int64_t)(random_u32(&random_state) % fixed_modulus);
+        const int64_t end_y =
+            (int64_t)(random_u32(&random_state) % fixed_modulus);
+        const uint32_t pixel_x =
+            random_u32(&random_state) % SOC_MAX_RASTER_DIMENSION;
+        const uint32_t pixel_y =
+            random_u32(&random_state) % SOC_MAX_RASTER_DIMENSION;
+
+        CHECK(compact_edge_matches_reference(
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            pixel_x,
+            pixel_y
+        ) == 0);
+    }
+    return 0;
+}
+
 static double snap_screen_coordinate_q8(double coordinate)
 {
     return (double)(int64_t)(coordinate * 256.0 + 0.5) / 256.0;
@@ -2090,16 +2206,19 @@ static int test_prepared_list_and_invalid_state_semantics(void)
     uint64_t clipped_count;
     uint64_t rasterized_count;
 
-    CHECK(sizeof(soc_raster_prepared_triangle) == 232u);
+    CHECK(sizeof(soc_raster_prepared_edge) == 24u);
+    CHECK(sizeof(soc_raster_prepared_triangle) == 128u);
     CHECK(soc_raster_prepared_list_reserve(NULL, 1u) ==
         SOC_RESULT_INVALID_ARGUMENT);
     CHECK(soc_raster_prepared_list_reserve(&list, 2u) == SOC_RESULT_OK);
     CHECK(list.data != NULL);
+    CHECK(((uintptr_t)list.data & 127u) == 0u);
     CHECK(list.capacity == 2u);
     list.data[0].bounds.minimum_x = 17u;
     list.count = 1u;
     CHECK(soc_raster_prepared_list_reserve(&list, 5u) == SOC_RESULT_OK);
     CHECK(list.capacity == 5u);
+    CHECK(((uintptr_t)list.data & 127u) == 0u);
     CHECK(list.count == 1u);
     CHECK(list.data[0].bounds.minimum_x == 17u);
 
@@ -2208,6 +2327,658 @@ static int test_prepared_list_and_invalid_state_semantics(void)
 
     soc_raster_prepared_list_shutdown(&list);
     soc_rasterizer_shutdown(&rasterizer);
+    return 0;
+}
+
+static int check_prepared_region_replay(
+    soc_depth_direction depth_direction
+)
+{
+    enum {
+        WIDTH = 67,
+        HEIGHT = 65,
+    };
+    static const screen_vertex triangle[3] = {
+        {1.0, 1.0, 0.35f},
+        {66.8, 64.9, 0.35f},
+        {1.0, 64.9, 0.35f},
+    };
+    const size_t pixel_count = (size_t)WIDTH * HEIGHT;
+    const size_t depth_bytes = pixel_count * sizeof(float);
+    const soc_mat4 identity = identity_matrix();
+    const soc_frame_desc frame = make_frame_desc(
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        depth_direction
+    );
+    const uint32_t clear_bits = float_bits(clear_depth_for(depth_direction));
+    uint32_t indices[] = {0u, 1u, 2u};
+    float positions[9];
+    float* full_depth = malloc(depth_bytes);
+    float* region_depth = malloc(depth_bytes);
+    soc_mesh mesh;
+    soc_raster_prepared_list prepared = {0};
+    soc_rasterizer full_rasterizer;
+    soc_rasterizer region_rasterizer;
+    soc_raster_prepared_region region;
+    soc_raster_prepared_region invalid_region;
+    soc_raster_prepared_triangle invalid_prepared;
+    uint64_t clipped_count;
+    uint64_t rasterized_count;
+    size_t pixel;
+    uint32_t tail_covered = 0u;
+    uint32_t fragment_covered = 0u;
+    uint32_t tile_y;
+
+    CHECK(full_depth != NULL);
+    CHECK(region_depth != NULL);
+    write_triangle(
+        positions,
+        WIDTH,
+        HEIGHT,
+        triangle,
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
+    );
+    mesh = make_mesh(positions, 3u, indices, 3u);
+
+    CHECK(soc_rasterizer_initialize(
+        &full_rasterizer,
+        WIDTH,
+        HEIGHT,
+        full_depth,
+        pixel_count,
+        soc_kernel_table_scalar()
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_begin_frame(
+        &full_rasterizer,
+        &frame
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_prepare_occluder_triangles(
+        &full_rasterizer,
+        &mesh,
+        &identity,
+        0u,
+        1u,
+        &prepared
+    ) == SOC_RESULT_OK);
+    CHECK(prepared.count == 1u);
+    CHECK(prepared.data[0].bounds.end_x == WIDTH);
+    CHECK(prepared.data[0].bounds.end_y == HEIGHT);
+    CHECK(prepared.data[0].first_tile_column == 0u);
+    CHECK(prepared.data[0].first_tile_row == 0u);
+    CHECK(prepared.data[0].end_tile_column == 3u);
+    CHECK(prepared.data[0].end_tile_row == 3u);
+    clipped_count = full_rasterizer.clipped_triangle_count;
+    rasterized_count = full_rasterizer.rasterized_triangle_count;
+    CHECK(soc_rasterizer_rasterize_prepared_triangles(
+        &full_rasterizer,
+        prepared.data,
+        prepared.count
+    ) == SOC_RESULT_OK);
+    CHECK(full_rasterizer.clipped_triangle_count == clipped_count);
+    CHECK(full_rasterizer.rasterized_triangle_count == rasterized_count);
+
+    CHECK(soc_rasterizer_initialize(
+        &region_rasterizer,
+        WIDTH,
+        HEIGHT,
+        region_depth,
+        pixel_count,
+        soc_kernel_table_scalar()
+    ) == SOC_RESULT_OK);
+    region = prepared.data[0].bounds;
+    CHECK(soc_rasterizer_rasterize_prepared_region(
+        &region_rasterizer,
+        &prepared.data[0],
+        &region
+    ) == SOC_RESULT_INVALID_STATE);
+    CHECK(soc_rasterizer_begin_frame(
+        &region_rasterizer,
+        &frame
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_rasterize_prepared_region(
+        NULL,
+        &prepared.data[0],
+        &region
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+    CHECK(soc_rasterizer_rasterize_prepared_region(
+        &region_rasterizer,
+        NULL,
+        &region
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+    CHECK(soc_rasterizer_rasterize_prepared_region(
+        &region_rasterizer,
+        &prepared.data[0],
+        NULL
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+
+    for (tile_y = 0u; tile_y < HEIGHT; tile_y += 32u) {
+        uint32_t tile_x;
+
+        for (tile_x = 0u; tile_x < WIDTH; tile_x += 32u) {
+            region.minimum_x = tile_x;
+            region.minimum_y = tile_y;
+            /* Deliberately leave tail ends beyond the framebuffer. */
+            region.end_x = tile_x + 32u;
+            region.end_y = tile_y + 32u;
+            CHECK(soc_rasterizer_rasterize_prepared_region(
+                &region_rasterizer,
+                &prepared.data[0],
+                &region
+            ) == SOC_RESULT_OK);
+        }
+    }
+    CHECK(region_rasterizer.clipped_triangle_count == 0u);
+    CHECK(region_rasterizer.rasterized_triangle_count == 0u);
+    CHECK(memcmp(region_depth, full_depth, depth_bytes) == 0);
+    for (pixel = (size_t)64u * WIDTH + 64u;
+         pixel < pixel_count;
+         ++pixel) {
+        if (float_bits(region_depth[pixel]) != clear_bits) {
+            ++tail_covered;
+        }
+    }
+    CHECK(tail_covered > 0u);
+
+    CHECK(soc_rasterizer_end_frame(&region_rasterizer) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_begin_frame(
+        &region_rasterizer,
+        &frame
+    ) == SOC_RESULT_OK);
+    for (tile_y = 0u; tile_y < HEIGHT; tile_y += 32u) {
+        uint32_t tile_x;
+
+        for (tile_x = 0u; tile_x < WIDTH; tile_x += 32u) {
+            region.minimum_x = tile_x;
+            region.minimum_y = tile_y;
+            region.end_x = tile_x + 32u < WIDTH
+                ? tile_x + 32u
+                : WIDTH;
+            region.end_y = tile_y + 32u < HEIGHT
+                ? tile_y + 32u
+                : HEIGHT;
+            soc_rasterizer_rasterize_prepared_region_unchecked(
+                &region_rasterizer,
+                &prepared.data[0],
+                &region
+            );
+        }
+    }
+    CHECK(region_rasterizer.clipped_triangle_count == 0u);
+    CHECK(region_rasterizer.rasterized_triangle_count == 0u);
+    CHECK(memcmp(region_depth, full_depth, depth_bytes) == 0);
+
+    invalid_region = prepared.data[0].bounds;
+    invalid_region.minimum_x = invalid_region.end_x + 1u;
+    CHECK(soc_rasterizer_rasterize_prepared_region(
+        &region_rasterizer,
+        &prepared.data[0],
+        &invalid_region
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+    invalid_prepared = prepared.data[0];
+    invalid_prepared.bounds.end_x = WIDTH + 1u;
+    CHECK(soc_rasterizer_rasterize_prepared_region(
+        &region_rasterizer,
+        &invalid_prepared,
+        &region
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+    region.minimum_x = 5u;
+    region.minimum_y = 3u;
+    region.end_x = 5u;
+    region.end_y = 17u;
+    CHECK(soc_rasterizer_rasterize_prepared_region(
+        &region_rasterizer,
+        &prepared.data[0],
+        &region
+    ) == SOC_RESULT_OK);
+    CHECK(memcmp(region_depth, full_depth, depth_bytes) == 0);
+
+    CHECK(soc_rasterizer_end_frame(&region_rasterizer) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_begin_frame(
+        &region_rasterizer,
+        &frame
+    ) == SOC_RESULT_OK);
+    region.minimum_x = 0u;
+    region.minimum_y = 0u;
+    region.end_x = 32u;
+    region.end_y = 32u;
+    CHECK(soc_rasterizer_rasterize_prepared_region(
+        &region_rasterizer,
+        &prepared.data[0],
+        &region
+    ) == SOC_RESULT_OK);
+    for (pixel = 0u; pixel < pixel_count; ++pixel) {
+        const uint32_t x = (uint32_t)(pixel % WIDTH);
+        const uint32_t y = (uint32_t)(pixel / WIDTH);
+
+        if (x < 32u && y < 32u) {
+            if (float_bits(region_depth[pixel]) != clear_bits) {
+                ++fragment_covered;
+            }
+        } else {
+            CHECK(float_bits(region_depth[pixel]) == clear_bits);
+        }
+    }
+    CHECK(fragment_covered > 0u);
+    CHECK(region_rasterizer.clipped_triangle_count == 0u);
+    CHECK(region_rasterizer.rasterized_triangle_count == 0u);
+
+    CHECK(soc_rasterizer_end_frame(&region_rasterizer) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_begin_frame(
+        &region_rasterizer,
+        &frame
+    ) == SOC_RESULT_OK);
+    region = prepared.data[0].bounds;
+    CHECK(soc_rasterizer_rasterize_prepared_region(
+        &region_rasterizer,
+        &prepared.data[0],
+        &region
+    ) == SOC_RESULT_OK);
+    CHECK(memcmp(region_depth, full_depth, depth_bytes) == 0);
+    CHECK(soc_rasterizer_end_frame(&region_rasterizer) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_rasterize_prepared_region(
+        &region_rasterizer,
+        &prepared.data[0],
+        &region
+    ) == SOC_RESULT_INVALID_STATE);
+
+    CHECK(soc_rasterizer_end_frame(&full_rasterizer) == SOC_RESULT_OK);
+    soc_rasterizer_shutdown(&region_rasterizer);
+    soc_rasterizer_shutdown(&full_rasterizer);
+    soc_raster_prepared_list_shutdown(&prepared);
+    free(region_depth);
+    free(full_depth);
+    return 0;
+}
+
+static int test_prepared_region_replay(void)
+{
+    CHECK(check_prepared_region_replay(SOC_DEPTH_FORWARD) == 0);
+    CHECK(check_prepared_region_replay(SOC_DEPTH_REVERSED) == 0);
+    return 0;
+}
+
+static int check_prepared_target_replay(
+    soc_depth_direction depth_direction
+)
+{
+    enum {
+        WIDTH = 67,
+        HEIGHT = 65,
+        LOCAL_WIDTH = 32,
+        LOCAL_HEIGHT = 32,
+        LOCAL_STRIDE = 35,
+        LOCAL_ELEMENT_COUNT = LOCAL_STRIDE * LOCAL_HEIGHT,
+        LOCAL_REQUIRED_COUNT =
+            (LOCAL_HEIGHT - 1) * LOCAL_STRIDE + LOCAL_WIDTH,
+        LOCAL_STORAGE_COUNT =
+            LOCAL_ELEMENT_COUNT + CANARY_WORD_COUNT * 2u,
+    };
+    static const screen_vertex constant_triangle[3] = {
+        {1.0, 1.0, 0.62f},
+        {66.8, 64.9, 0.62f},
+        {1.0, 64.9, 0.62f},
+    };
+    static const screen_vertex varying_triangle[3] = {
+        {1.0, 1.0, 0.18f},
+        {66.8, 64.9, 0.82f},
+        {1.0, 64.9, 0.41f},
+    };
+    const size_t pixel_count = (size_t)WIDTH * HEIGHT;
+    const size_t depth_bytes = pixel_count * sizeof(float);
+    const soc_mat4 identity = identity_matrix();
+    const soc_frame_desc frame = make_frame_desc(
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        depth_direction
+    );
+    const float clear_depth = clear_depth_for(depth_direction);
+    const uint32_t canary_bits = UINT32_C(0x7fc12345);
+    const float canary = float_from_bits(canary_bits);
+    uint32_t indices[] = {0u, 1u, 2u, 3u, 4u, 5u};
+    float positions[18];
+    float* full_depth = malloc(depth_bytes);
+    float* assembled_depth = malloc(depth_bytes);
+    float local_storage[LOCAL_STORAGE_COUNT];
+    float* local_depth = local_storage + CANARY_WORD_COUNT;
+    soc_mesh mesh;
+    soc_raster_prepared_list prepared = {0};
+    soc_rasterizer full_rasterizer;
+    soc_rasterizer target_rasterizer;
+    soc_raster_prepared_region region;
+    soc_raster_target target;
+    soc_raster_target invalid_target;
+    size_t local_index;
+    size_t pixel;
+    uint32_t tile_y;
+
+    CHECK(full_depth != NULL);
+    CHECK(assembled_depth != NULL);
+    write_triangle(
+        positions,
+        WIDTH,
+        HEIGHT,
+        constant_triangle,
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
+    );
+    write_triangle(
+        positions + 9u,
+        WIDTH,
+        HEIGHT,
+        varying_triangle,
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
+    );
+    mesh = make_mesh(
+        positions,
+        6u,
+        indices,
+        (uint32_t)ARRAY_COUNT(indices)
+    );
+
+    CHECK(soc_rasterizer_initialize(
+        &full_rasterizer,
+        WIDTH,
+        HEIGHT,
+        full_depth,
+        pixel_count,
+        soc_kernel_table_scalar()
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_begin_frame(
+        &full_rasterizer,
+        &frame
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_prepare_occluder_triangles(
+        &full_rasterizer,
+        &mesh,
+        &identity,
+        0u,
+        2u,
+        &prepared
+    ) == SOC_RESULT_OK);
+    CHECK(prepared.count == 2u);
+    CHECK(soc_rasterizer_rasterize_prepared_triangles(
+        &full_rasterizer,
+        prepared.data,
+        prepared.count
+    ) == SOC_RESULT_OK);
+
+    CHECK(soc_rasterizer_initialize(
+        &target_rasterizer,
+        WIDTH,
+        HEIGHT,
+        assembled_depth,
+        pixel_count,
+        soc_kernel_table_scalar()
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_begin_frame(
+        &target_rasterizer,
+        &frame
+    ) == SOC_RESULT_OK);
+
+    memset(&target, 0, sizeof(target));
+    target.depth = local_depth;
+    target.row_stride = LOCAL_STRIDE;
+    target.element_count = LOCAL_ELEMENT_COUNT;
+    target.width = LOCAL_WIDTH;
+    target.height = LOCAL_HEIGHT;
+    for (tile_y = 0u; tile_y < HEIGHT; tile_y += LOCAL_HEIGHT) {
+        uint32_t tile_x;
+
+        for (tile_x = 0u; tile_x < WIDTH; tile_x += LOCAL_WIDTH) {
+            uint32_t local_y;
+            size_t prepared_index;
+
+            for (local_index = 0u;
+                 local_index < LOCAL_STORAGE_COUNT;
+                 ++local_index) {
+                local_storage[local_index] = canary;
+            }
+            for (local_y = 0u; local_y < LOCAL_HEIGHT; ++local_y) {
+                uint32_t local_x;
+
+                for (local_x = 0u; local_x < LOCAL_WIDTH; ++local_x) {
+                    local_depth[(size_t)local_y * LOCAL_STRIDE + local_x] =
+                        clear_depth;
+                }
+            }
+
+            region.minimum_x = tile_x;
+            region.minimum_y = tile_y;
+            region.end_x = tile_x + LOCAL_WIDTH < WIDTH
+                ? tile_x + LOCAL_WIDTH
+                : WIDTH;
+            region.end_y = tile_y + LOCAL_HEIGHT < HEIGHT
+                ? tile_y + LOCAL_HEIGHT
+                : HEIGHT;
+            target.origin_x = tile_x;
+            target.origin_y = tile_y;
+            for (prepared_index = 0u;
+                 prepared_index < prepared.count;
+                 ++prepared_index) {
+                CHECK(soc_rasterizer_rasterize_prepared_region_to_target(
+                    &target_rasterizer,
+                    &prepared.data[prepared_index],
+                    &region,
+                    &target
+                ) == SOC_RESULT_OK);
+            }
+
+            for (local_index = 0u;
+                 local_index < CANARY_WORD_COUNT;
+                 ++local_index) {
+                CHECK(float_bits(local_storage[local_index]) == canary_bits);
+                CHECK(float_bits(local_storage[
+                    CANARY_WORD_COUNT + LOCAL_ELEMENT_COUNT + local_index
+                ]) == canary_bits);
+            }
+            for (local_y = 0u; local_y < LOCAL_HEIGHT; ++local_y) {
+                uint32_t padding_x;
+
+                for (padding_x = LOCAL_WIDTH;
+                     padding_x < LOCAL_STRIDE;
+                     ++padding_x) {
+                    CHECK(float_bits(local_depth[
+                        (size_t)local_y * LOCAL_STRIDE + padding_x
+                    ]) == canary_bits);
+                }
+            }
+            for (local_y = 0u;
+                 local_y < region.end_y - region.minimum_y;
+                 ++local_y) {
+                uint32_t local_x;
+
+                for (local_x = 0u;
+                     local_x < region.end_x - region.minimum_x;
+                     ++local_x) {
+                    assembled_depth[
+                        (size_t)(region.minimum_y + local_y) * WIDTH +
+                            region.minimum_x + local_x
+                    ] = local_depth[
+                        (size_t)local_y * LOCAL_STRIDE + local_x
+                    ];
+                }
+            }
+        }
+    }
+
+    CHECK(memcmp(assembled_depth, full_depth, depth_bytes) == 0);
+    CHECK(target_rasterizer.clipped_triangle_count == 0u);
+    CHECK(target_rasterizer.rasterized_triangle_count == 0u);
+
+    for (tile_y = 0u; tile_y < HEIGHT; tile_y += LOCAL_HEIGHT) {
+        uint32_t tile_x;
+
+        for (tile_x = 0u; tile_x < WIDTH; tile_x += LOCAL_WIDTH) {
+            uint32_t local_y;
+            size_t prepared_index;
+
+            for (local_index = 0u;
+                 local_index < LOCAL_STORAGE_COUNT;
+                 ++local_index) {
+                local_storage[local_index] = canary;
+            }
+            for (local_y = 0u; local_y < LOCAL_HEIGHT; ++local_y) {
+                uint32_t local_x;
+
+                for (local_x = 0u; local_x < LOCAL_WIDTH; ++local_x) {
+                    local_depth[(size_t)local_y * LOCAL_STRIDE + local_x] =
+                        clear_depth;
+                }
+            }
+
+            region.minimum_x = tile_x;
+            region.minimum_y = tile_y;
+            region.end_x = tile_x + LOCAL_WIDTH < WIDTH
+                ? tile_x + LOCAL_WIDTH
+                : WIDTH;
+            region.end_y = tile_y + LOCAL_HEIGHT < HEIGHT
+                ? tile_y + LOCAL_HEIGHT
+                : HEIGHT;
+            target.origin_x = tile_x;
+            target.origin_y = tile_y;
+            for (prepared_index = 0u;
+                 prepared_index < prepared.count;
+                 ++prepared_index) {
+                soc_rasterizer_rasterize_prepared_region_to_target_unchecked(
+                    &target_rasterizer,
+                    &prepared.data[prepared_index],
+                    &region,
+                    &target
+                );
+            }
+
+            for (local_index = 0u;
+                 local_index < CANARY_WORD_COUNT;
+                 ++local_index) {
+                CHECK(float_bits(local_storage[local_index]) == canary_bits);
+                CHECK(float_bits(local_storage[
+                    CANARY_WORD_COUNT + LOCAL_ELEMENT_COUNT + local_index
+                ]) == canary_bits);
+            }
+            for (local_y = 0u; local_y < LOCAL_HEIGHT; ++local_y) {
+                uint32_t padding_x;
+
+                for (padding_x = LOCAL_WIDTH;
+                     padding_x < LOCAL_STRIDE;
+                     ++padding_x) {
+                    CHECK(float_bits(local_depth[
+                        (size_t)local_y * LOCAL_STRIDE + padding_x
+                    ]) == canary_bits);
+                }
+            }
+            for (local_y = 0u;
+                 local_y < region.end_y - region.minimum_y;
+                 ++local_y) {
+                uint32_t local_x;
+
+                for (local_x = 0u;
+                     local_x < region.end_x - region.minimum_x;
+                     ++local_x) {
+                    assembled_depth[
+                        (size_t)(region.minimum_y + local_y) * WIDTH +
+                            region.minimum_x + local_x
+                    ] = local_depth[
+                        (size_t)local_y * LOCAL_STRIDE + local_x
+                    ];
+                }
+            }
+        }
+    }
+
+    CHECK(memcmp(assembled_depth, full_depth, depth_bytes) == 0);
+    CHECK(target_rasterizer.clipped_triangle_count == 0u);
+    CHECK(target_rasterizer.rasterized_triangle_count == 0u);
+
+    CHECK(soc_rasterizer_rasterize_prepared_region_to_target(
+        NULL,
+        &prepared.data[0],
+        &region,
+        &target
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+    CHECK(soc_rasterizer_rasterize_prepared_region_to_target(
+        &target_rasterizer,
+        &prepared.data[0],
+        &region,
+        NULL
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+
+    invalid_target = target;
+    invalid_target.depth = NULL;
+    CHECK(soc_rasterizer_rasterize_prepared_region_to_target(
+        &target_rasterizer,
+        &prepared.data[0],
+        &region,
+        &invalid_target
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+    invalid_target = target;
+    invalid_target.row_stride = LOCAL_WIDTH - 1u;
+    CHECK(soc_rasterizer_rasterize_prepared_region_to_target(
+        &target_rasterizer,
+        &prepared.data[0],
+        &region,
+        &invalid_target
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+    invalid_target = target;
+    invalid_target.element_count = LOCAL_REQUIRED_COUNT - 1u;
+    CHECK(soc_rasterizer_rasterize_prepared_region_to_target(
+        &target_rasterizer,
+        &prepared.data[0],
+        &region,
+        &invalid_target
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+    invalid_target = target;
+    invalid_target.origin_x = region.minimum_x + 1u;
+    CHECK(soc_rasterizer_rasterize_prepared_region_to_target(
+        &target_rasterizer,
+        &prepared.data[0],
+        &region,
+        &invalid_target
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+    invalid_target = target;
+    invalid_target.origin_x = UINT32_MAX - 15u;
+    CHECK(soc_rasterizer_rasterize_prepared_region_to_target(
+        &target_rasterizer,
+        &prepared.data[0],
+        &region,
+        &invalid_target
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+    invalid_target = target;
+    invalid_target.origin_x = 0u;
+    invalid_target.origin_y = 0u;
+    invalid_target.width = 1u;
+    invalid_target.height = 3u;
+    invalid_target.row_stride = SIZE_MAX / 2u + 1u;
+    invalid_target.element_count = SIZE_MAX;
+    CHECK(soc_rasterizer_rasterize_prepared_region_to_target(
+        &target_rasterizer,
+        &prepared.data[0],
+        &region,
+        &invalid_target
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+
+    for (pixel = 0u; pixel < pixel_count; ++pixel) {
+        CHECK(float_bits(assembled_depth[pixel]) ==
+            float_bits(full_depth[pixel]));
+    }
+    CHECK(soc_rasterizer_end_frame(&target_rasterizer) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_rasterize_prepared_region_to_target(
+        &target_rasterizer,
+        &prepared.data[0],
+        &region,
+        &target
+    ) == SOC_RESULT_INVALID_STATE);
+    CHECK(soc_rasterizer_end_frame(&full_rasterizer) == SOC_RESULT_OK);
+
+    soc_rasterizer_shutdown(&target_rasterizer);
+    soc_rasterizer_shutdown(&full_rasterizer);
+    soc_raster_prepared_list_shutdown(&prepared);
+    free(assembled_depth);
+    free(full_depth);
+    return 0;
+}
+
+static int test_prepared_target_replay(void)
+{
+    CHECK(check_prepared_target_replay(SOC_DEPTH_FORWARD) == 0);
+    CHECK(check_prepared_target_replay(SOC_DEPTH_REVERSED) == 0);
     return 0;
 }
 
@@ -2428,6 +3199,9 @@ static int test_shared_tile_locks_and_no_clear_begin(void)
 
 int main(void)
 {
+    if (test_compact_prepared_edges_are_integer_exact() != 0) {
+        return 1;
+    }
     if (test_q8_snapped_coverage_and_depth_are_conservative() != 0) {
         return 1;
     }
@@ -2468,6 +3242,12 @@ int main(void)
         return 1;
     }
     if (test_prepared_list_and_invalid_state_semantics() != 0) {
+        return 1;
+    }
+    if (test_prepared_region_replay() != 0) {
+        return 1;
+    }
+    if (test_prepared_target_replay() != 0) {
         return 1;
     }
     if (test_shared_tile_locks_and_no_clear_begin() != 0) {

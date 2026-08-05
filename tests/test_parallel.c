@@ -141,6 +141,65 @@ static soc_result create_chunked_mesh(
     return soc_mesh_create(context, &desc, out_mesh);
 }
 
+static soc_result create_tiled_hot_mesh(
+    soc_context* context,
+    soc_mesh** out_mesh
+)
+{
+    enum {
+        HOT_TRIANGLE_COUNT = 1100,
+        TRIANGLE_COUNT = HOT_TRIANGLE_COUNT + 2,
+        INDEX_COUNT = TRIANGLE_COUNT * 3,
+    };
+    static const float vertices[] = {
+        /* Hot tile (column 7, row 7), with competing depths. */
+        -0.28f,  0.24f, 0.25f,
+        -0.24f,  0.24f, 0.25f,
+        -0.26f,  0.28f, 0.25f,
+        -0.28f,  0.24f, 0.75f,
+        -0.24f,  0.24f, 0.75f,
+        -0.26f,  0.28f, 0.75f,
+        /* Normal tile in the same tile row (column 9, row 7). */
+        -0.10f,  0.24f, 0.50f,
+        -0.06f,  0.24f, 0.50f,
+        -0.08f,  0.28f, 0.50f,
+        /* Normal-only tile row (column 9, row 12). */
+        -0.10f, -0.28f, 0.60f,
+        -0.06f, -0.28f, 0.60f,
+        -0.08f, -0.24f, 0.60f,
+    };
+    uint16_t indices[INDEX_COUNT];
+    soc_mesh_desc desc;
+    uint32_t triangle;
+
+    for (triangle = 0u; triangle < HOT_TRIANGLE_COUNT; ++triangle) {
+        const uint16_t first_vertex =
+            (uint16_t)((triangle % 2u) * 3u);
+        const uint32_t first_index = triangle * 3u;
+
+        indices[first_index] = first_vertex;
+        indices[first_index + 1u] = (uint16_t)(first_vertex + 1u);
+        indices[first_index + 2u] = (uint16_t)(first_vertex + 2u);
+    }
+    indices[HOT_TRIANGLE_COUNT * 3u] = 6u;
+    indices[HOT_TRIANGLE_COUNT * 3u + 1u] = 7u;
+    indices[HOT_TRIANGLE_COUNT * 3u + 2u] = 8u;
+    indices[(HOT_TRIANGLE_COUNT + 1u) * 3u] = 9u;
+    indices[(HOT_TRIANGLE_COUNT + 1u) * 3u + 1u] = 10u;
+    indices[(HOT_TRIANGLE_COUNT + 1u) * 3u + 2u] = 11u;
+
+    desc.struct_size = sizeof(desc);
+    desc.flags = SOC_MESH_FLAG_TWO_SIDED;
+    desc.vertices = vertices;
+    desc.indices = indices;
+    desc.vertex_count = 12u;
+    desc.vertex_stride = 3u * sizeof(float);
+    desc.position_offset = 0u;
+    desc.index_count = INDEX_COUNT;
+    desc.index_type = SOC_INDEX_UINT16;
+    return soc_mesh_create(context, &desc, out_mesh);
+}
+
 static soc_frame_desc make_frame(soc_depth_direction depth_direction)
 {
     const soc_frame_desc frame = {
@@ -425,6 +484,99 @@ static int test_chunked_mesh_results_match(
     return 0;
 }
 
+static int test_tiled_hot_merge_results_match(
+    soc_depth_direction depth_direction
+)
+{
+    enum {
+        HOT_TRIANGLE_COUNT = 1100,
+        TRIANGLE_COUNT = HOT_TRIANGLE_COUNT + 2,
+    };
+    const soc_mat4 transform = identity_matrix();
+    const soc_frame_desc frame = make_frame(depth_direction);
+    soc_occluder_group single_group;
+    soc_occluder_group parallel_group;
+    soc_occlusion_build_desc single_desc;
+    soc_occlusion_build_desc parallel_desc;
+    soc_build_stats stats = {
+        .struct_size = sizeof(soc_build_stats),
+    };
+    soc_context* single_context = NULL;
+    soc_context* parallel_context = NULL;
+    soc_mesh* single_mesh = NULL;
+    soc_mesh* parallel_mesh = NULL;
+    soc_snapshot* single_snapshot = NULL;
+    soc_snapshot* parallel_snapshot = NULL;
+
+    /*
+     * With four workers, 1102 source triangles form five private work items,
+     * below the selector's 4 * 4 private threshold, so this build is tiled.
+     * The first 1100 prepared records occupy one tile, exceeding the 1024
+     * hot threshold. The final records create a normal tile in that hot row
+     * and a normal-only row; the 641x643 target also leaves empty and tail
+     * tile rows for the fused row-HiZ paths.
+     */
+    CHECK_RESULT(create_context(1u, &single_context), SOC_RESULT_OK);
+    CHECK_RESULT(create_context(4u, &parallel_context), SOC_RESULT_OK);
+    CHECK_RESULT(
+        create_tiled_hot_mesh(single_context, &single_mesh),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        create_tiled_hot_mesh(parallel_context, &parallel_mesh),
+        SOC_RESULT_OK
+    );
+
+    single_group.mesh = single_mesh;
+    single_group.object_to_world = &transform;
+    single_group.instance_count = 1u;
+    single_group.flags = SOC_OCCLUDER_GROUP_FLAG_NONE;
+    parallel_group = single_group;
+    parallel_group.mesh = parallel_mesh;
+
+    single_desc.struct_size = sizeof(single_desc);
+    single_desc.flags = SOC_OCCLUSION_BUILD_FLAG_NONE;
+    single_desc.frame = &frame;
+    single_desc.groups = &single_group;
+    single_desc.group_count = 1u;
+    single_desc.group_stride = sizeof(single_group);
+    parallel_desc = single_desc;
+    parallel_desc.groups = &parallel_group;
+
+    CHECK_RESULT(
+        soc_occlusion_build(
+            single_context,
+            &single_desc,
+            &single_snapshot
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        soc_occlusion_build(
+            parallel_context,
+            &parallel_desc,
+            &parallel_snapshot
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK(compare_snapshots(single_snapshot, parallel_snapshot) == 0);
+    CHECK_RESULT(
+        soc_snapshot_get_build_stats(parallel_snapshot, &stats),
+        SOC_RESULT_OK
+    );
+    CHECK(stats.input_triangle_count == TRIANGLE_COUNT);
+    CHECK(stats.clipped_triangle_count == 0u);
+    CHECK(stats.rasterized_triangle_count == TRIANGLE_COUNT);
+
+    soc_snapshot_destroy(parallel_snapshot);
+    soc_snapshot_destroy(single_snapshot);
+    CHECK_RESULT(soc_mesh_destroy(parallel_mesh), SOC_RESULT_OK);
+    CHECK_RESULT(soc_mesh_destroy(single_mesh), SOC_RESULT_OK);
+    soc_context_destroy(parallel_context);
+    soc_context_destroy(single_context);
+    return 0;
+}
+
 int main(void)
 {
     if (test_worker_results_match(SOC_DEPTH_FORWARD) != 0) {
@@ -436,5 +588,11 @@ int main(void)
     if (test_chunked_mesh_results_match(SOC_DEPTH_FORWARD) != 0) {
         return 1;
     }
-    return test_chunked_mesh_results_match(SOC_DEPTH_REVERSED);
+    if (test_chunked_mesh_results_match(SOC_DEPTH_REVERSED) != 0) {
+        return 1;
+    }
+    if (test_tiled_hot_merge_results_match(SOC_DEPTH_FORWARD) != 0) {
+        return 1;
+    }
+    return test_tiled_hot_merge_results_match(SOC_DEPTH_REVERSED);
 }

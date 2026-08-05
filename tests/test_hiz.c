@@ -579,6 +579,295 @@ static int test_depth_direction_rebuild_across_frames(void)
     return 0;
 }
 
+static int compare_split_band_pyramid(
+    uint32_t width,
+    uint32_t height,
+    soc_depth_direction depth_direction
+)
+{
+    soc_hiz serial = {0};
+    soc_hiz split = {0};
+    soc_hiz unchecked = {0};
+    float* serial_level_zero;
+    float* split_level_zero;
+    float* unchecked_level_zero;
+    uint32_t band_count;
+    uint32_t band_index;
+    size_t byte_count;
+    size_t index;
+
+    CHECK_RESULT(soc_hiz_initialize(&serial, width, height), SOC_RESULT_OK);
+    CHECK_RESULT(soc_hiz_initialize(&split, width, height), SOC_RESULT_OK);
+    CHECK_RESULT(
+        soc_hiz_initialize(&unchecked, width, height),
+        SOC_RESULT_OK
+    );
+    CHECK(serial.element_count == split.element_count);
+    CHECK(serial.level_count == split.level_count);
+    CHECK(serial.element_count == unchecked.element_count);
+    CHECK(serial.level_count == unchecked.level_count);
+
+    serial_level_zero = soc_hiz_level_data(&serial, 0u);
+    split_level_zero = soc_hiz_level_data(&split, 0u);
+    unchecked_level_zero = soc_hiz_level_data(&unchecked, 0u);
+    CHECK(serial_level_zero != NULL);
+    CHECK(split_level_zero != NULL);
+    CHECK(unchecked_level_zero != NULL);
+    for (index = 0u; index < serial.levels[0].element_count; ++index) {
+        serial_level_zero[index] = (float)(
+            (index * 53u + (size_t)width * 19u + height * 7u) % 1021u
+        ) / 1020.0f;
+    }
+    memcpy(
+        split_level_zero,
+        serial_level_zero,
+        serial.levels[0].element_count * sizeof(*serial_level_zero)
+    );
+    memcpy(
+        unchecked_level_zero,
+        serial_level_zero,
+        serial.levels[0].element_count * sizeof(*serial_level_zero)
+    );
+
+    CHECK_RESULT(
+        soc_hiz_build_with_kernels(
+            &serial,
+            depth_direction,
+            soc_kernel_table_scalar()
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        soc_hiz_lower_band_count(&split, &band_count),
+        SOC_RESULT_OK
+    );
+    CHECK(band_count == height / SOC_HIZ_LOWER_BAND_HEIGHT +
+        (height % SOC_HIZ_LOWER_BAND_HEIGHT != 0u ? 1u : 0u));
+
+    /* Bands are independent; reverse order catches accidental dependencies. */
+    for (band_index = band_count; band_index != 0u; --band_index) {
+        CHECK_RESULT(
+            soc_hiz_build_lower_band_with_kernels(
+                &split,
+                depth_direction,
+                soc_kernel_table_scalar(),
+                band_index - 1u
+            ),
+            SOC_RESULT_OK
+        );
+        soc_hiz_build_lower_band_unchecked_with_kernels(
+            &unchecked,
+            depth_direction,
+            soc_kernel_table_scalar(),
+            band_index - 1u
+        );
+    }
+    CHECK_RESULT(
+        soc_hiz_build_upper_levels_with_kernels(
+            &split,
+            depth_direction,
+            soc_kernel_table_scalar()
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        soc_hiz_build_upper_levels_with_kernels(
+            &unchecked,
+            depth_direction,
+            soc_kernel_table_scalar()
+        ),
+        SOC_RESULT_OK
+    );
+
+    CHECK(serial.element_count <= SIZE_MAX / sizeof(*serial.data));
+    byte_count = serial.element_count * sizeof(*serial.data);
+    CHECK(memcmp(serial.data, split.data, byte_count) == 0);
+    CHECK(memcmp(split.data, unchecked.data, byte_count) == 0);
+
+    soc_hiz_shutdown(&unchecked);
+    soc_hiz_shutdown(&split);
+    soc_hiz_shutdown(&serial);
+    return 0;
+}
+
+static int test_split_band_build_matches_serial(void)
+{
+    static const struct {
+        uint32_t width;
+        uint32_t height;
+    } shapes[] = {
+        {1u, 1u},
+        {19u, 15u},
+        {19u, 16u},
+        {19u, 17u},
+        {33u, 33u},
+        {7u, 65u},
+        {1025u, 1u},
+        {641u, 63u},
+    };
+    const soc_depth_direction directions[] = {
+        SOC_DEPTH_FORWARD,
+        SOC_DEPTH_REVERSED,
+    };
+    size_t direction_index;
+    size_t shape_index;
+
+    CHECK(SOC_HIZ_LOWER_BAND_HEIGHT == 16u);
+    CHECK(SOC_HIZ_LOWER_LEVEL_COUNT == 4u);
+    for (direction_index = 0u;
+         direction_index < ARRAY_COUNT(directions);
+         ++direction_index) {
+        for (shape_index = 0u;
+             shape_index < ARRAY_COUNT(shapes);
+             ++shape_index) {
+            CHECK(compare_split_band_pyramid(
+                shapes[shape_index].width,
+                shapes[shape_index].height,
+                directions[direction_index]
+            ) == 0);
+        }
+    }
+    return 0;
+}
+
+static int test_split_band_api_validation(void)
+{
+    const soc_kernel_table* kernels = soc_kernel_table_scalar();
+    soc_kernel_table missing_reduce = *kernels;
+    soc_hiz uninitialized = {0};
+    soc_hiz hiz = {0};
+    soc_hiz synthetic = {0};
+    float synthetic_data = 0.0f;
+    uint32_t band_count = 99u;
+
+    missing_reduce.reduce_hiz_level_f32 = NULL;
+    CHECK_RESULT(
+        soc_hiz_lower_band_count(NULL, &band_count),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+    CHECK_RESULT(
+        soc_hiz_lower_band_count(&uninitialized, &band_count),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+    CHECK_RESULT(
+        soc_hiz_lower_band_count(&uninitialized, NULL),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+
+    CHECK_RESULT(soc_hiz_initialize(&hiz, 33u, 17u), SOC_RESULT_OK);
+    CHECK_RESULT(
+        soc_hiz_clear_level_zero(&hiz, SOC_DEPTH_FORWARD),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        soc_hiz_lower_band_count(&hiz, NULL),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+    CHECK_RESULT(soc_hiz_lower_band_count(&hiz, &band_count), SOC_RESULT_OK);
+    CHECK(band_count == 2u);
+    CHECK_RESULT(
+        soc_hiz_build_lower_band_with_kernels(
+            NULL,
+            SOC_DEPTH_FORWARD,
+            kernels,
+            0u
+        ),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+    CHECK_RESULT(
+        soc_hiz_build_lower_band_with_kernels(
+            &hiz,
+            (soc_depth_direction)99,
+            kernels,
+            0u
+        ),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+    CHECK_RESULT(
+        soc_hiz_build_lower_band_with_kernels(
+            &hiz,
+            SOC_DEPTH_FORWARD,
+            NULL,
+            0u
+        ),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+    CHECK_RESULT(
+        soc_hiz_build_lower_band_with_kernels(
+            &hiz,
+            SOC_DEPTH_FORWARD,
+            &missing_reduce,
+            0u
+        ),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+    CHECK_RESULT(
+        soc_hiz_build_lower_band_with_kernels(
+            &hiz,
+            SOC_DEPTH_FORWARD,
+            kernels,
+            band_count
+        ),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+    CHECK_RESULT(
+        soc_hiz_build_upper_levels_with_kernels(
+            NULL,
+            SOC_DEPTH_FORWARD,
+            kernels
+        ),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+    CHECK_RESULT(
+        soc_hiz_build_upper_levels_with_kernels(
+            &hiz,
+            (soc_depth_direction)99,
+            kernels
+        ),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+    CHECK_RESULT(
+        soc_hiz_build_upper_levels_with_kernels(
+            &hiz,
+            SOC_DEPTH_FORWARD,
+            &missing_reduce
+        ),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+    soc_hiz_shutdown(&hiz);
+
+    /* The final partial band must not overflow at UINT32_MAX height. */
+    synthetic.initialized = SOC_TRUE;
+    synthetic.data = &synthetic_data;
+    synthetic.level_count = 1u;
+    synthetic.levels[0].width = 1u;
+    synthetic.levels[0].height = UINT32_MAX;
+    CHECK_RESULT(
+        soc_hiz_lower_band_count(&synthetic, &band_count),
+        SOC_RESULT_OK
+    );
+    CHECK(band_count == UINT32_MAX / SOC_HIZ_LOWER_BAND_HEIGHT + 1u);
+    CHECK_RESULT(
+        soc_hiz_build_lower_band_with_kernels(
+            &synthetic,
+            SOC_DEPTH_FORWARD,
+            kernels,
+            band_count - 1u
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        soc_hiz_build_lower_band_with_kernels(
+            &synthetic,
+            SOC_DEPTH_FORWARD,
+            kernels,
+            band_count
+        ),
+        SOC_RESULT_INVALID_ARGUMENT
+    );
+    return 0;
+}
+
 static int compare_parallel_pyramid(
     soc_thread_pool* thread_pool,
     uint32_t width,
@@ -725,6 +1014,12 @@ int main(void)
         return 1;
     }
     if (test_depth_direction_rebuild_across_frames() != 0) {
+        return 1;
+    }
+    if (test_split_band_build_matches_serial() != 0) {
+        return 1;
+    }
+    if (test_split_band_api_validation() != 0) {
         return 1;
     }
     return test_parallel_build_matches_serial();

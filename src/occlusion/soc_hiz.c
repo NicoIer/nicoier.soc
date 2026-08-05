@@ -7,9 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SOC_HIZ_PARALLEL_BAND_HEIGHT UINT32_C(16)
-#define SOC_HIZ_PARALLEL_LEVEL_COUNT UINT32_C(4)
-
 #if !defined(SOC_HIZ_PARALLEL_TARGET_ELEMENTS_PER_WORKER)
     #define SOC_HIZ_PARALLEL_TARGET_ELEMENTS_PER_WORKER ((size_t)393216u)
 #endif
@@ -299,6 +296,149 @@ typedef struct soc_hiz_parallel_build_state {
     uint32_t band_count;
 } soc_hiz_parallel_build_state;
 
+static soc_bool validate_hiz_build_arguments(
+    const soc_hiz* hiz,
+    soc_depth_direction depth_direction,
+    const struct soc_kernel_table* kernels
+)
+{
+    return hiz != NULL &&
+        hiz->initialized == SOC_TRUE &&
+        hiz->data != NULL &&
+        hiz->level_count != 0u &&
+        hiz->level_count <= SOC_HIZ_MAX_LEVEL_COUNT &&
+        hiz->levels[0].width != 0u &&
+        hiz->levels[0].height != 0u &&
+        kernels != NULL &&
+        kernels->reduce_hiz_level_f32 != NULL &&
+        (depth_direction == SOC_DEPTH_FORWARD ||
+            depth_direction == SOC_DEPTH_REVERSED);
+}
+
+static uint32_t lower_band_count_unchecked(const soc_hiz* hiz)
+{
+    return hiz->levels[0].height / SOC_HIZ_LOWER_BAND_HEIGHT +
+        (hiz->levels[0].height % SOC_HIZ_LOWER_BAND_HEIGHT != 0u ?
+            1u : 0u);
+}
+
+void soc_hiz_build_lower_band_unchecked_with_kernels(
+    soc_hiz* hiz,
+    soc_depth_direction depth_direction,
+    const struct soc_kernel_table* kernels,
+    uint32_t band_index
+)
+{
+    uint32_t source_row_begin =
+        band_index * SOC_HIZ_LOWER_BAND_HEIGHT;
+    const uint32_t remaining_source_rows =
+        hiz->levels[0].height - source_row_begin;
+    uint32_t source_row_end = source_row_begin +
+        (remaining_source_rows < SOC_HIZ_LOWER_BAND_HEIGHT ?
+            remaining_source_rows : SOC_HIZ_LOWER_BAND_HEIGHT);
+    uint32_t level;
+
+    for (level = 1u;
+         level <= SOC_HIZ_LOWER_LEVEL_COUNT && level < hiz->level_count;
+         ++level) {
+        const soc_hiz_level* source_level = &hiz->levels[level - 1u];
+        const soc_hiz_level* destination_level = &hiz->levels[level];
+        const uint32_t destination_row_begin = source_row_begin / 2u;
+        const uint32_t destination_row_end = halve_ceil(source_row_end);
+
+        /*
+         * A 16-row Level 0 boundary stays even through the first four
+         * reductions (16 -> 8 -> 4 -> 2). Each local reduction therefore
+         * has the same row pairing as the full-level kernel invocation.
+         */
+        kernels->reduce_hiz_level_f32(
+            hiz->data + source_level->offset +
+                (size_t)source_row_begin * source_level->width,
+            source_level->width,
+            source_row_end - source_row_begin,
+            hiz->data + destination_level->offset +
+                (size_t)destination_row_begin * destination_level->width,
+            depth_direction
+        );
+
+        source_row_begin = destination_row_begin;
+        source_row_end = destination_row_end;
+    }
+}
+
+soc_result soc_hiz_lower_band_count(
+    const soc_hiz* hiz,
+    uint32_t* out_band_count
+)
+{
+    if (hiz == NULL ||
+        hiz->initialized != SOC_TRUE ||
+        hiz->data == NULL ||
+        hiz->level_count == 0u ||
+        hiz->level_count > SOC_HIZ_MAX_LEVEL_COUNT ||
+        hiz->levels[0].width == 0u ||
+        hiz->levels[0].height == 0u ||
+        out_band_count == NULL) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+
+    *out_band_count = lower_band_count_unchecked(hiz);
+    return SOC_RESULT_OK;
+}
+
+soc_result soc_hiz_build_lower_band_with_kernels(
+    soc_hiz* hiz,
+    soc_depth_direction depth_direction,
+    const struct soc_kernel_table* kernels,
+    uint32_t band_index
+)
+{
+    if (validate_hiz_build_arguments(hiz, depth_direction, kernels) !=
+            SOC_TRUE ||
+        band_index >= lower_band_count_unchecked(hiz)) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+
+    soc_hiz_build_lower_band_unchecked_with_kernels(
+        hiz,
+        depth_direction,
+        kernels,
+        band_index
+    );
+    return SOC_RESULT_OK;
+}
+
+soc_result soc_hiz_build_upper_levels_with_kernels(
+    soc_hiz* hiz,
+    soc_depth_direction depth_direction,
+    const struct soc_kernel_table* kernels
+)
+{
+    uint32_t level;
+
+    if (validate_hiz_build_arguments(hiz, depth_direction, kernels) !=
+        SOC_TRUE) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+
+    for (level = SOC_HIZ_LOWER_LEVEL_COUNT + 1u;
+         level < hiz->level_count;
+         ++level) {
+        const soc_hiz_level* source_level = &hiz->levels[level - 1u];
+        const soc_hiz_level* destination_level = &hiz->levels[level];
+
+        kernels->reduce_hiz_level_f32(
+            hiz->data + source_level->offset,
+            source_level->width,
+            source_level->height,
+            hiz->data + destination_level->offset,
+            depth_direction
+        );
+    }
+
+    return SOC_RESULT_OK;
+}
+
 static void build_hiz_bands(
     void* user_data,
     uint32_t worker_index,
@@ -319,48 +459,12 @@ static void build_hiz_bands(
     for (band_index = band_begin;
          band_index < band_end;
          ++band_index) {
-        uint32_t source_row_begin =
-            band_index * SOC_HIZ_PARALLEL_BAND_HEIGHT;
-        uint32_t source_row_end =
-            source_row_begin + SOC_HIZ_PARALLEL_BAND_HEIGHT;
-        uint32_t level;
-
-        if (source_row_end > hiz->levels[0].height) {
-            source_row_end = hiz->levels[0].height;
-        }
-
-        for (level = 1u;
-             level <= SOC_HIZ_PARALLEL_LEVEL_COUNT &&
-                level < hiz->level_count;
-             ++level) {
-            const soc_hiz_level* source_level =
-                &hiz->levels[level - 1u];
-            const soc_hiz_level* destination_level =
-                &hiz->levels[level];
-            const uint32_t destination_row_begin =
-                source_row_begin / 2u;
-            const uint32_t destination_row_end =
-                halve_ceil(source_row_end);
-
-            /*
-             * A 16-row Level 0 boundary stays even through the first four
-             * reductions (16 -> 8 -> 4 -> 2). Each local reduction therefore
-             * has the same row pairing as the full-level kernel invocation.
-             */
-            state->kernels->reduce_hiz_level_f32(
-                hiz->data + source_level->offset +
-                    (size_t)source_row_begin * source_level->width,
-                source_level->width,
-                source_row_end - source_row_begin,
-                hiz->data + destination_level->offset +
-                    (size_t)destination_row_begin *
-                        destination_level->width,
-                state->depth_direction
-            );
-
-            source_row_begin = destination_row_begin;
-            source_row_end = destination_row_end;
-        }
+        soc_hiz_build_lower_band_unchecked_with_kernels(
+            hiz,
+            state->depth_direction,
+            state->kernels,
+            band_index
+        );
     }
 }
 
@@ -375,7 +479,6 @@ soc_result soc_hiz_build_parallel_with_kernels(
     size_t target_worker_count;
     uint32_t configured_worker_count;
     uint32_t active_worker_count;
-    uint32_t level;
 
     if (hiz == NULL ||
         hiz->initialized != SOC_TRUE ||
@@ -396,11 +499,7 @@ soc_result soc_hiz_build_parallel_with_kernels(
     state.hiz = hiz;
     state.kernels = kernels;
     state.depth_direction = depth_direction;
-    state.band_count =
-        hiz->levels[0].height / SOC_HIZ_PARALLEL_BAND_HEIGHT;
-    if (hiz->levels[0].height % SOC_HIZ_PARALLEL_BAND_HEIGHT != 0u) {
-        ++state.band_count;
-    }
+    state.band_count = lower_band_count_unchecked(hiz);
 
     active_worker_count = configured_worker_count;
     if (active_worker_count > SOC_HIZ_PARALLEL_MAX_WORKER_COUNT) {
@@ -434,22 +533,11 @@ soc_result soc_hiz_build_parallel_with_kernels(
         &state
     );
 
-    for (level = SOC_HIZ_PARALLEL_LEVEL_COUNT + 1u;
-         level < hiz->level_count;
-         ++level) {
-        const soc_hiz_level* source_level = &hiz->levels[level - 1u];
-        const soc_hiz_level* destination_level = &hiz->levels[level];
-
-        kernels->reduce_hiz_level_f32(
-            hiz->data + source_level->offset,
-            source_level->width,
-            source_level->height,
-            hiz->data + destination_level->offset,
-            depth_direction
-        );
-    }
-
-    return SOC_RESULT_OK;
+    return soc_hiz_build_upper_levels_with_kernels(
+        hiz,
+        depth_direction,
+        kernels
+    );
 }
 
 soc_result soc_hiz_build(

@@ -21,6 +21,138 @@
 #define SOC_NEON_FORCE_INLINE inline
 #endif
 
+#define SOC_DEFINE_MERGE_DEPTH_PLANES_F32_NEON_IMPL(name, compare) \
+static size_t name( \
+    float* level_zero, \
+    const float* scratch_planes, \
+    size_t element_count, \
+    size_t scratch_plane_stride, \
+    uint32_t lane_count \
+) \
+{ \
+    const uint32_t scratch_plane_count = lane_count - 1u; \
+    size_t element_index = 0u; \
+    while (element_count - element_index >= 32u) { \
+        float32x4_t merged0 = vld1q_f32(level_zero + element_index + 0u); \
+        float32x4_t merged1 = vld1q_f32(level_zero + element_index + 4u); \
+        float32x4_t merged2 = vld1q_f32(level_zero + element_index + 8u); \
+        float32x4_t merged3 = vld1q_f32(level_zero + element_index + 12u); \
+        float32x4_t merged4 = vld1q_f32(level_zero + element_index + 16u); \
+        float32x4_t merged5 = vld1q_f32(level_zero + element_index + 20u); \
+        float32x4_t merged6 = vld1q_f32(level_zero + element_index + 24u); \
+        float32x4_t merged7 = vld1q_f32(level_zero + element_index + 28u); \
+        const float* scratch = scratch_planes + element_index; \
+        uint32_t plane_index; \
+        for (plane_index = 0u; \
+             plane_index < scratch_plane_count; \
+             ++plane_index) { \
+            const float32x4_t candidate0 = vld1q_f32(scratch + 0u); \
+            const float32x4_t candidate1 = vld1q_f32(scratch + 4u); \
+            const float32x4_t candidate2 = vld1q_f32(scratch + 8u); \
+            const float32x4_t candidate3 = vld1q_f32(scratch + 12u); \
+            const float32x4_t candidate4 = vld1q_f32(scratch + 16u); \
+            const float32x4_t candidate5 = vld1q_f32(scratch + 20u); \
+            const float32x4_t candidate6 = vld1q_f32(scratch + 24u); \
+            const float32x4_t candidate7 = vld1q_f32(scratch + 28u); \
+            merged0 = vbslq_f32( \
+                compare(candidate0, merged0), candidate0, merged0); \
+            merged1 = vbslq_f32( \
+                compare(candidate1, merged1), candidate1, merged1); \
+            merged2 = vbslq_f32( \
+                compare(candidate2, merged2), candidate2, merged2); \
+            merged3 = vbslq_f32( \
+                compare(candidate3, merged3), candidate3, merged3); \
+            merged4 = vbslq_f32( \
+                compare(candidate4, merged4), candidate4, merged4); \
+            merged5 = vbslq_f32( \
+                compare(candidate5, merged5), candidate5, merged5); \
+            merged6 = vbslq_f32( \
+                compare(candidate6, merged6), candidate6, merged6); \
+            merged7 = vbslq_f32( \
+                compare(candidate7, merged7), candidate7, merged7); \
+            scratch += scratch_plane_stride; \
+        } \
+        vst1q_f32(level_zero + element_index + 0u, merged0); \
+        vst1q_f32(level_zero + element_index + 4u, merged1); \
+        vst1q_f32(level_zero + element_index + 8u, merged2); \
+        vst1q_f32(level_zero + element_index + 12u, merged3); \
+        vst1q_f32(level_zero + element_index + 16u, merged4); \
+        vst1q_f32(level_zero + element_index + 20u, merged5); \
+        vst1q_f32(level_zero + element_index + 24u, merged6); \
+        vst1q_f32(level_zero + element_index + 28u, merged7); \
+        element_index += 32u; \
+    } \
+    while (element_count - element_index >= 4u) { \
+        float32x4_t merged = vld1q_f32(level_zero + element_index); \
+        const float* scratch = scratch_planes + element_index; \
+        uint32_t plane_index; \
+        for (plane_index = 0u; \
+             plane_index < scratch_plane_count; \
+             ++plane_index) { \
+            const float32x4_t candidate = vld1q_f32(scratch); \
+            merged = vbslq_f32( \
+                compare(candidate, merged), candidate, merged); \
+            scratch += scratch_plane_stride; \
+        } \
+        vst1q_f32(level_zero + element_index, merged); \
+        element_index += 4u; \
+    } \
+    return element_index; \
+}
+
+SOC_DEFINE_MERGE_DEPTH_PLANES_F32_NEON_IMPL(
+    merge_depth_planes_f32_neon_reversed,
+    vcgtq_f32
+)
+
+SOC_DEFINE_MERGE_DEPTH_PLANES_F32_NEON_IMPL(
+    merge_depth_planes_f32_neon_forward,
+    vcltq_f32
+)
+
+#undef SOC_DEFINE_MERGE_DEPTH_PLANES_F32_NEON_IMPL
+
+static void merge_depth_planes_f32_neon(
+    float* level_zero,
+    const float* scratch_planes,
+    size_t element_count,
+    size_t scratch_plane_stride,
+    uint32_t lane_count,
+    soc_depth_direction depth_direction
+)
+{
+    size_t merged_element_count;
+
+    if (lane_count <= 1u || element_count == 0u) {
+        return;
+    }
+    merged_element_count = depth_direction == SOC_DEPTH_REVERSED
+        ? merge_depth_planes_f32_neon_reversed(
+            level_zero,
+            scratch_planes,
+            element_count,
+            scratch_plane_stride,
+            lane_count
+        )
+        : merge_depth_planes_f32_neon_forward(
+            level_zero,
+            scratch_planes,
+            element_count,
+            scratch_plane_stride,
+            lane_count
+        );
+    if (merged_element_count != element_count) {
+        soc_kernel_merge_depth_planes_f32_scalar(
+            level_zero + merged_element_count,
+            scratch_planes + merged_element_count,
+            element_count - merged_element_count,
+            scratch_plane_stride,
+            lane_count,
+            depth_direction
+        );
+    }
+}
+
 static float32x4_t reduce_depth_neon(
     float32x4_t accumulated,
     float32x4_t candidate,
@@ -565,6 +697,7 @@ static void transform_triangle_f64_neon(
 static const soc_kernel_table neon_kernels = {
     .backend = SOC_KERNEL_BACKEND_NEON,
     .clear_f32 = soc_kernel_clear_f32_scalar,
+    .merge_depth_planes_f32 = merge_depth_planes_f32_neon,
     .store_constant_depth_block_f32 =
         store_constant_depth_block_f32_neon,
     .store_depth_plane_block_f32 =

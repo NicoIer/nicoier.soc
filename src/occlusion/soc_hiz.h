@@ -9,6 +9,8 @@ struct soc_kernel_table;
 struct soc_thread_pool;
 
 #define SOC_HIZ_MAX_LEVEL_COUNT 33u
+#define SOC_HIZ_LOWER_BAND_HEIGHT 16u
+#define SOC_HIZ_LOWER_LEVEL_COUNT 4u
 
 typedef struct soc_hiz_level {
     uint32_t width;
@@ -46,6 +48,40 @@ soc_result soc_hiz_build(
 );
 
 soc_result soc_hiz_build_with_kernels(
+    soc_hiz* hiz,
+    soc_depth_direction depth_direction,
+    const struct soc_kernel_table* kernels
+);
+
+soc_result soc_hiz_lower_band_count(
+    const soc_hiz* hiz,
+    uint32_t* out_band_count
+);
+
+/*
+ * Distinct lower bands touch disjoint rows in Levels 1-4 and may be built in
+ * parallel. The caller must complete every lower band before building upper
+ * levels, which consume the complete Level 4 image.
+ */
+soc_result soc_hiz_build_lower_band_with_kernels(
+    soc_hiz* hiz,
+    soc_depth_direction depth_direction,
+    const struct soc_kernel_table* kernels,
+    uint32_t band_index
+);
+
+/*
+ * Unchecked hot-path variant. The caller must provide a valid initialized
+ * pyramid, depth direction, kernel table, and in-range band index.
+ */
+void soc_hiz_build_lower_band_unchecked_with_kernels(
+    soc_hiz* hiz,
+    soc_depth_direction depth_direction,
+    const struct soc_kernel_table* kernels,
+    uint32_t band_index
+);
+
+soc_result soc_hiz_build_upper_levels_with_kernels(
     soc_hiz* hiz,
     soc_depth_direction depth_direction,
     const struct soc_kernel_table* kernels

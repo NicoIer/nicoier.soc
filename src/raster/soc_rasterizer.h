@@ -27,13 +27,10 @@ typedef struct soc_raster_tile_locks {
  * replay identical to immediate rasterization without repeating setup work.
  */
 typedef struct soc_raster_prepared_edge {
-    int64_t start_x;
-    int64_t start_y;
-    int64_t delta_x;
-    int64_t delta_y;
+    /* Edge value, including top-left bias, at pixel sample (0.5, 0.5). */
+    int64_t sample_origin;
     int64_t step_x;
     int64_t step_y;
-    int64_t bias;
 } soc_raster_prepared_edge;
 
 typedef struct soc_raster_prepared_region {
@@ -43,15 +40,29 @@ typedef struct soc_raster_prepared_region {
     uint32_t end_y;
 } soc_raster_prepared_region;
 
+/* A depth image view whose origin is expressed in global framebuffer pixels. */
+typedef struct soc_raster_target {
+    float* depth;
+    size_t row_stride;
+    size_t element_count;
+    uint32_t origin_x;
+    uint32_t origin_y;
+    uint32_t width;
+    uint32_t height;
+} soc_raster_target;
+
 typedef struct soc_raster_prepared_triangle {
     soc_raster_prepared_edge edges[3];
     soc_raster_prepared_region bounds;
-    double depth_anchor_x;
-    double depth_anchor_y;
-    double depth_anchor;
+    /* Depth at pixel sample (0.5, 0.5). */
+    double depth_sample_origin;
     double depth_step_x;
     double depth_step_y;
     double depth_error_bound;
+    uint16_t first_tile_column;
+    uint16_t first_tile_row;
+    uint16_t end_tile_column;
+    uint16_t end_tile_row;
 } soc_raster_prepared_triangle;
 
 /* Zero initialization produces an empty, usable list. */
@@ -165,6 +176,52 @@ soc_result soc_rasterizer_rasterize_prepared_triangles(
     soc_rasterizer* rasterizer,
     const soc_raster_prepared_triangle* prepared,
     size_t prepared_count
+);
+
+/*
+ * Replays one setup record inside a global half-open pixel region.  The
+ * caller owns writes to that region, so this path deliberately bypasses tile
+ * locks.  Empty intersections are successful no-ops.
+ */
+soc_result soc_rasterizer_rasterize_prepared_region(
+    soc_rasterizer* rasterizer,
+    const soc_raster_prepared_triangle* prepared,
+    const soc_raster_prepared_region* region
+);
+
+/*
+ * Hot-path variant for an already validated active raster phase.  The caller
+ * guarantees non-NULL arguments, valid prepared bounds and a well-formed
+ * region; empty intersections remain no-ops.
+ */
+void soc_rasterizer_rasterize_prepared_region_unchecked(
+    soc_rasterizer* rasterizer,
+    const soc_raster_prepared_triangle* prepared,
+    const soc_raster_prepared_region* region
+);
+
+/*
+ * Region replay into an explicit depth view.  Geometry remains in global
+ * framebuffer coordinates; only destination addressing is target-relative.
+ */
+soc_result soc_rasterizer_rasterize_prepared_region_to_target(
+    soc_rasterizer* rasterizer,
+    const soc_raster_prepared_triangle* prepared,
+    const soc_raster_prepared_region* region,
+    const soc_raster_target* target
+);
+
+/*
+ * Hot-path target replay for an already validated active raster phase.  The
+ * caller guarantees non-NULL arguments, valid prepared bounds, a well-formed
+ * region inside the framebuffer and a valid target covering that region.
+ * Empty prepared/region intersections remain no-ops.
+ */
+void soc_rasterizer_rasterize_prepared_region_to_target_unchecked(
+    soc_rasterizer* rasterizer,
+    const soc_raster_prepared_triangle* prepared,
+    const soc_raster_prepared_region* region,
+    const soc_raster_target* target
 );
 
 soc_result soc_rasterizer_finish_occluders(soc_rasterizer* rasterizer);

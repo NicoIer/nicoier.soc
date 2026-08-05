@@ -20,6 +20,183 @@ void soc_kernel_clear_f32_scalar(
     }
 }
 
+void soc_kernel_merge_depth_planes_f32_scalar(
+    float* level_zero,
+    const float* scratch_planes,
+    size_t element_count,
+    size_t scratch_plane_stride,
+    uint32_t lane_count,
+    soc_depth_direction depth_direction
+)
+{
+    const uint32_t scratch_plane_count = lane_count > 0u
+        ? lane_count - 1u
+        : 0u;
+    size_t element_index = 0u;
+
+    if (scratch_plane_count == 0u || element_count == 0u) {
+        return;
+    }
+
+    if (depth_direction == SOC_DEPTH_REVERSED) {
+        while (element_count - element_index >= 8u) {
+            float merged0 = level_zero[element_index + 0u];
+            float merged1 = level_zero[element_index + 1u];
+            float merged2 = level_zero[element_index + 2u];
+            float merged3 = level_zero[element_index + 3u];
+            float merged4 = level_zero[element_index + 4u];
+            float merged5 = level_zero[element_index + 5u];
+            float merged6 = level_zero[element_index + 6u];
+            float merged7 = level_zero[element_index + 7u];
+            const float* scratch = scratch_planes + element_index;
+            uint32_t plane_index;
+
+            for (plane_index = 0u;
+                 plane_index < scratch_plane_count;
+                 ++plane_index) {
+                const float candidate0 = scratch[0u];
+                const float candidate1 = scratch[1u];
+                const float candidate2 = scratch[2u];
+                const float candidate3 = scratch[3u];
+                const float candidate4 = scratch[4u];
+                const float candidate5 = scratch[5u];
+                const float candidate6 = scratch[6u];
+                const float candidate7 = scratch[7u];
+
+                if (candidate0 > merged0) {
+                    merged0 = candidate0;
+                }
+                if (candidate1 > merged1) {
+                    merged1 = candidate1;
+                }
+                if (candidate2 > merged2) {
+                    merged2 = candidate2;
+                }
+                if (candidate3 > merged3) {
+                    merged3 = candidate3;
+                }
+                if (candidate4 > merged4) {
+                    merged4 = candidate4;
+                }
+                if (candidate5 > merged5) {
+                    merged5 = candidate5;
+                }
+                if (candidate6 > merged6) {
+                    merged6 = candidate6;
+                }
+                if (candidate7 > merged7) {
+                    merged7 = candidate7;
+                }
+                scratch += scratch_plane_stride;
+            }
+            level_zero[element_index + 0u] = merged0;
+            level_zero[element_index + 1u] = merged1;
+            level_zero[element_index + 2u] = merged2;
+            level_zero[element_index + 3u] = merged3;
+            level_zero[element_index + 4u] = merged4;
+            level_zero[element_index + 5u] = merged5;
+            level_zero[element_index + 6u] = merged6;
+            level_zero[element_index + 7u] = merged7;
+            element_index += 8u;
+        }
+        for (; element_index < element_count; ++element_index) {
+            float merged = level_zero[element_index];
+            const float* scratch = scratch_planes + element_index;
+            uint32_t plane_index;
+
+            for (plane_index = 0u;
+                 plane_index < scratch_plane_count;
+                 ++plane_index) {
+                const float candidate = *scratch;
+
+                if (candidate > merged) {
+                    merged = candidate;
+                }
+                scratch += scratch_plane_stride;
+            }
+            level_zero[element_index] = merged;
+        }
+    } else {
+        while (element_count - element_index >= 8u) {
+            float merged0 = level_zero[element_index + 0u];
+            float merged1 = level_zero[element_index + 1u];
+            float merged2 = level_zero[element_index + 2u];
+            float merged3 = level_zero[element_index + 3u];
+            float merged4 = level_zero[element_index + 4u];
+            float merged5 = level_zero[element_index + 5u];
+            float merged6 = level_zero[element_index + 6u];
+            float merged7 = level_zero[element_index + 7u];
+            const float* scratch = scratch_planes + element_index;
+            uint32_t plane_index;
+
+            for (plane_index = 0u;
+                 plane_index < scratch_plane_count;
+                 ++plane_index) {
+                const float candidate0 = scratch[0u];
+                const float candidate1 = scratch[1u];
+                const float candidate2 = scratch[2u];
+                const float candidate3 = scratch[3u];
+                const float candidate4 = scratch[4u];
+                const float candidate5 = scratch[5u];
+                const float candidate6 = scratch[6u];
+                const float candidate7 = scratch[7u];
+
+                if (candidate0 < merged0) {
+                    merged0 = candidate0;
+                }
+                if (candidate1 < merged1) {
+                    merged1 = candidate1;
+                }
+                if (candidate2 < merged2) {
+                    merged2 = candidate2;
+                }
+                if (candidate3 < merged3) {
+                    merged3 = candidate3;
+                }
+                if (candidate4 < merged4) {
+                    merged4 = candidate4;
+                }
+                if (candidate5 < merged5) {
+                    merged5 = candidate5;
+                }
+                if (candidate6 < merged6) {
+                    merged6 = candidate6;
+                }
+                if (candidate7 < merged7) {
+                    merged7 = candidate7;
+                }
+                scratch += scratch_plane_stride;
+            }
+            level_zero[element_index + 0u] = merged0;
+            level_zero[element_index + 1u] = merged1;
+            level_zero[element_index + 2u] = merged2;
+            level_zero[element_index + 3u] = merged3;
+            level_zero[element_index + 4u] = merged4;
+            level_zero[element_index + 5u] = merged5;
+            level_zero[element_index + 6u] = merged6;
+            level_zero[element_index + 7u] = merged7;
+            element_index += 8u;
+        }
+        for (; element_index < element_count; ++element_index) {
+            float merged = level_zero[element_index];
+            const float* scratch = scratch_planes + element_index;
+            uint32_t plane_index;
+
+            for (plane_index = 0u;
+                 plane_index < scratch_plane_count;
+                 ++plane_index) {
+                const float candidate = *scratch;
+
+                if (candidate < merged) {
+                    merged = candidate;
+                }
+                scratch += scratch_plane_stride;
+            }
+            level_zero[element_index] = merged;
+        }
+    }
+}
+
 void soc_kernel_store_constant_depth_block_f32_scalar(
     float* destination,
     size_t row_stride,
@@ -140,6 +317,7 @@ void soc_kernel_store_depth_plane_block_f32_scalar(
 static const soc_kernel_table scalar_kernels = {
     .backend = SOC_KERNEL_BACKEND_SCALAR,
     .clear_f32 = soc_kernel_clear_f32_scalar,
+    .merge_depth_planes_f32 = soc_kernel_merge_depth_planes_f32_scalar,
     .store_constant_depth_block_f32 =
         soc_kernel_store_constant_depth_block_f32_scalar,
     .store_depth_plane_block_f32 =
