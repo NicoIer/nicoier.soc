@@ -12,8 +12,6 @@
 #include <string.h>
 
 #define SOC_PARALLEL_TRIANGLES_PER_WORK_ITEM UINT32_C(256)
-#define SOC_PARALLEL_DEPTH_SCRATCH_BUDGET_BYTES \
-    ((size_t)256u * 1024u * 1024u)
 
 static soc_bool checked_size_multiply(
     size_t left,
@@ -264,14 +262,6 @@ typedef struct soc_parallel_raster_state {
     uint32_t active_lane_count;
 } soc_parallel_raster_state;
 
-typedef struct soc_parallel_merge_state {
-    float* level_zero;
-    const float* scratch_depth;
-    size_t depth_element_count;
-    uint32_t active_lane_count;
-    soc_depth_direction depth_direction;
-} soc_parallel_merge_state;
-
 static soc_bool calculate_parallel_work_item_count(
     const soc_occlusion_build_desc* desc,
     uint64_t* out_work_item_count
@@ -328,10 +318,15 @@ static void parallel_begin_frame(
     if (worker_index >= state->active_lane_count) {
         return;
     }
-    state->lane_results[worker_index] = soc_rasterizer_begin_frame(
-        &state->rasterizers[worker_index],
-        state->frame
-    );
+    state->lane_results[worker_index] = worker_index == 0u
+        ? soc_rasterizer_begin_frame(
+            &state->rasterizers[worker_index],
+            state->frame
+        )
+        : soc_rasterizer_begin_frame_no_clear(
+            &state->rasterizers[worker_index],
+            state->frame
+        );
 }
 
 static void parallel_rasterize_work_items(
@@ -375,45 +370,6 @@ static void parallel_rasterize_work_items(
         soc_rasterizer_finish_occluders(rasterizer);
 }
 
-static void parallel_merge_depth(
-    void* user,
-    uint32_t worker_index,
-    uint32_t worker_count
-)
-{
-    soc_parallel_merge_state* state = user;
-    const size_t elements_per_worker =
-        state->depth_element_count / worker_count;
-    const size_t extra_elements =
-        state->depth_element_count % worker_count;
-    const size_t begin =
-        elements_per_worker * worker_index +
-        (worker_index < extra_elements ? worker_index : extra_elements);
-    const size_t end = begin + elements_per_worker +
-        (worker_index < extra_elements ? 1u : 0u);
-    size_t element_index;
-
-    for (element_index = begin; element_index < end; ++element_index) {
-        float merged_depth = state->level_zero[element_index];
-        uint32_t lane;
-
-        for (lane = 1u; lane < state->active_lane_count; ++lane) {
-            const float candidate_depth = state->scratch_depth[
-                (size_t)(lane - 1u) * state->depth_element_count +
-                element_index
-            ];
-
-            if ((state->depth_direction == SOC_DEPTH_REVERSED &&
-                    candidate_depth > merged_depth) ||
-                (state->depth_direction == SOC_DEPTH_FORWARD &&
-                    candidate_depth < merged_depth)) {
-                merged_depth = candidate_depth;
-            }
-        }
-        state->level_zero[element_index] = merged_depth;
-    }
-}
-
 static void cleanup_parallel_rasterizers(
     soc_rasterizer* rasterizers,
     uint32_t initialized_count
@@ -449,18 +405,15 @@ static soc_bool try_rasterize_occluders_parallel(
     size_t work_item_bytes;
     size_t rasterizer_bytes;
     size_t lane_result_bytes;
-    size_t depth_buffer_bytes;
-    size_t scratch_depth_bytes;
-    size_t scratch_lane_capacity;
     uint32_t active_lane_count;
     uint32_t lane;
     uint32_t initialized_count = 0u;
     soc_parallel_work_item* work_items = NULL;
     soc_rasterizer* rasterizers = NULL;
     soc_result* lane_results = NULL;
-    float* scratch_depth = NULL;
+    soc_raster_tile_locks tile_locks;
+    soc_bool tile_locks_initialized = SOC_FALSE;
     soc_parallel_raster_state raster_state;
-    soc_parallel_merge_state merge_state;
     soc_result result = SOC_RESULT_OK;
     size_t work_item_index = 0u;
     uint32_t group_index;
@@ -468,28 +421,13 @@ static soc_bool try_rasterize_occluders_parallel(
     if (context->worker_count <= 1u ||
         !calculate_parallel_work_item_count(desc, &work_item_count_u64) ||
         work_item_count_u64 < 2u ||
-        work_item_count_u64 > (uint64_t)SIZE_MAX ||
-        !checked_size_multiply(
-            depth_element_count,
-            sizeof(*scratch_depth),
-            &depth_buffer_bytes
-        ) ||
-        depth_buffer_bytes == 0u) {
-        return SOC_FALSE;
-    }
-
-    scratch_lane_capacity =
-        SOC_PARALLEL_DEPTH_SCRATCH_BUDGET_BYTES / depth_buffer_bytes;
-    if (scratch_lane_capacity == 0u) {
+        work_item_count_u64 > (uint64_t)SIZE_MAX) {
         return SOC_FALSE;
     }
 
     active_lane_count = context->worker_count;
     if (work_item_count_u64 < active_lane_count) {
         active_lane_count = (uint32_t)work_item_count_u64;
-    }
-    if (scratch_lane_capacity < (size_t)(active_lane_count - 1u)) {
-        active_lane_count = (uint32_t)scratch_lane_capacity + 1u;
     }
     if (active_lane_count <= 1u) {
         return SOC_FALSE;
@@ -510,11 +448,6 @@ static soc_bool try_rasterize_occluders_parallel(
             (size_t)active_lane_count,
             sizeof(*lane_results),
             &lane_result_bytes
-        ) ||
-        !checked_size_multiply(
-            (size_t)(active_lane_count - 1u),
-            depth_buffer_bytes,
-            &scratch_depth_bytes
         )) {
         return SOC_FALSE;
     }
@@ -522,12 +455,9 @@ static soc_bool try_rasterize_occluders_parallel(
     work_items = malloc(work_item_bytes);
     rasterizers = calloc(1u, rasterizer_bytes);
     lane_results = malloc(lane_result_bytes);
-    scratch_depth = malloc(scratch_depth_bytes);
     if (work_items == NULL ||
         rasterizers == NULL ||
-        lane_results == NULL ||
-        scratch_depth == NULL) {
-        free(scratch_depth);
+        lane_results == NULL) {
         free(lane_results);
         free(rasterizers);
         free(work_items);
@@ -578,17 +508,25 @@ static soc_bool try_rasterize_occluders_parallel(
         goto attempted_cleanup;
     }
 
-    for (lane = 0u; lane < active_lane_count; ++lane) {
-        float* lane_depth = lane == 0u
-            ? level_zero
-            : scratch_depth +
-                (size_t)(lane - 1u) * depth_element_count;
+    result = soc_raster_tile_locks_initialize(
+        &tile_locks,
+        context->width,
+        context->height
+    );
+    if (result != SOC_RESULT_OK) {
+        free(lane_results);
+        free(rasterizers);
+        free(work_items);
+        return SOC_FALSE;
+    }
+    tile_locks_initialized = SOC_TRUE;
 
+    for (lane = 0u; lane < active_lane_count; ++lane) {
         result = soc_rasterizer_initialize(
             &rasterizers[lane],
             context->width,
             context->height,
-            lane_depth,
+            level_zero,
             depth_element_count,
             context->kernels
         );
@@ -596,6 +534,13 @@ static soc_bool try_rasterize_occluders_parallel(
             goto attempted_cleanup;
         }
         ++initialized_count;
+        result = soc_rasterizer_configure_tile_locks(
+            &rasterizers[lane],
+            &tile_locks
+        );
+        if (result != SOC_RESULT_OK) {
+            goto attempted_cleanup;
+        }
         lane_results[lane] = SOC_RESULT_OK;
     }
 
@@ -606,8 +551,9 @@ static soc_bool try_rasterize_occluders_parallel(
     raster_state.work_item_count = work_item_count;
     raster_state.active_lane_count = active_lane_count;
 
-    soc_thread_pool_run(
+    soc_thread_pool_run_active(
         &context->thread_pool,
+        active_lane_count,
         parallel_begin_frame,
         &raster_state
     );
@@ -618,8 +564,9 @@ static soc_bool try_rasterize_occluders_parallel(
         }
     }
 
-    soc_thread_pool_run(
+    soc_thread_pool_run_active(
         &context->thread_pool,
+        active_lane_count,
         parallel_rasterize_work_items,
         &raster_state
     );
@@ -629,17 +576,6 @@ static soc_bool try_rasterize_occluders_parallel(
             goto attempted_cleanup;
         }
     }
-
-    merge_state.level_zero = level_zero;
-    merge_state.scratch_depth = scratch_depth;
-    merge_state.depth_element_count = depth_element_count;
-    merge_state.active_lane_count = active_lane_count;
-    merge_state.depth_direction = frame->depth_direction;
-    soc_thread_pool_run(
-        &context->thread_pool,
-        parallel_merge_depth,
-        &merge_state
-    );
 
     *out_clipped_triangle_count = 0u;
     *out_rasterized_triangle_count = 0u;
@@ -656,7 +592,9 @@ static soc_bool try_rasterize_occluders_parallel(
 
 attempted_cleanup:
     cleanup_parallel_rasterizers(rasterizers, initialized_count);
-    free(scratch_depth);
+    if (tile_locks_initialized == SOC_TRUE) {
+        soc_raster_tile_locks_shutdown(&tile_locks);
+    }
     free(lane_results);
     free(rasterizers);
     free(work_items);
@@ -731,10 +669,11 @@ soc_result soc_occlusion_build_internal(
     if (result != SOC_RESULT_OK) {
         goto fail;
     }
-    result = soc_hiz_build_with_kernels(
+    result = soc_hiz_build_parallel_with_kernels(
         &snapshot->depth_pyramid,
         frame.depth_direction,
-        snapshot->kernels
+        snapshot->kernels,
+        &context->thread_pool
     );
     if (result != SOC_RESULT_OK) {
         goto fail;

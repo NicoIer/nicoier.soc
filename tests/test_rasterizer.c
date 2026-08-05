@@ -1,4 +1,5 @@
 #include "core/soc_mesh.h"
+#include "platform/soc_thread_pool.h"
 #include "raster/soc_rasterizer.h"
 
 #include <stddef.h>
@@ -39,6 +40,45 @@ typedef struct screen_vertex {
     double y;
     float depth;
 } screen_vertex;
+
+typedef struct locked_raster_state {
+    soc_rasterizer* rasterizers;
+    const soc_mesh* meshes;
+    soc_mat4 object_to_world;
+    uint32_t submission_count;
+    soc_result results[2];
+} locked_raster_state;
+
+static void submit_locked_meshes(
+    void* user_data,
+    uint32_t worker_index,
+    uint32_t worker_count
+)
+{
+    locked_raster_state* state = user_data;
+    uint32_t submission;
+    soc_result result = SOC_RESULT_OK;
+
+    if (worker_count != 2u || worker_index >= 2u) {
+        return;
+    }
+    for (submission = 0u;
+         submission < state->submission_count && result == SOC_RESULT_OK;
+         ++submission) {
+        result = soc_rasterizer_submit_occluders(
+            &state->rasterizers[worker_index],
+            &state->meshes[worker_index],
+            &state->object_to_world,
+            1u
+        );
+    }
+    if (result == SOC_RESULT_OK) {
+        result = soc_rasterizer_finish_occluders(
+            &state->rasterizers[worker_index]
+        );
+    }
+    state->results[worker_index] = result;
+}
 
 static soc_mat4 identity_matrix(void)
 {
@@ -222,6 +262,95 @@ static int run_mesh_sequence(
     return 0;
 }
 
+static int run_prepared_mesh_sequence(
+    const soc_mesh* const* meshes,
+    uint32_t mesh_count,
+    const soc_frame_desc* frame,
+    uint32_t width,
+    uint32_t height,
+    raster_capture* out_capture,
+    size_t* out_prepared_count
+)
+{
+    const size_t pixel_count = (size_t)width * height;
+    const soc_mat4 identity = identity_matrix();
+    soc_raster_prepared_list prepared = {0};
+    soc_rasterizer rasterizer;
+    soc_result result;
+    uint64_t clipped_before_replay = 0u;
+    uint64_t rasterized_before_replay = 0u;
+    uint32_t mesh_index;
+
+    memset(&rasterizer, 0, sizeof(rasterizer));
+    memset(out_capture, 0, sizeof(*out_capture));
+    *out_prepared_count = 0u;
+    out_capture->depth = malloc(pixel_count * sizeof(*out_capture->depth));
+    if (out_capture->depth == NULL) {
+        return 1;
+    }
+
+    result = soc_rasterizer_initialize(
+        &rasterizer,
+        width,
+        height,
+        out_capture->depth,
+        pixel_count,
+        soc_kernel_table_scalar()
+    );
+    if (result == SOC_RESULT_OK) {
+        result = soc_rasterizer_begin_frame(&rasterizer, frame);
+    }
+    for (mesh_index = 0u;
+         result == SOC_RESULT_OK && mesh_index < mesh_count;
+         ++mesh_index) {
+        result = soc_rasterizer_prepare_occluder_triangles(
+            &rasterizer,
+            meshes[mesh_index],
+            &identity,
+            0u,
+            meshes[mesh_index]->index_count / 3u,
+            &prepared
+        );
+    }
+    if (result == SOC_RESULT_OK) {
+        clipped_before_replay = rasterizer.clipped_triangle_count;
+        rasterized_before_replay = rasterizer.rasterized_triangle_count;
+        result = soc_rasterizer_rasterize_prepared_triangles(
+            &rasterizer,
+            prepared.data,
+            prepared.count
+        );
+    }
+    if (result == SOC_RESULT_OK &&
+        (rasterizer.clipped_triangle_count != clipped_before_replay ||
+         rasterizer.rasterized_triangle_count !=
+            rasterized_before_replay)) {
+        result = SOC_RESULT_INTERNAL_ERROR;
+    }
+    if (result == SOC_RESULT_OK) {
+        result = soc_rasterizer_finish_occluders(&rasterizer);
+    }
+    if (result == SOC_RESULT_OK) {
+        out_capture->width = width;
+        out_capture->height = height;
+        out_capture->pixel_count = pixel_count;
+        out_capture->clipped_triangle_count = clipped_before_replay;
+        out_capture->rasterized_triangle_count = rasterized_before_replay;
+        *out_prepared_count = prepared.count;
+        result = soc_rasterizer_end_frame(&rasterizer);
+    }
+
+    soc_raster_prepared_list_shutdown(&prepared);
+    soc_rasterizer_shutdown(&rasterizer);
+    if (result != SOC_RESULT_OK) {
+        free(out_capture->depth);
+        memset(out_capture, 0, sizeof(*out_capture));
+        *out_prepared_count = 0u;
+        return 1;
+    }
+    return 0;
+}
+
 static int run_one_mesh(
     const soc_mesh* mesh,
     const soc_frame_desc* frame,
@@ -282,6 +411,11 @@ static double random_unit(uint32_t* state)
 {
     return (double)(random_u32(state) >> 8u) *
         (1.0 / 16777216.0);
+}
+
+static double snap_screen_coordinate_q8(double coordinate)
+{
+    return (double)(int64_t)(coordinate * 256.0 + 0.5) / 256.0;
 }
 
 static double continuous_edge_value(
@@ -349,7 +483,7 @@ static void reconstruct_screen_triangle(
     }
 }
 
-static int test_non_lattice_coverage_and_depth_are_conservative(void)
+static int test_q8_snapped_coverage_and_depth_are_conservative(void)
 {
     enum {
         WIDTH = 31,
@@ -424,6 +558,12 @@ static int test_non_lattice_coverage_and_depth_are_conservative(void)
             if (scaled_y != (double)rounded_y) {
                 ++non_lattice_coordinate_count;
             }
+            reconstructed[vertex].x = snap_screen_coordinate_q8(
+                reconstructed[vertex].x
+            );
+            reconstructed[vertex].y = snap_screen_coordinate_q8(
+                reconstructed[vertex].y
+            );
         }
 
         mesh = make_mesh(positions, 3u, indices, 3u);
@@ -889,7 +1029,7 @@ static int test_non_lattice_shared_edges_have_no_cracks(void)
     return 0;
 }
 
-static int check_q8_collapsed_triangle(
+static int check_q8_collapsed_triangle_is_discarded(
     soc_depth_direction depth_direction
 )
 {
@@ -914,9 +1054,8 @@ static int check_q8_collapsed_triangle(
     int64_t fixed_x[3];
     int64_t fixed_y[3];
     int64_t fixed_area;
-    uint32_t covered_count = 0u;
     uint32_t vertex;
-    uint32_t y;
+    size_t pixel;
 
     write_triangle(
         positions,
@@ -953,46 +1092,26 @@ static int check_q8_collapsed_triangle(
         HEIGHT,
         &capture
     ) == 0);
-    CHECK(capture.rasterized_triangle_count == 1u);
-
-    for (y = 0u; y < HEIGHT; ++y) {
-        uint32_t x;
-
-        for (x = 0u; x < WIDTH; ++x) {
-            const size_t pixel = (size_t)y * WIDTH + x;
-            int expected = 1;
-            uint32_t edge;
-
-            for (edge = 0u; edge < 3u; ++edge) {
-                if (!continuous_edge_contains_sample(
-                        &reconstructed[(edge + 1u) % 3u],
-                        &reconstructed[(edge + 2u) % 3u],
-                        (double)x + 0.5,
-                        (double)y + 0.5
-                    )) {
-                    expected = 0;
-                    break;
-                }
-            }
-            CHECK(capture_pixel_is_covered(
-                &capture,
-                depth_direction,
-                pixel
-            ) == expected);
-            if (expected) {
-                ++covered_count;
-            }
-        }
+    CHECK(capture.rasterized_triangle_count == 0u);
+    for (pixel = 0u; pixel < (size_t)WIDTH * HEIGHT; ++pixel) {
+        CHECK(!capture_pixel_is_covered(
+            &capture,
+            depth_direction,
+            pixel
+        ));
     }
     release_capture(&capture);
-    CHECK(covered_count > 0u);
     return 0;
 }
 
-static int test_q8_collapsed_triangle_uses_exact_coverage(void)
+static int test_q8_collapsed_triangle_is_discarded(void)
 {
-    CHECK(check_q8_collapsed_triangle(SOC_DEPTH_FORWARD) == 0);
-    CHECK(check_q8_collapsed_triangle(SOC_DEPTH_REVERSED) == 0);
+    CHECK(check_q8_collapsed_triangle_is_discarded(
+        SOC_DEPTH_FORWARD
+    ) == 0);
+    CHECK(check_q8_collapsed_triangle_is_discarded(
+        SOC_DEPTH_REVERSED
+    ) == 0);
     return 0;
 }
 
@@ -1088,7 +1207,12 @@ static int check_clipped_fan_coverage(
             );
             int expected;
 
-            if (edge0 == 0.0 || edge1 == 0.0 || edge2 == 0.0) {
+            /* Q8 endpoint snapping can move an exterior polygon edge by a
+             * fraction of a pixel. Samples in that narrow boundary band are
+             * intentionally governed by snapped fixed-point geometry. */
+            if ((edge0 < 0.0 ? -edge0 : edge0) <= 0.001 ||
+                (edge1 < 0.0 ? -edge1 : edge1) <= 0.001 ||
+                (edge2 < 0.0 ? -edge2 : edge2) <= 0.001) {
                 continue;
             }
             expected = area > 0.0
@@ -1168,8 +1292,8 @@ static int check_varying_depth_direction(
     );
     raster_capture capture;
     uint32_t covered_count = 0u;
-    uint32_t one_ulp_count = 0u;
-    uint32_t two_ulp_count = 0u;
+    uint32_t minimum_ulp_count = UINT32_MAX;
+    uint32_t maximum_ulp_count = 0u;
     uint32_t y;
 
     write_triangle(
@@ -1211,12 +1335,13 @@ static int check_varying_depth_direction(
                 CHECK(stored_bits >= nearest_bits);
                 ulps = stored_bits - nearest_bits;
             }
-            CHECK(ulps >= 1u);
-            CHECK(ulps <= 2u);
-            if (ulps == 1u) {
-                ++one_ulp_count;
-            } else {
-                ++two_ulp_count;
+            CHECK(ulps >= 3u);
+            CHECK(ulps <= 6u);
+            if (ulps < minimum_ulp_count) {
+                minimum_ulp_count = ulps;
+            }
+            if (ulps > maximum_ulp_count) {
+                maximum_ulp_count = ulps;
             }
             ++covered_count;
         }
@@ -1224,8 +1349,8 @@ static int check_varying_depth_direction(
 
     release_capture(&capture);
     CHECK(covered_count > 32u);
-    CHECK(one_ulp_count > 0u);
-    CHECK(two_ulp_count > 0u);
+    CHECK(minimum_ulp_count <= SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS);
+    CHECK(maximum_ulp_count >= SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS);
     return 0;
 }
 
@@ -1236,15 +1361,15 @@ static int test_varying_depth_is_guarded_in_depth_direction(void)
     return 0;
 }
 
-static int check_ill_conditioned_depth_uses_far_vertex(
+static int check_narrow_q8_triangle_uses_affine_depth(
     soc_depth_direction depth_direction
 )
 {
     /*
      * The Q8 determinant is only 3 while its two product terms are large.
      * Pixel (32, 32) is the exact centroid and has edge value 1 on all three
-     * sides, so coverage remains valid while affine slope setup is rejected
-     * as ill-conditioned.
+     * sides. GPU-style setup still interpolates the snapped triangle's affine
+     * depth plane instead of falling back to its farthest vertex.
      */
     static const screen_vertex vertices[3] = {
         {2319.0 / 256.0, 2321.0 / 256.0, 0.2375114858f},
@@ -1258,11 +1383,12 @@ static int check_ill_conditioned_depth_uses_far_vertex(
         SOC_CLIP_DEPTH_ZERO_TO_ONE,
         depth_direction
     );
-    const float farthest_depth =
-        depth_direction == SOC_DEPTH_REVERSED
-            ? vertices[0].depth
-            : vertices[1].depth;
-    const uint32_t farthest_bits = float_bits(farthest_depth);
+    const double exact_depth = (
+        (double)vertices[0].depth +
+        (double)vertices[1].depth +
+        (double)vertices[2].depth
+    ) / 3.0;
+    const uint32_t exact_bits = float_bits((float)exact_depth);
     raster_capture capture;
     uint32_t stored_bits;
     uint32_t ulps;
@@ -1280,24 +1406,26 @@ static int check_ill_conditioned_depth_uses_far_vertex(
 
     stored_bits = float_bits(capture.depth[32u * 64u + 32u]);
     if (depth_direction == SOC_DEPTH_REVERSED) {
-        CHECK(stored_bits < farthest_bits);
-        ulps = farthest_bits - stored_bits;
+        CHECK((double)capture.depth[32u * 64u + 32u] < exact_depth);
+        CHECK(stored_bits < exact_bits);
+        ulps = exact_bits - stored_bits;
     } else {
-        CHECK(stored_bits > farthest_bits);
-        ulps = stored_bits - farthest_bits;
+        CHECK((double)capture.depth[32u * 64u + 32u] > exact_depth);
+        CHECK(stored_bits > exact_bits);
+        ulps = stored_bits - exact_bits;
     }
     release_capture(&capture);
     CHECK(ulps >= 1u);
-    CHECK(ulps <= 2u);
+    CHECK(ulps <= 8u);
     return 0;
 }
 
-static int test_ill_conditioned_depth_is_conservative(void)
+static int test_narrow_q8_depth_is_conservative(void)
 {
-    CHECK(check_ill_conditioned_depth_uses_far_vertex(
+    CHECK(check_narrow_q8_triangle_uses_affine_depth(
         SOC_DEPTH_FORWARD
     ) == 0);
-    CHECK(check_ill_conditioned_depth_uses_far_vertex(
+    CHECK(check_narrow_q8_triangle_uses_affine_depth(
         SOC_DEPTH_REVERSED
     ) == 0);
     return 0;
@@ -1820,9 +1948,487 @@ static int test_triangle_range_submission_validates_bounds(void)
     return 0;
 }
 
+static int check_prepared_replay_matches_immediate(
+    soc_depth_direction depth_direction
+)
+{
+    enum {
+        WIDTH = 32,
+        HEIGHT = 32,
+    };
+    static const screen_vertex empty_triangle[3] = {
+        {1.10, 1.10, 0.45f},
+        {1.30, 1.10, 0.45f},
+        {1.10, 1.30, 0.45f},
+    };
+    const soc_frame_desc frame = make_frame_desc(
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        depth_direction
+    );
+    float positions[36] = {
+        /* One ordinary, varying-depth triangle. */
+        -0.7f, -0.7f, 0.25f,
+         0.4f, -0.6f, 0.65f,
+        -0.3f,  0.6f, 0.40f,
+
+        /* Clips to a pentagon and exercises the shared fan depth plane. */
+         0.8f, -0.8f, 0.20f,
+         1.2f,  0.8f, 0.70f,
+        -1.8f,  2.0f, 0.40f,
+
+        /* Trivially rejected by the right clip plane. */
+         1.2f, -0.4f, 0.30f,
+         1.6f,  0.0f, 0.30f,
+         1.2f,  0.4f, 0.30f,
+    };
+    uint32_t indices[] = {
+        0u, 1u, 2u,
+        3u, 4u, 5u,
+        6u, 7u, 8u,
+        9u, 10u, 11u,
+    };
+    soc_mesh mesh;
+    const soc_mesh* meshes[1];
+    raster_capture immediate;
+    raster_capture replayed;
+    size_t prepared_count;
+
+    write_triangle(
+        positions + 27u,
+        WIDTH,
+        HEIGHT,
+        empty_triangle,
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
+    );
+    mesh = make_mesh(
+        positions,
+        12u,
+        indices,
+        (uint32_t)ARRAY_COUNT(indices)
+    );
+    meshes[0] = &mesh;
+
+    CHECK(run_mesh_sequence(
+        meshes,
+        1u,
+        &frame,
+        WIDTH,
+        HEIGHT,
+        &immediate
+    ) == 0);
+    CHECK(run_prepared_mesh_sequence(
+        meshes,
+        1u,
+        &frame,
+        WIDTH,
+        HEIGHT,
+        &replayed,
+        &prepared_count
+    ) == 0);
+
+    CHECK(immediate.clipped_triangle_count == 2u);
+    CHECK(immediate.rasterized_triangle_count == 5u);
+    CHECK(prepared_count == 4u);
+    CHECK(replayed.clipped_triangle_count ==
+        immediate.clipped_triangle_count);
+    CHECK(replayed.rasterized_triangle_count ==
+        immediate.rasterized_triangle_count);
+    CHECK(memcmp(
+        replayed.depth,
+        immediate.depth,
+        immediate.pixel_count * sizeof(*immediate.depth)
+    ) == 0);
+
+    release_capture(&replayed);
+    release_capture(&immediate);
+    return 0;
+}
+
+static int test_prepared_replay_matches_immediate(void)
+{
+    CHECK(check_prepared_replay_matches_immediate(
+        SOC_DEPTH_FORWARD
+    ) == 0);
+    CHECK(check_prepared_replay_matches_immediate(
+        SOC_DEPTH_REVERSED
+    ) == 0);
+    return 0;
+}
+
+static int test_prepared_list_and_invalid_state_semantics(void)
+{
+    enum {
+        WIDTH = 8,
+        HEIGHT = 8,
+        PIXEL_COUNT = WIDTH * HEIGHT,
+    };
+    const size_t impossible_capacity =
+        SIZE_MAX / sizeof(soc_raster_prepared_triangle) + 1u;
+    const soc_mat4 identity = identity_matrix();
+    const soc_frame_desc frame = make_frame_desc(
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        SOC_DEPTH_FORWARD
+    );
+    float depth[PIXEL_COUNT];
+    float positions[] = {
+        -0.8f, -0.8f, 0.4f,
+         0.8f, -0.8f, 0.4f,
+         0.0f,  0.8f, 0.4f,
+    };
+    uint32_t indices[] = {0u, 1u, 2u};
+    soc_mesh mesh = make_mesh(
+        positions,
+        3u,
+        indices,
+        (uint32_t)ARRAY_COUNT(indices)
+    );
+    soc_raster_prepared_list list = {0};
+    soc_raster_prepared_list invalid_list = {0};
+    soc_raster_prepared_triangle* allocation;
+    size_t capacity;
+    soc_rasterizer rasterizer;
+    uint64_t clipped_count;
+    uint64_t rasterized_count;
+
+    CHECK(sizeof(soc_raster_prepared_triangle) == 232u);
+    CHECK(soc_raster_prepared_list_reserve(NULL, 1u) ==
+        SOC_RESULT_INVALID_ARGUMENT);
+    CHECK(soc_raster_prepared_list_reserve(&list, 2u) == SOC_RESULT_OK);
+    CHECK(list.data != NULL);
+    CHECK(list.capacity == 2u);
+    list.data[0].bounds.minimum_x = 17u;
+    list.count = 1u;
+    CHECK(soc_raster_prepared_list_reserve(&list, 5u) == SOC_RESULT_OK);
+    CHECK(list.capacity == 5u);
+    CHECK(list.count == 1u);
+    CHECK(list.data[0].bounds.minimum_x == 17u);
+
+    allocation = list.data;
+    capacity = list.capacity;
+    CHECK(soc_raster_prepared_list_reserve(
+        &list,
+        impossible_capacity
+    ) == SOC_RESULT_OUT_OF_MEMORY);
+    CHECK(list.data == allocation);
+    CHECK(list.capacity == capacity);
+    CHECK(list.count == 1u);
+    CHECK(list.data[0].bounds.minimum_x == 17u);
+    soc_raster_prepared_list_shutdown(&list);
+    CHECK(list.data == NULL);
+    CHECK(list.count == 0u);
+    CHECK(list.capacity == 0u);
+    soc_raster_prepared_list_shutdown(NULL);
+
+    CHECK(soc_rasterizer_initialize(
+        &rasterizer,
+        WIDTH,
+        HEIGHT,
+        depth,
+        PIXEL_COUNT,
+        soc_kernel_table_scalar()
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_prepare_occluder_triangles(
+        &rasterizer,
+        &mesh,
+        &identity,
+        0u,
+        1u,
+        &list
+    ) == SOC_RESULT_INVALID_STATE);
+    CHECK(soc_rasterizer_rasterize_prepared_triangles(
+        &rasterizer,
+        NULL,
+        0u
+    ) == SOC_RESULT_INVALID_STATE);
+    CHECK(soc_rasterizer_begin_frame(&rasterizer, &frame) == SOC_RESULT_OK);
+
+    invalid_list.count = 1u;
+    CHECK(soc_rasterizer_prepare_occluder_triangles(
+        &rasterizer,
+        &mesh,
+        &identity,
+        0u,
+        1u,
+        &invalid_list
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+    CHECK(soc_rasterizer_prepare_occluder_triangles(
+        &rasterizer,
+        &mesh,
+        &identity,
+        0u,
+        0u,
+        &list
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+    CHECK(soc_rasterizer_rasterize_prepared_triangles(
+        &rasterizer,
+        NULL,
+        1u
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+    CHECK(soc_rasterizer_rasterize_prepared_triangles(
+        &rasterizer,
+        NULL,
+        0u
+    ) == SOC_RESULT_OK);
+
+    CHECK(soc_rasterizer_prepare_occluder_triangles(
+        &rasterizer,
+        &mesh,
+        &identity,
+        0u,
+        1u,
+        &list
+    ) == SOC_RESULT_OK);
+    CHECK(list.count == 1u);
+    clipped_count = rasterizer.clipped_triangle_count;
+    rasterized_count = rasterizer.rasterized_triangle_count;
+    CHECK(clipped_count == 0u);
+    CHECK(rasterized_count == 1u);
+    CHECK(soc_rasterizer_rasterize_prepared_triangles(
+        &rasterizer,
+        list.data,
+        list.count
+    ) == SOC_RESULT_OK);
+    CHECK(rasterizer.clipped_triangle_count == clipped_count);
+    CHECK(rasterizer.rasterized_triangle_count == rasterized_count);
+    CHECK(soc_rasterizer_end_frame(&rasterizer) == SOC_RESULT_OK);
+
+    CHECK(soc_rasterizer_prepare_occluder_triangles(
+        &rasterizer,
+        &mesh,
+        &identity,
+        0u,
+        1u,
+        &list
+    ) == SOC_RESULT_INVALID_STATE);
+    CHECK(soc_rasterizer_rasterize_prepared_triangles(
+        &rasterizer,
+        list.data,
+        list.count
+    ) == SOC_RESULT_INVALID_STATE);
+
+    soc_raster_prepared_list_shutdown(&list);
+    soc_rasterizer_shutdown(&rasterizer);
+    return 0;
+}
+
+static int check_shared_tile_locks_match_serial(
+    soc_depth_direction depth_direction,
+    soc_bool crosses_tile_boundary
+)
+{
+    enum {
+        WIDTH = 67,
+        HEIGHT = 65,
+        RASTERIZER_COUNT = 2,
+        SUBMISSION_COUNT = 64,
+    };
+    static const screen_vertex crossing_triangle0[3] = {
+        {29.0, 29.0, 0.72f},
+        {36.0, 30.0, 0.72f},
+        {30.0, 36.0, 0.72f},
+    };
+    static const screen_vertex crossing_triangle1[3] = {
+        {35.0, 35.0, 0.31f},
+        {28.0, 34.0, 0.31f},
+        {34.0, 28.0, 0.31f},
+    };
+    /* Both small constant triangles stay in tile [32,64)x[32,64). */
+    static const screen_vertex single_tile_triangle0[3] = {
+        {56.0, 56.0, 0.72f},
+        {63.0, 57.0, 0.72f},
+        {57.0, 63.0, 0.72f},
+    };
+    static const screen_vertex single_tile_triangle1[3] = {
+        {62.0, 62.0, 0.31f},
+        {55.0, 61.0, 0.31f},
+        {61.0, 55.0, 0.31f},
+    };
+    const screen_vertex* triangle0 = crosses_tile_boundary == SOC_TRUE
+        ? crossing_triangle0
+        : single_tile_triangle0;
+    const screen_vertex* triangle1 = crosses_tile_boundary == SOC_TRUE
+        ? crossing_triangle1
+        : single_tile_triangle1;
+    const size_t pixel_count = (size_t)WIDTH * HEIGHT;
+    const soc_frame_desc frame = make_frame_desc(
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        depth_direction
+    );
+    const float clear_depth = clear_depth_for(depth_direction);
+    uint32_t indices[3] = {0u, 1u, 2u};
+    float positions[RASTERIZER_COUNT][9];
+    soc_mesh meshes[RASTERIZER_COUNT];
+    const soc_mesh* serial_meshes[RASTERIZER_COUNT];
+    raster_capture serial_capture;
+    float* shared_depth;
+    soc_rasterizer rasterizers[RASTERIZER_COUNT];
+    soc_raster_tile_locks tile_locks;
+    soc_thread_pool thread_pool;
+    locked_raster_state state;
+    size_t pixel;
+    size_t lock_index;
+    uint32_t rasterizer_index;
+
+    write_triangle(
+        positions[0],
+        WIDTH,
+        HEIGHT,
+        triangle0,
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
+    );
+    write_triangle(
+        positions[1],
+        WIDTH,
+        HEIGHT,
+        triangle1,
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
+    );
+    for (rasterizer_index = 0u;
+         rasterizer_index < RASTERIZER_COUNT;
+         ++rasterizer_index) {
+        meshes[rasterizer_index] = make_mesh(
+            positions[rasterizer_index],
+            3u,
+            indices,
+            (uint32_t)ARRAY_COUNT(indices)
+        );
+        serial_meshes[rasterizer_index] = &meshes[rasterizer_index];
+    }
+    CHECK(run_mesh_sequence(
+        serial_meshes,
+        RASTERIZER_COUNT,
+        &frame,
+        WIDTH,
+        HEIGHT,
+        &serial_capture
+    ) == 0);
+
+    shared_depth = malloc(pixel_count * sizeof(*shared_depth));
+    CHECK(shared_depth != NULL);
+    CHECK(soc_raster_tile_locks_initialize(
+        &tile_locks,
+        WIDTH,
+        HEIGHT
+    ) == SOC_RESULT_OK);
+    CHECK(tile_locks.column_count == 3u);
+    CHECK(tile_locks.row_count == 3u);
+    CHECK(tile_locks.lock_count == 9u);
+    CHECK(soc_thread_pool_initialize(
+        &thread_pool,
+        RASTERIZER_COUNT
+    ) == SOC_RESULT_OK);
+
+    for (pixel = 0u; pixel < pixel_count; ++pixel) {
+        shared_depth[pixel] = clear_depth;
+    }
+    shared_depth[pixel_count - 1u] = 0.456f;
+    for (rasterizer_index = 0u;
+         rasterizer_index < RASTERIZER_COUNT;
+         ++rasterizer_index) {
+        CHECK(soc_rasterizer_initialize(
+            &rasterizers[rasterizer_index],
+            WIDTH,
+            HEIGHT,
+            shared_depth,
+            pixel_count,
+            soc_kernel_table_scalar()
+        ) == SOC_RESULT_OK);
+        CHECK(soc_rasterizer_configure_tile_locks(
+            &rasterizers[rasterizer_index],
+            &tile_locks
+        ) == SOC_RESULT_OK);
+        CHECK(soc_rasterizer_begin_frame_no_clear(
+            &rasterizers[rasterizer_index],
+            &frame
+        ) == SOC_RESULT_OK);
+    }
+    CHECK(float_bits(shared_depth[pixel_count - 1u]) ==
+        float_bits(0.456f));
+    shared_depth[pixel_count - 1u] = clear_depth;
+
+    memset(&state, 0, sizeof(state));
+    state.rasterizers = rasterizers;
+    state.meshes = meshes;
+    state.object_to_world = identity_matrix();
+    state.submission_count = SUBMISSION_COUNT;
+    state.results[0] = SOC_RESULT_INTERNAL_ERROR;
+    state.results[1] = SOC_RESULT_INTERNAL_ERROR;
+    soc_thread_pool_run(
+        &thread_pool,
+        submit_locked_meshes,
+        &state
+    );
+
+    for (rasterizer_index = 0u;
+         rasterizer_index < RASTERIZER_COUNT;
+         ++rasterizer_index) {
+        CHECK(state.results[rasterizer_index] == SOC_RESULT_OK);
+        CHECK(rasterizers[rasterizer_index].clipped_triangle_count == 0u);
+        CHECK(rasterizers[rasterizer_index].rasterized_triangle_count ==
+            SUBMISSION_COUNT);
+        CHECK(soc_rasterizer_end_frame(
+            &rasterizers[rasterizer_index]
+        ) == SOC_RESULT_OK);
+        soc_rasterizer_shutdown(&rasterizers[rasterizer_index]);
+    }
+    for (lock_index = 0u;
+         lock_index < tile_locks.lock_count;
+         ++lock_index) {
+        CHECK(atomic_load_explicit(
+            &tile_locks.locks[lock_index],
+            memory_order_relaxed
+        ) == 0u);
+    }
+    CHECK(memcmp(
+        shared_depth,
+        serial_capture.depth,
+        pixel_count * sizeof(*shared_depth)
+    ) == 0);
+
+    soc_thread_pool_shutdown(&thread_pool);
+    soc_raster_tile_locks_shutdown(&tile_locks);
+    free(shared_depth);
+    release_capture(&serial_capture);
+    return 0;
+}
+
+static int test_shared_tile_locks_and_no_clear_begin(void)
+{
+    soc_raster_tile_locks invalid_locks;
+
+    CHECK(soc_raster_tile_locks_initialize(
+        NULL,
+        1u,
+        1u
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+    CHECK(soc_raster_tile_locks_initialize(
+        &invalid_locks,
+        0u,
+        1u
+    ) == SOC_RESULT_INVALID_ARGUMENT);
+    CHECK(invalid_locks.locks == NULL);
+    CHECK(check_shared_tile_locks_match_serial(
+        SOC_DEPTH_FORWARD,
+        SOC_TRUE
+    ) == 0);
+    CHECK(check_shared_tile_locks_match_serial(
+        SOC_DEPTH_REVERSED,
+        SOC_TRUE
+    ) == 0);
+    CHECK(check_shared_tile_locks_match_serial(
+        SOC_DEPTH_FORWARD,
+        SOC_FALSE
+    ) == 0);
+    CHECK(check_shared_tile_locks_match_serial(
+        SOC_DEPTH_REVERSED,
+        SOC_FALSE
+    ) == 0);
+    return 0;
+}
+
 int main(void)
 {
-    if (test_non_lattice_coverage_and_depth_are_conservative() != 0) {
+    if (test_q8_snapped_coverage_and_depth_are_conservative() != 0) {
         return 1;
     }
     if (test_fixed_top_left_coverage_mask() != 0) {
@@ -1834,7 +2440,7 @@ int main(void)
     if (test_non_lattice_shared_edges_have_no_cracks() != 0) {
         return 1;
     }
-    if (test_q8_collapsed_triangle_uses_exact_coverage() != 0) {
+    if (test_q8_collapsed_triangle_is_discarded() != 0) {
         return 1;
     }
     if (test_clipped_polygon_fans_have_no_cracks() != 0) {
@@ -1843,7 +2449,7 @@ int main(void)
     if (test_varying_depth_is_guarded_in_depth_direction() != 0) {
         return 1;
     }
-    if (test_ill_conditioned_depth_is_conservative() != 0) {
+    if (test_narrow_q8_depth_is_conservative() != 0) {
         return 1;
     }
     if (test_depth_ranges_directions_and_submission_orders() != 0) {
@@ -1856,6 +2462,15 @@ int main(void)
         return 1;
     }
     if (test_triangle_range_submission_validates_bounds() != 0) {
+        return 1;
+    }
+    if (test_prepared_replay_matches_immediate() != 0) {
+        return 1;
+    }
+    if (test_prepared_list_and_invalid_state_semantics() != 0) {
+        return 1;
+    }
+    if (test_shared_tile_locks_and_no_clear_begin() != 0) {
         return 1;
     }
     return 0;

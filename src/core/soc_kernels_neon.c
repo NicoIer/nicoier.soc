@@ -10,6 +10,9 @@
 #include <arm_neon.h>
 #endif
 
+#include <math.h>
+#include <string.h>
+
 #if defined(_MSC_VER)
 #define SOC_NEON_FORCE_INLINE __forceinline
 #elif defined(__clang__) || defined(__GNUC__)
@@ -149,6 +152,157 @@ static void store_constant_depth_block_f32_neon(
             candidate_depth,
             SOC_FALSE
         );
+    }
+}
+
+static SOC_NEON_FORCE_INLINE float32x4_t
+make_far_biased_plane_depth_neon(
+    float32x4_t depth,
+    soc_bool reversed_depth
+)
+{
+    const uint32x4_t guard =
+        vdupq_n_u32(SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS);
+    const uint32x4_t one_bits = vdupq_n_u32(UINT32_C(0x3f800000));
+    uint32x4_t bits;
+
+    depth = vmaxq_f32(depth, vdupq_n_f32(0.0f));
+    depth = vminq_f32(depth, vdupq_n_f32(1.0f));
+    bits = vreinterpretq_u32_f32(depth);
+    if (reversed_depth == SOC_TRUE) {
+        bits = vqsubq_u32(bits, guard);
+    } else {
+        bits = vminq_u32(vaddq_u32(bits, guard), one_bits);
+    }
+    return vreinterpretq_f32_u32(bits);
+}
+
+static SOC_NEON_FORCE_INLINE float
+make_far_biased_plane_depth_neon_tail(
+    float depth,
+    soc_bool reversed_depth
+)
+{
+    const uint32_t one_bits = UINT32_C(0x3f800000);
+    uint32_t bits;
+
+    if (depth < 0.0f) {
+        depth = 0.0f;
+    } else if (depth > 1.0f) {
+        depth = 1.0f;
+    }
+    memcpy(&bits, &depth, sizeof(bits));
+    if (reversed_depth == SOC_TRUE) {
+        bits = bits > SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
+            ? bits - SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
+            : 0u;
+    } else {
+        bits = bits < one_bits - SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
+            ? bits + SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
+            : one_bits;
+    }
+    memcpy(&depth, &bits, sizeof(depth));
+    return depth;
+}
+
+static void store_depth_plane_block_f32_neon(
+    float* destination,
+    size_t row_stride,
+    uint32_t block_width,
+    uint32_t block_height,
+    uint64_t coverage_mask,
+    float depth_origin,
+    float depth_step_x,
+    float depth_step_y,
+    soc_depth_direction depth_direction
+)
+{
+    static const uint32_t lane_bits_values[4] = {1u, 2u, 4u, 8u};
+    static const float lane_offsets_values[4] = {0.0f, 1.0f, 2.0f, 3.0f};
+    const uint32x4_t lane_bits = vld1q_u32(lane_bits_values);
+    const float32x4_t lane_offsets = vld1q_f32(lane_offsets_values);
+    const soc_bool reversed_depth =
+        depth_direction == SOC_DEPTH_REVERSED ? SOC_TRUE : SOC_FALSE;
+    uint32_t row;
+
+    for (row = 0u; row < block_height; ++row) {
+        float* destination_row = destination + (size_t)row * row_stride;
+        const uint32_t row_mask = (uint32_t)(
+            coverage_mask >> (row * SOC_KERNEL_RASTER_BLOCK_SIZE)
+        );
+        const float row_depth = fmaf(
+            depth_step_y,
+            (float)row,
+            depth_origin
+        );
+        uint32_t column = 0u;
+
+        while (block_width - column >= 4u) {
+            const uint32_t lane_mask = (row_mask >> column) & 0x0fu;
+
+            if (lane_mask != 0u) {
+                const float32x4_t columns = vaddq_f32(
+                    lane_offsets,
+                    vdupq_n_f32((float)column)
+                );
+                float32x4_t candidates = vfmaq_n_f32(
+                    vdupq_n_f32(row_depth),
+                    columns,
+                    depth_step_x
+                );
+                const float32x4_t stored =
+                    vld1q_f32(destination_row + column);
+                float32x4_t compared_stored = stored;
+                uint32x4_t store_mask;
+
+                candidates = make_far_biased_plane_depth_neon(
+                    candidates,
+                    reversed_depth
+                );
+                if (lane_mask != 0x0fu) {
+                    const uint32x4_t covered = vtstq_u32(
+                        vdupq_n_u32(lane_mask),
+                        lane_bits
+                    );
+
+                    compared_stored = vbslq_f32(
+                        covered,
+                        stored,
+                        candidates
+                    );
+                }
+                store_mask = reversed_depth == SOC_TRUE
+                    ? vcgtq_f32(candidates, compared_stored)
+                    : vcltq_f32(candidates, compared_stored);
+                vst1q_f32(
+                    destination_row + column,
+                    vbslq_f32(store_mask, candidates, stored)
+                );
+            }
+            column += 4u;
+        }
+
+        for (; column < block_width; ++column) {
+            if ((row_mask & (UINT32_C(1) << column)) != 0u) {
+                const float candidate_depth =
+                    make_far_biased_plane_depth_neon_tail(
+                        fmaf(depth_step_x, (float)column, row_depth),
+                        reversed_depth
+                    );
+                const float stored_depth = destination_row[column];
+                const soc_bool passes_depth = reversed_depth == SOC_TRUE
+                    ? (candidate_depth > stored_depth
+                        ? SOC_TRUE
+                        : SOC_FALSE)
+                    : (candidate_depth < stored_depth
+                        ? SOC_TRUE
+                        : SOC_FALSE);
+
+                if (passes_depth == SOC_TRUE) {
+                    destination_row[column] = candidate_depth;
+                }
+            }
+        }
     }
 }
 
@@ -413,6 +567,8 @@ static const soc_kernel_table neon_kernels = {
     .clear_f32 = soc_kernel_clear_f32_scalar,
     .store_constant_depth_block_f32 =
         store_constant_depth_block_f32_neon,
+    .store_depth_plane_block_f32 =
+        store_depth_plane_block_f32_neon,
     .reduce_hiz_level_f32 = reduce_hiz_level_f32_neon,
     .transform_triangle_f64 = transform_triangle_f64_neon,
     .test_aabbs = soc_occlusion_test_aabbs_neon,

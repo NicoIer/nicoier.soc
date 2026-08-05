@@ -65,8 +65,8 @@ static soc_result create_context(
 {
     const soc_config config = {
         .struct_size = sizeof(soc_config),
-        .width = 127u,
-        .height = 73u,
+        .width = 641u,
+        .height = 643u,
         .worker_count = worker_count,
         .flags = SOC_CONFIG_FLAG_NONE,
     };

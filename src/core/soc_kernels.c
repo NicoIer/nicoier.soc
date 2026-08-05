@@ -3,7 +3,9 @@
 #include "occlusion/soc_hiz.h"
 #include "occlusion/soc_visibility.h"
 
+#include <math.h>
 #include <stddef.h>
+#include <string.h>
 
 void soc_kernel_clear_f32_scalar(
     float* destination,
@@ -57,11 +59,91 @@ void soc_kernel_store_constant_depth_block_f32_scalar(
     }
 }
 
+static float make_far_biased_plane_depth_scalar(
+    float depth,
+    soc_depth_direction depth_direction
+)
+{
+    const uint32_t one_bits = UINT32_C(0x3f800000);
+    uint32_t bits;
+
+    if (depth < 0.0f) {
+        depth = 0.0f;
+    } else if (depth > 1.0f) {
+        depth = 1.0f;
+    }
+    memcpy(&bits, &depth, sizeof(bits));
+    if (depth_direction == SOC_DEPTH_REVERSED) {
+        bits = bits > SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
+            ? bits - SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
+            : 0u;
+    } else {
+        bits = bits < one_bits - SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
+            ? bits + SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
+            : one_bits;
+    }
+    memcpy(&depth, &bits, sizeof(depth));
+    return depth;
+}
+
+void soc_kernel_store_depth_plane_block_f32_scalar(
+    float* destination,
+    size_t row_stride,
+    uint32_t block_width,
+    uint32_t block_height,
+    uint64_t coverage_mask,
+    float depth_origin,
+    float depth_step_x,
+    float depth_step_y,
+    soc_depth_direction depth_direction
+)
+{
+    uint32_t row;
+
+    for (row = 0u; row < block_height; ++row) {
+        float* destination_row = destination + (size_t)row * row_stride;
+        const uint32_t row_mask = (uint32_t)(
+            coverage_mask >> (row * SOC_KERNEL_RASTER_BLOCK_SIZE)
+        );
+        const float row_depth = fmaf(
+            depth_step_y,
+            (float)row,
+            depth_origin
+        );
+        uint32_t column;
+
+        for (column = 0u; column < block_width; ++column) {
+            if ((row_mask & (UINT32_C(1) << column)) != 0u) {
+                const float candidate_depth =
+                    make_far_biased_plane_depth_scalar(
+                        fmaf(depth_step_x, (float)column, row_depth),
+                        depth_direction
+                    );
+                const float stored_depth = destination_row[column];
+                const soc_bool passes_depth =
+                    depth_direction == SOC_DEPTH_REVERSED
+                        ? (candidate_depth > stored_depth
+                            ? SOC_TRUE
+                            : SOC_FALSE)
+                        : (candidate_depth < stored_depth
+                            ? SOC_TRUE
+                            : SOC_FALSE);
+
+                if (passes_depth == SOC_TRUE) {
+                    destination_row[column] = candidate_depth;
+                }
+            }
+        }
+    }
+}
+
 static const soc_kernel_table scalar_kernels = {
     .backend = SOC_KERNEL_BACKEND_SCALAR,
     .clear_f32 = soc_kernel_clear_f32_scalar,
     .store_constant_depth_block_f32 =
         soc_kernel_store_constant_depth_block_f32_scalar,
+    .store_depth_plane_block_f32 =
+        soc_kernel_store_depth_plane_block_f32_scalar,
     .reduce_hiz_level_f32 = soc_hiz_reduce_level_scalar,
     .transform_triangle_f64 = soc_kernel_transform_triangle_f64_scalar,
     .test_aabbs = soc_occlusion_test_aabbs,

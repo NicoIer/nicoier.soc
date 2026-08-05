@@ -18,6 +18,7 @@ typedef uint32_t soc_kernel_backend;
 #define SOC_KERNEL_BACKEND_NEON ((soc_kernel_backend)1u)
 
 #define SOC_KERNEL_RASTER_BLOCK_SIZE 8u
+#define SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS 4u
 
 typedef struct soc_kernel_mat4_f64 {
     double columns[4][4];
@@ -46,6 +47,17 @@ typedef struct soc_kernel_table {
         uint32_t block_height,
         uint64_t coverage_mask,
         float candidate_depth,
+        soc_depth_direction depth_direction
+    );
+    void (*store_depth_plane_block_f32)(
+        float* destination,
+        size_t row_stride,
+        uint32_t block_width,
+        uint32_t block_height,
+        uint64_t coverage_mask,
+        float depth_origin,
+        float depth_step_x,
+        float depth_step_y,
         soc_depth_direction depth_direction
     );
     void (*reduce_hiz_level_f32)(
@@ -87,6 +99,18 @@ void soc_kernel_store_constant_depth_block_f32_scalar(
     uint32_t block_height,
     uint64_t coverage_mask,
     float candidate_depth,
+    soc_depth_direction depth_direction
+);
+
+void soc_kernel_store_depth_plane_block_f32_scalar(
+    float* destination,
+    size_t row_stride,
+    uint32_t block_width,
+    uint32_t block_height,
+    uint64_t coverage_mask,
+    float depth_origin,
+    float depth_step_x,
+    float depth_step_y,
     soc_depth_direction depth_direction
 );
 

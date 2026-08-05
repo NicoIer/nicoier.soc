@@ -1,8 +1,12 @@
 #include "occlusion/soc_hiz.h"
 
+#include "core/soc_kernels.h"
+#include "platform/soc_thread_pool.h"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define ARRAY_COUNT(array) (sizeof(array) / sizeof((array)[0]))
@@ -575,6 +579,131 @@ static int test_depth_direction_rebuild_across_frames(void)
     return 0;
 }
 
+static int compare_parallel_pyramid(
+    soc_thread_pool* thread_pool,
+    uint32_t width,
+    uint32_t height,
+    soc_depth_direction depth_direction
+)
+{
+    soc_hiz serial = {0};
+    soc_hiz parallel = {0};
+    float* serial_level_zero;
+    float* parallel_level_zero;
+    size_t byte_count;
+    size_t index;
+
+    CHECK_RESULT(soc_hiz_initialize(&serial, width, height), SOC_RESULT_OK);
+    CHECK_RESULT(
+        soc_hiz_initialize(&parallel, width, height),
+        SOC_RESULT_OK
+    );
+    CHECK(serial.element_count == parallel.element_count);
+    CHECK(serial.level_count == parallel.level_count);
+
+    serial_level_zero = soc_hiz_level_data(&serial, 0u);
+    parallel_level_zero = soc_hiz_level_data(&parallel, 0u);
+    CHECK(serial_level_zero != NULL);
+    CHECK(parallel_level_zero != NULL);
+    for (index = 0u;
+         index < serial.levels[0].element_count;
+         ++index) {
+        serial_level_zero[index] = (float)(
+            (index * 37u + (size_t)width * 13u + height) % 1009u
+        ) / 1008.0f;
+    }
+    memcpy(
+        parallel_level_zero,
+        serial_level_zero,
+        serial.levels[0].element_count * sizeof(*serial_level_zero)
+    );
+
+    CHECK_RESULT(
+        soc_hiz_build_with_kernels(
+            &serial,
+            depth_direction,
+            soc_kernel_table_scalar()
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        soc_hiz_build_parallel_with_kernels(
+            &parallel,
+            depth_direction,
+            soc_kernel_table_scalar(),
+            thread_pool
+        ),
+        SOC_RESULT_OK
+    );
+
+    CHECK(serial.element_count <= SIZE_MAX / sizeof(*serial.data));
+    byte_count = serial.element_count * sizeof(*serial.data);
+    CHECK(memcmp(serial.data, parallel.data, byte_count) == 0);
+
+    soc_hiz_shutdown(&parallel);
+    soc_hiz_shutdown(&serial);
+    return 0;
+}
+
+static int test_parallel_build_matches_serial(void)
+{
+    static const struct {
+        uint32_t width;
+        uint32_t height;
+    } shapes[] = {
+        {640u, 640u},
+        {641u, 643u},
+        {800u, 513u},
+        {1024u, 800u},
+        {1280u, 1024u},
+        {1u, 393217u},
+        {393217u, 1u},
+        {127u, 73u},
+    };
+    const soc_depth_direction directions[] = {
+        SOC_DEPTH_FORWARD,
+        SOC_DEPTH_REVERSED,
+    };
+    soc_thread_pool parallel_pool = {0};
+    soc_thread_pool serial_pool = {0};
+    size_t shape_index;
+    size_t direction_index;
+
+    CHECK_RESULT(
+        soc_thread_pool_initialize(&parallel_pool, 4u),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        soc_thread_pool_initialize(&serial_pool, 1u),
+        SOC_RESULT_OK
+    );
+
+    for (direction_index = 0u;
+         direction_index < ARRAY_COUNT(directions);
+         ++direction_index) {
+        for (shape_index = 0u;
+             shape_index < ARRAY_COUNT(shapes);
+             ++shape_index) {
+            CHECK(compare_parallel_pyramid(
+                &parallel_pool,
+                shapes[shape_index].width,
+                shapes[shape_index].height,
+                directions[direction_index]
+            ) == 0);
+        }
+    }
+    CHECK(compare_parallel_pyramid(
+        &serial_pool,
+        641u,
+        643u,
+        SOC_DEPTH_FORWARD
+    ) == 0);
+
+    soc_thread_pool_shutdown(&serial_pool);
+    soc_thread_pool_shutdown(&parallel_pool);
+    return 0;
+}
+
 int main(void)
 {
     if (test_forward_max_reduction() != 0) {
@@ -598,5 +727,5 @@ int main(void)
     if (test_depth_direction_rebuild_across_frames() != 0) {
         return 1;
     }
-    return 0;
+    return test_parallel_build_matches_serial();
 }

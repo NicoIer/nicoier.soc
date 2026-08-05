@@ -39,6 +39,19 @@ void soc_thread_pool_run(
     void* user_data
 );
 
+/*
+ * Invokes callback for the calling lane plus active_worker_count - 1 helper
+ * lanes. active_worker_count must be in [1, configured worker_count]. Helper
+ * lane indices are compact in [1, active_worker_count), independent of which
+ * physical helper threads execute them.
+ */
+void soc_thread_pool_run_active(
+    soc_thread_pool* thread_pool,
+    uint32_t active_worker_count,
+    soc_thread_pool_callback callback,
+    void* user_data
+);
+
 uint32_t soc_thread_pool_worker_count(const soc_thread_pool* thread_pool);
 
 #endif

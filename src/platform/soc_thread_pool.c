@@ -23,17 +23,17 @@ typedef struct soc_thread_pool_implementation
 
 typedef struct soc_thread_pool_worker {
     soc_thread_pool_implementation* implementation;
-    uint32_t worker_index;
 } soc_thread_pool_worker;
 
 struct soc_thread_pool_implementation {
-    uint32_t worker_count;
     uint32_t helper_count;
     uint32_t created_helper_count;
 
     soc_thread_pool_callback callback;
     void* user_data;
     uint64_t generation;
+    uint32_t active_worker_count;
+    uint32_t next_worker_index;
     uint32_t remaining_helpers;
     soc_bool stopping;
 
@@ -96,6 +96,13 @@ static void work_available_broadcast(
     WakeAllConditionVariable(&implementation->work_available);
 }
 
+static void work_available_signal(
+    soc_thread_pool_implementation* implementation
+)
+{
+    WakeConditionVariable(&implementation->work_available);
+}
+
 static void work_complete_signal(
     soc_thread_pool_implementation* implementation
 )
@@ -154,6 +161,17 @@ static void work_available_broadcast(
     assert(result == 0);
 }
 
+static void work_available_signal(
+    soc_thread_pool_implementation* implementation
+)
+{
+    const int result = pthread_cond_signal(
+        &implementation->work_available
+    );
+    (void)result;
+    assert(result == 0);
+}
+
 static void work_complete_signal(
     soc_thread_pool_implementation* implementation
 )
@@ -174,9 +192,13 @@ static void worker_run(soc_thread_pool_worker* worker)
     for (;;) {
         soc_thread_pool_callback callback;
         void* user_data;
+        uint32_t worker_index;
+        uint32_t active_worker_count;
 
         while (!implementation->stopping &&
-            observed_generation == implementation->generation) {
+            (observed_generation == implementation->generation ||
+                implementation->next_worker_index >=
+                    implementation->active_worker_count)) {
             work_available_wait(implementation);
         }
         if (implementation->stopping) {
@@ -187,13 +209,15 @@ static void worker_run(soc_thread_pool_worker* worker)
         observed_generation = implementation->generation;
         callback = implementation->callback;
         user_data = implementation->user_data;
+        worker_index = implementation->next_worker_index++;
+        active_worker_count = implementation->active_worker_count;
         state_unlock(implementation);
 
         assert(callback != NULL);
         callback(
             user_data,
-            worker->worker_index,
-            implementation->worker_count
+            worker_index,
+            active_worker_count
         );
 
         state_lock(implementation);
@@ -331,7 +355,6 @@ soc_result soc_thread_pool_initialize(
     if (implementation == NULL) {
         return SOC_RESULT_OUT_OF_MEMORY;
     }
-    implementation->worker_count = worker_count;
     implementation->helper_count = worker_count - 1u;
     implementation->workers = calloc(
         implementation->helper_count,
@@ -377,8 +400,6 @@ soc_result soc_thread_pool_initialize(
          ++worker_offset) {
         implementation->workers[worker_offset].implementation =
             implementation;
-        implementation->workers[worker_offset].worker_index =
-            worker_offset + 1u;
         if (!create_worker_thread(implementation, worker_offset)) {
             stop_and_join_created_workers(implementation);
             goto thread_creation_failed;
@@ -473,8 +494,6 @@ void soc_thread_pool_run(
     void* user_data
 )
 {
-    soc_thread_pool_implementation* implementation;
-
     assert(thread_pool != NULL);
     assert(callback != NULL);
     assert(thread_pool == NULL || thread_pool->worker_count > 0u);
@@ -484,7 +503,39 @@ void soc_thread_pool_run(
         return;
     }
 
-    if (thread_pool->worker_count == 1u) {
+    soc_thread_pool_run_active(
+        thread_pool,
+        thread_pool->worker_count,
+        callback,
+        user_data
+    );
+}
+
+void soc_thread_pool_run_active(
+    soc_thread_pool* thread_pool,
+    uint32_t active_worker_count,
+    soc_thread_pool_callback callback,
+    void* user_data
+)
+{
+    soc_thread_pool_implementation* implementation;
+    uint32_t helper_index;
+
+    assert(thread_pool != NULL);
+    assert(callback != NULL);
+    assert(thread_pool == NULL || thread_pool->worker_count > 0u);
+    assert(active_worker_count > 0u);
+    assert(thread_pool == NULL ||
+        active_worker_count <= thread_pool->worker_count);
+    if (thread_pool == NULL ||
+        callback == NULL ||
+        thread_pool->worker_count == 0u ||
+        active_worker_count == 0u ||
+        active_worker_count > thread_pool->worker_count) {
+        return;
+    }
+
+    if (active_worker_count == 1u) {
         callback(user_data, 0u, 1u);
         return;
     }
@@ -508,12 +559,18 @@ void soc_thread_pool_run(
     state_lock(implementation);
     implementation->callback = callback;
     implementation->user_data = user_data;
-    implementation->remaining_helpers = implementation->helper_count;
+    implementation->active_worker_count = active_worker_count;
+    implementation->next_worker_index = 1u;
+    implementation->remaining_helpers = active_worker_count - 1u;
     ++implementation->generation;
-    work_available_broadcast(implementation);
+    for (helper_index = 1u;
+         helper_index < active_worker_count;
+         ++helper_index) {
+        work_available_signal(implementation);
+    }
     state_unlock(implementation);
 
-    callback(user_data, 0u, implementation->worker_count);
+    callback(user_data, 0u, active_worker_count);
 
     state_lock(implementation);
     while (implementation->remaining_helpers != 0u) {
@@ -521,6 +578,8 @@ void soc_thread_pool_run(
     }
     implementation->callback = NULL;
     implementation->user_data = NULL;
+    implementation->active_worker_count = 0u;
+    implementation->next_worker_index = 0u;
     state_unlock(implementation);
 
 #if defined(_WIN32)

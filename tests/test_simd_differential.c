@@ -429,6 +429,112 @@ static int test_raster_depth_block_differential(
     return 0;
 }
 
+static int test_raster_depth_plane_block_differential(
+    const soc_kernel_table* scalar,
+    const soc_kernel_table* neon
+)
+{
+    static const uint64_t masks[] = {
+        UINT64_C(0),
+        UINT64_MAX,
+        UINT64_C(0xaaaaaaaaaaaaaaaa),
+        UINT64_C(0x0123456789abcdef),
+    };
+    static const float plane_parameters[][3] = {
+        {0.1234567f, 0.0135791f, 0.0213579f},
+        {0.8765432f, -0.017531f, -0.009713f},
+    };
+    static const soc_depth_direction depth_directions[] = {
+        SOC_DEPTH_FORWARD,
+        SOC_DEPTH_REVERSED,
+    };
+    uint32_t width;
+
+    for (width = 1u; width <= SOC_KERNEL_RASTER_BLOCK_SIZE; ++width) {
+        uint32_t height;
+
+        for (height = 1u;
+             height <= SOC_KERNEL_RASTER_BLOCK_SIZE;
+             ++height) {
+            size_t mask_index;
+
+            for (mask_index = 0u;
+                 mask_index < ARRAY_COUNT(masks);
+                 ++mask_index) {
+                size_t plane_index;
+
+                for (plane_index = 0u;
+                     plane_index < ARRAY_COUNT(plane_parameters);
+                     ++plane_index) {
+                    size_t direction_index;
+
+                    for (direction_index = 0u;
+                         direction_index < ARRAY_COUNT(depth_directions);
+                         ++direction_index) {
+                        float scalar_storage[RASTER_DEPTH_STORAGE_COUNT];
+                        float neon_storage[RASTER_DEPTH_STORAGE_COUNT];
+                        const size_t begin = RASTER_DEPTH_GUARD_COUNT + 3u;
+                        size_t index;
+
+                        for (index = 0u;
+                             index < ARRAY_COUNT(scalar_storage);
+                             ++index) {
+                            const uint32_t bits = (index & 1u) != 0u
+                                ? UINT32_C(0x3e4ccccd)
+                                : UINT32_C(0x3f4ccccd);
+
+                            scalar_storage[index] = float_from_bits(bits);
+                            neon_storage[index] = float_from_bits(bits);
+                        }
+                        scalar->store_depth_plane_block_f32(
+                            scalar_storage + begin,
+                            9u,
+                            width,
+                            height,
+                            masks[mask_index],
+                            plane_parameters[plane_index][0],
+                            plane_parameters[plane_index][1],
+                            plane_parameters[plane_index][2],
+                            depth_directions[direction_index]
+                        );
+                        neon->store_depth_plane_block_f32(
+                            neon_storage + begin,
+                            9u,
+                            width,
+                            height,
+                            masks[mask_index],
+                            plane_parameters[plane_index][0],
+                            plane_parameters[plane_index][1],
+                            plane_parameters[plane_index][2],
+                            depth_directions[direction_index]
+                        );
+                        for (index = 0u;
+                             index < ARRAY_COUNT(scalar_storage);
+                             ++index) {
+                            if (float_bits(scalar_storage[index]) !=
+                                float_bits(neon_storage[index])) {
+                                fprintf(
+                                    stderr,
+                                    "raster plane mismatch: %ux%u mask=%zu "
+                                    "plane=%zu direction=%zu index=%zu\n",
+                                    (unsigned)width,
+                                    (unsigned)height,
+                                    mask_index,
+                                    plane_index,
+                                    direction_index,
+                                    index
+                                );
+                                return 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 static int test_raster_depth_block_redzones(
     const soc_kernel_table* scalar,
     const soc_kernel_table* neon
@@ -2524,6 +2630,7 @@ int main(void)
     CHECK(scalar->backend == SOC_KERNEL_BACKEND_SCALAR);
     CHECK(scalar->clear_f32 != NULL);
     CHECK(scalar->store_constant_depth_block_f32 != NULL);
+    CHECK(scalar->store_depth_plane_block_f32 != NULL);
     CHECK(scalar->reduce_hiz_level_f32 != NULL);
     CHECK(scalar->transform_triangle_f64 != NULL);
     CHECK(soc_kernel_table_for_backend(SOC_KERNEL_BACKEND_SCALAR) == scalar);
@@ -2533,12 +2640,15 @@ int main(void)
     CHECK(neon->backend == SOC_KERNEL_BACKEND_NEON);
     CHECK(neon->clear_f32 != NULL);
     CHECK(neon->store_constant_depth_block_f32 != NULL);
+    CHECK(neon->store_depth_plane_block_f32 != NULL);
     CHECK(neon->reduce_hiz_level_f32 != NULL);
     CHECK(neon->transform_triangle_f64 != NULL);
     CHECK(neon->test_aabbs != NULL);
     CHECK(neon->clear_f32 == scalar->clear_f32);
     CHECK(neon->store_constant_depth_block_f32 !=
         scalar->store_constant_depth_block_f32);
+    CHECK(neon->store_depth_plane_block_f32 !=
+        scalar->store_depth_plane_block_f32);
     CHECK(neon->reduce_hiz_level_f32 != scalar->reduce_hiz_level_f32);
     CHECK(neon->transform_triangle_f64 != scalar->transform_triangle_f64);
     CHECK(neon->test_aabbs != scalar->test_aabbs);
@@ -2548,6 +2658,9 @@ int main(void)
         return 1;
     }
     if (test_raster_depth_block_differential(scalar, neon) != 0) {
+        return 1;
+    }
+    if (test_raster_depth_plane_block_differential(scalar, neon) != 0) {
         return 1;
     }
     if (test_raster_depth_block_redzones(scalar, neon) != 0) {
