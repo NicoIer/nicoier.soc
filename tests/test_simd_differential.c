@@ -1139,8 +1139,10 @@ static int run_transform_case(
     float position_before[TRANSFORM_POSITION_STORAGE_COUNT];
     soc_kernel_mat4_f64 object_f64;
     soc_kernel_mat4_f64 clip_f64;
+    soc_kernel_mat4_f64 clip_from_object_f64;
     soc_kernel_mat4_f64 object_before;
     soc_kernel_mat4_f64 clip_before;
+    soc_kernel_mat4_f64 clip_from_object_before;
     transform_output_storage scalar_output;
     transform_output_storage neon_output;
     soc_kernel_clip_metadata scalar_metadata = {0xa5u, 0xa5u, 0xa5u};
@@ -1167,6 +1169,11 @@ static int run_transform_case(
     memcpy(position_before, position_storage, sizeof(position_storage));
     soc_kernel_mat4_f64_from_f32(object_to_world, &object_f64);
     soc_kernel_mat4_f64_from_f32(clip_from_world, &clip_f64);
+    soc_kernel_mat4_f64_multiply(
+        &clip_f64,
+        &object_f64,
+        &clip_from_object_f64
+    );
     if (object_f64.all_finite !=
             (transform_matrix_is_finite(object_to_world) == SOC_TRUE
                 ? UINT64_C(1)
@@ -1180,6 +1187,7 @@ static int run_transform_case(
     }
     object_before = object_f64;
     clip_before = clip_f64;
+    clip_from_object_before = clip_from_object_f64;
     for (index = 0u; index < TRANSFORM_OUTPUT_GUARD_COUNT; ++index) {
         scalar_output.before[index] = guard_value;
         scalar_output.after[index] = guard_value;
@@ -1190,8 +1198,7 @@ static int run_transform_case(
     memset(neon_output.vertices, 0x5a, sizeof(neon_output.vertices));
 
     scalar->transform_triangle_f64(
-        &object_f64,
-        &clip_f64,
+        &clip_from_object_f64,
         position_storage + position_starts[0] + offset,
         position_storage + position_starts[1] + offset,
         position_storage + position_starts[2] + offset,
@@ -1206,7 +1213,12 @@ static int run_transform_case(
             sizeof(position_storage)
         ) != 0 ||
         memcmp(&object_f64, &object_before, sizeof(object_f64)) != 0 ||
-        memcmp(&clip_f64, &clip_before, sizeof(clip_f64)) != 0) {
+        memcmp(&clip_f64, &clip_before, sizeof(clip_f64)) != 0 ||
+        memcmp(
+            &clip_from_object_f64,
+            &clip_from_object_before,
+            sizeof(clip_from_object_f64)
+        ) != 0) {
         fprintf(stderr, "transform Scalar modified input: %s\n", label);
         return 1;
     }
@@ -1227,8 +1239,7 @@ static int run_transform_case(
     }
 
     neon->transform_triangle_f64(
-        &object_f64,
-        &clip_f64,
+        &clip_from_object_f64,
         position_storage + position_starts[0] + offset,
         position_storage + position_starts[1] + offset,
         position_storage + position_starts[2] + offset,
@@ -1243,7 +1254,12 @@ static int run_transform_case(
             sizeof(position_storage)
         ) != 0 ||
         memcmp(&object_f64, &object_before, sizeof(object_f64)) != 0 ||
-        memcmp(&clip_f64, &clip_before, sizeof(clip_f64)) != 0) {
+        memcmp(&clip_f64, &clip_before, sizeof(clip_f64)) != 0 ||
+        memcmp(
+            &clip_from_object_f64,
+            &clip_from_object_before,
+            sizeof(clip_from_object_f64)
+        ) != 0) {
         fprintf(stderr, "transform NEON modified input: %s\n", label);
         return 1;
     }
@@ -1358,40 +1374,72 @@ static double transform_reference_component(
 }
 
 static soc_kernel_clip_vertex transform_reference_vertex(
-    const soc_mat4* matrix,
+    const soc_kernel_mat4_f64* matrix,
     const soc_kernel_clip_vertex* vertex
 )
 {
     const soc_kernel_clip_vertex result = {
         transform_reference_component(
-            matrix->col0.x,
-            matrix->col1.x,
-            matrix->col2.x,
-            matrix->col3.x,
+            matrix->columns[0][0],
+            matrix->columns[1][0],
+            matrix->columns[2][0],
+            matrix->columns[3][0],
             vertex
         ),
         transform_reference_component(
-            matrix->col0.y,
-            matrix->col1.y,
-            matrix->col2.y,
-            matrix->col3.y,
+            matrix->columns[0][1],
+            matrix->columns[1][1],
+            matrix->columns[2][1],
+            matrix->columns[3][1],
             vertex
         ),
         transform_reference_component(
-            matrix->col0.z,
-            matrix->col1.z,
-            matrix->col2.z,
-            matrix->col3.z,
+            matrix->columns[0][2],
+            matrix->columns[1][2],
+            matrix->columns[2][2],
+            matrix->columns[3][2],
             vertex
         ),
         transform_reference_component(
-            matrix->col0.w,
-            matrix->col1.w,
-            matrix->col2.w,
-            matrix->col3.w,
+            matrix->columns[0][3],
+            matrix->columns[1][3],
+            matrix->columns[2][3],
+            matrix->columns[3][3],
             vertex
         ),
     };
+    return result;
+}
+
+static soc_kernel_mat4_f64 transform_reference_matrix_multiply(
+    const soc_kernel_mat4_f64* left,
+    const soc_kernel_mat4_f64* right
+)
+{
+    soc_kernel_mat4_f64 result;
+    size_t column;
+
+    result.all_finite = left->all_finite == UINT64_C(1) &&
+            right->all_finite == UINT64_C(1)
+        ? UINT64_C(1)
+        : UINT64_C(0);
+    for (column = 0u; column < 4u; ++column) {
+        const soc_kernel_clip_vertex right_column = {
+            right->columns[column][0],
+            right->columns[column][1],
+            right->columns[column][2],
+            right->columns[column][3],
+        };
+        const soc_kernel_clip_vertex product = transform_reference_vertex(
+            left,
+            &right_column
+        );
+
+        result.columns[column][0] = product.x;
+        result.columns[column][1] = product.y;
+        result.columns[column][2] = product.z;
+        result.columns[column][3] = product.w;
+    }
     return result;
 }
 
@@ -1421,6 +1469,8 @@ static int test_transform_reference(
     const soc_mat4 clip = transform_matrix_from_values(clip_values);
     soc_kernel_mat4_f64 object_f64;
     soc_kernel_mat4_f64 clip_f64;
+    soc_kernel_mat4_f64 clip_from_object_f64;
+    soc_kernel_mat4_f64 expected_matrix;
     soc_kernel_clip_vertex expected[3];
     soc_kernel_clip_vertex scalar_output[3];
     soc_kernel_clip_vertex neon_output[3];
@@ -1430,6 +1480,23 @@ static int test_transform_reference(
 
     soc_kernel_mat4_f64_from_f32(&object, &object_f64);
     soc_kernel_mat4_f64_from_f32(&clip, &clip_f64);
+    soc_kernel_mat4_f64_multiply(
+        &clip_f64,
+        &object_f64,
+        &clip_from_object_f64
+    );
+    expected_matrix = transform_reference_matrix_multiply(
+        &clip_f64,
+        &object_f64
+    );
+    if (memcmp(
+            &expected_matrix,
+            &clip_from_object_f64,
+            sizeof(expected_matrix)
+        ) != 0) {
+        fprintf(stderr, "transform matrix composition mismatch\n");
+        return 1;
+    }
     for (index = 0u; index < 3u; ++index) {
         const soc_kernel_clip_vertex object_position = {
             positions[index * 3u],
@@ -1437,17 +1504,14 @@ static int test_transform_reference(
             positions[index * 3u + 2u],
             1.0,
         };
-        const soc_kernel_clip_vertex world = transform_reference_vertex(
-            &object,
+        expected[index] = transform_reference_vertex(
+            &expected_matrix,
             &object_position
         );
-
-        expected[index] = transform_reference_vertex(&clip, &world);
     }
 
     scalar->transform_triangle_f64(
-        &object_f64,
-        &clip_f64,
+        &clip_from_object_f64,
         positions,
         positions + 3u,
         positions + 6u,
@@ -1457,8 +1521,7 @@ static int test_transform_reference(
         &scalar_metadata
     );
     neon->transform_triangle_f64(
-        &object_f64,
-        &clip_f64,
+        &clip_from_object_f64,
         positions,
         positions + 3u,
         positions + 6u,
@@ -1469,7 +1532,7 @@ static int test_transform_reference(
     );
     if (memcmp(expected, scalar_output, sizeof(expected)) != 0 ||
         memcmp(expected, neon_output, sizeof(expected)) != 0) {
-        fprintf(stderr, "transform two-stage reference mismatch\n");
+        fprintf(stderr, "transform composed reference mismatch\n");
         return 1;
     }
     return 0;

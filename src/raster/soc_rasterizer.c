@@ -2357,12 +2357,18 @@ soc_result soc_rasterizer_submit_occluders(
     for (instance = 0u; instance < instance_count; ++instance) {
         const soc_mat4* instance_transform = &object_to_world[instance];
         soc_kernel_mat4_f64 object_to_world_f64;
+        soc_kernel_mat4_f64 clip_from_object_f64;
         const uint32_t triangle_count = mesh->index_count / 3u;
         uint32_t triangle;
 
         soc_kernel_mat4_f64_from_f32(
             instance_transform,
             &object_to_world_f64
+        );
+        soc_kernel_mat4_f64_multiply(
+            &clip_from_world_f64,
+            &object_to_world_f64,
+            &clip_from_object_f64
         );
 
         for (triangle = 0u; triangle < triangle_count; ++triangle) {
@@ -2389,8 +2395,7 @@ soc_result soc_rasterizer_submit_occluders(
             );
 
             rasterizer->kernels->transform_triangle_f64(
-                &object_to_world_f64,
-                &clip_from_world_f64,
+                &clip_from_object_f64,
                 mesh->positions_xyz + (size_t)mesh_index0 * 3u,
                 mesh->positions_xyz + (size_t)mesh_index1 * 3u,
                 mesh->positions_xyz + (size_t)mesh_index2 * 3u,

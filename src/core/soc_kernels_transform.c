@@ -51,6 +51,45 @@ static soc_bool finite_f64(double value)
         : SOC_FALSE;
 }
 
+void soc_kernel_mat4_f64_multiply(
+    const soc_kernel_mat4_f64* left,
+    const soc_kernel_mat4_f64* right,
+    soc_kernel_mat4_f64* destination
+)
+{
+    soc_kernel_mat4_f64 result;
+    size_t column;
+
+    result.all_finite = left->all_finite == UINT64_C(1) &&
+            right->all_finite == UINT64_C(1)
+        ? UINT64_C(1)
+        : UINT64_C(0);
+    for (column = 0u; column < 4u; ++column) {
+        const soc_kernel_clip_vertex right_column = {
+            right->columns[column][0],
+            right->columns[column][1],
+            right->columns[column][2],
+            right->columns[column][3],
+        };
+        const soc_kernel_clip_vertex product = transform_vertex_f64(
+            left,
+            &right_column
+        );
+
+        result.columns[column][0] = product.x;
+        result.columns[column][1] = product.y;
+        result.columns[column][2] = product.z;
+        result.columns[column][3] = product.w;
+        if (finite_f64(product.x) != SOC_TRUE ||
+            finite_f64(product.y) != SOC_TRUE ||
+            finite_f64(product.z) != SOC_TRUE ||
+            finite_f64(product.w) != SOC_TRUE) {
+            result.all_finite = UINT64_C(0);
+        }
+    }
+    *destination = result;
+}
+
 static uint8_t compute_clip_outcode_f64(
     const soc_kernel_clip_vertex* vertex,
     soc_clip_depth_range depth_range
@@ -111,8 +150,7 @@ void soc_kernel_mat4_f64_from_f32(
 }
 
 void soc_kernel_transform_triangle_f64_scalar(
-    const soc_kernel_mat4_f64* object_to_world,
-    const soc_kernel_mat4_f64* clip_from_world,
+    const soc_kernel_mat4_f64* clip_from_object,
     const float* position0_xyz,
     const float* position1_xyz,
     const float* position2_xyz,
@@ -142,14 +180,9 @@ void soc_kernel_transform_triangle_f64_scalar(
             positions[index][2],
             1.0,
         };
-        const soc_kernel_clip_vertex world_position = transform_vertex_f64(
-            object_to_world,
-            &object_position
-        );
-
         out_clip[index] = transform_vertex_f64(
-            clip_from_world,
-            &world_position
+            clip_from_object,
+            &object_position
         );
     }
 

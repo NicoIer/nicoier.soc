@@ -93,8 +93,7 @@ typedef struct backend_result {
 } backend_result;
 
 typedef struct transform_workload {
-    soc_kernel_mat4_f64 object_to_world;
-    soc_kernel_mat4_f64 clip_from_world;
+    soc_kernel_mat4_f64 clip_from_object;
     float positions[TRANSFORM_POSITION_SET_COUNT][9];
     soc_kernel_clip_vertex outputs[TRANSFORM_POSITION_SET_COUNT][3];
     soc_kernel_clip_metadata metadata[TRANSFORM_POSITION_SET_COUNT];
@@ -522,22 +521,29 @@ static void initialize_transform_workload(transform_workload* workload)
         {0.40625, -0.234375, 0.875, 0.15625},
         {-0.75, 0.5, 0.1875, 1.125},
     };
+    soc_kernel_mat4_f64 object_to_world;
+    soc_kernel_mat4_f64 clip_from_world;
     uint32_t state = UINT32_C(0x5452414e);
     size_t set;
 
     memset(workload, 0, sizeof(*workload));
     memcpy(
-        workload->object_to_world.columns,
+        object_to_world.columns,
         object_columns,
         sizeof(object_columns)
     );
     memcpy(
-        workload->clip_from_world.columns,
+        clip_from_world.columns,
         clip_columns,
         sizeof(clip_columns)
     );
-    workload->object_to_world.all_finite = UINT64_C(1);
-    workload->clip_from_world.all_finite = UINT64_C(1);
+    object_to_world.all_finite = UINT64_C(1);
+    clip_from_world.all_finite = UINT64_C(1);
+    soc_kernel_mat4_f64_multiply(
+        &clip_from_world,
+        &object_to_world,
+        &workload->clip_from_object
+    );
     for (set = 0u; set < TRANSFORM_POSITION_SET_COUNT; ++set) {
         size_t component;
 
@@ -569,8 +575,7 @@ static void execute_transform_operation(
         const float* positions = workload->positions[set];
 
         kernels->transform_triangle_f64(
-            &workload->object_to_world,
-            &workload->clip_from_world,
+            &workload->clip_from_object,
             positions,
             positions + 3u,
             positions + 6u,
@@ -1375,14 +1380,9 @@ static int run_transform_case(
             sizeof(scalar_workload.positions)
         ) != 0 ||
         memcmp(
-            &scalar_workload.object_to_world,
-            &neon_workload.object_to_world,
-            sizeof(scalar_workload.object_to_world)
-        ) != 0 ||
-        memcmp(
-            &scalar_workload.clip_from_world,
-            &neon_workload.clip_from_world,
-            sizeof(scalar_workload.clip_from_world)
+            &scalar_workload.clip_from_object,
+            &neon_workload.clip_from_object,
+            sizeof(scalar_workload.clip_from_object)
         ) != 0) {
         (void)fprintf(stderr, "%s: Scalar/NEON validation mismatch\n", case_name);
         goto cleanup;

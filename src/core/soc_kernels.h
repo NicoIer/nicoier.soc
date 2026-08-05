@@ -58,8 +58,7 @@ typedef struct soc_kernel_table {
         soc_depth_direction depth_direction
     );
     void (*transform_triangle_f64)(
-        const soc_kernel_mat4_f64* object_to_world,
-        const soc_kernel_mat4_f64* clip_from_world,
+        const soc_kernel_mat4_f64* clip_from_object,
         const float* position0_xyz,
         const float* position1_xyz,
         const float* position2_xyz,
@@ -99,9 +98,15 @@ void soc_kernel_mat4_f64_from_f32(
     soc_kernel_mat4_f64* destination
 );
 
+/* Column-major destination = left * right; destination may alias either input. */
+void soc_kernel_mat4_f64_multiply(
+    const soc_kernel_mat4_f64* left,
+    const soc_kernel_mat4_f64* right,
+    soc_kernel_mat4_f64* destination
+);
+
 void soc_kernel_transform_triangle_f64_scalar(
-    const soc_kernel_mat4_f64* object_to_world,
-    const soc_kernel_mat4_f64* clip_from_world,
+    const soc_kernel_mat4_f64* clip_from_object,
     const float* position0_xyz,
     const float* position1_xyz,
     const float* position2_xyz,

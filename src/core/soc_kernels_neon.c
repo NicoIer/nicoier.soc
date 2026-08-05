@@ -328,8 +328,7 @@ static SOC_NEON_FORCE_INLINE uint8_t compute_clip_outcode_f64_neon(
 }
 
 static void transform_triangle_f64_neon(
-    const soc_kernel_mat4_f64* object_to_world,
-    const soc_kernel_mat4_f64* clip_from_world,
+    const soc_kernel_mat4_f64* clip_from_object,
     const float* position0_xyz,
     const float* position1_xyz,
     const float* position2_xyz,
@@ -344,46 +343,28 @@ static void transform_triangle_f64_neon(
         position1_xyz,
         position2_xyz,
     };
-    const float64x2_t object_xy0 =
-        vld1q_f64(&object_to_world->columns[0][0]);
-    const float64x2_t object_xy1 =
-        vld1q_f64(&object_to_world->columns[1][0]);
-    const float64x2_t object_xy2 =
-        vld1q_f64(&object_to_world->columns[2][0]);
-    const float64x2_t object_xy3 =
-        vld1q_f64(&object_to_world->columns[3][0]);
-    const float64x2_t object_zw0 =
-        vld1q_f64(&object_to_world->columns[0][2]);
-    const float64x2_t object_zw1 =
-        vld1q_f64(&object_to_world->columns[1][2]);
-    const float64x2_t object_zw2 =
-        vld1q_f64(&object_to_world->columns[2][2]);
-    const float64x2_t object_zw3 =
-        vld1q_f64(&object_to_world->columns[3][2]);
     const float64x2_t clip_xy0 =
-        vld1q_f64(&clip_from_world->columns[0][0]);
+        vld1q_f64(&clip_from_object->columns[0][0]);
     const float64x2_t clip_xy1 =
-        vld1q_f64(&clip_from_world->columns[1][0]);
+        vld1q_f64(&clip_from_object->columns[1][0]);
     const float64x2_t clip_xy2 =
-        vld1q_f64(&clip_from_world->columns[2][0]);
+        vld1q_f64(&clip_from_object->columns[2][0]);
     const float64x2_t clip_xy3 =
-        vld1q_f64(&clip_from_world->columns[3][0]);
+        vld1q_f64(&clip_from_object->columns[3][0]);
     const float64x2_t clip_zw0 =
-        vld1q_f64(&clip_from_world->columns[0][2]);
+        vld1q_f64(&clip_from_object->columns[0][2]);
     const float64x2_t clip_zw1 =
-        vld1q_f64(&clip_from_world->columns[1][2]);
+        vld1q_f64(&clip_from_object->columns[1][2]);
     const float64x2_t clip_zw2 =
-        vld1q_f64(&clip_from_world->columns[2][2]);
+        vld1q_f64(&clip_from_object->columns[2][2]);
     const float64x2_t clip_zw3 =
-        vld1q_f64(&clip_from_world->columns[3][2]);
+        vld1q_f64(&clip_from_object->columns[3][2]);
     size_t index;
 
-    if (object_to_world->all_finite != UINT64_C(1) ||
-        clip_from_world->all_finite != UINT64_C(1) ||
+    if (clip_from_object->all_finite != UINT64_C(1) ||
         positions_all_finite != SOC_TRUE) {
         soc_kernel_transform_triangle_f64_scalar(
-            object_to_world,
-            clip_from_world,
+            clip_from_object,
             position0_xyz,
             position1_xyz,
             position2_xyz,
@@ -403,49 +384,25 @@ static void transform_triangle_f64_neon(
         const double x = positions[index][0];
         const double y = positions[index][1];
         const double z = positions[index][2];
-        const float64x2_t world_xy = transform_pair_f64_neon(
-            object_xy0,
-            object_xy1,
-            object_xy2,
-            object_xy3,
-            x,
-            y,
-            z,
-            1.0
-        );
-        const float64x2_t world_zw = transform_pair_f64_neon(
-            object_zw0,
-            object_zw1,
-            object_zw2,
-            object_zw3,
-            x,
-            y,
-            z,
-            1.0
-        );
-        const double world_x = vgetq_lane_f64(world_xy, 0);
-        const double world_y = vgetq_lane_f64(world_xy, 1);
-        const double world_z = vgetq_lane_f64(world_zw, 0);
-        const double world_w = vgetq_lane_f64(world_zw, 1);
         const float64x2_t clip_xy = transform_pair_f64_neon(
             clip_xy0,
             clip_xy1,
             clip_xy2,
             clip_xy3,
-            world_x,
-            world_y,
-            world_z,
-            world_w
+            x,
+            y,
+            z,
+            1.0
         );
         const float64x2_t clip_zw = transform_pair_f64_neon(
             clip_zw0,
             clip_zw1,
             clip_zw2,
             clip_zw3,
-            world_x,
-            world_y,
-            world_z,
-            world_w
+            x,
+            y,
+            z,
+            1.0
         );
 
         out_clip[index].x = vgetq_lane_f64(clip_xy, 0);
