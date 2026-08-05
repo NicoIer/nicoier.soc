@@ -143,8 +143,7 @@ static int parse_double_value(const char* text, double* out_value)
     value = strtod(text, &end);
     if (end == text ||
         *end != '\0' ||
-        errno == ERANGE ||
-        isfinite(value) == 0) {
+        errno == ERANGE) {
         return 0;
     }
 
@@ -229,7 +228,7 @@ static int parse_options(
                 set_error(
                     error,
                     error_capacity,
-                    "--fov requires a finite number"
+                    "--fov requires a number"
                 );
                 return 0;
             }
@@ -240,7 +239,7 @@ static int parse_options(
                 set_error(
                     error,
                     error_capacity,
-                    "--eye requires three finite numbers"
+                    "--eye requires three numbers"
                 );
                 return 0;
             }
@@ -252,7 +251,7 @@ static int parse_options(
                 set_error(
                     error,
                     error_capacity,
-                    "--target requires three finite numbers"
+                    "--target requires three numbers"
                 );
                 return 0;
             }
@@ -264,7 +263,7 @@ static int parse_options(
                 set_error(
                     error,
                     error_capacity,
-                    "--up requires three finite numbers"
+                    "--up requires three numbers"
                 );
                 return 0;
             }
@@ -278,7 +277,7 @@ static int parse_options(
                 set_error(
                     error,
                     error_capacity,
-                    "--near requires a finite number"
+                    "--near requires a number"
                 );
                 return 0;
             }
@@ -293,7 +292,7 @@ static int parse_options(
                 set_error(
                     error,
                     error_capacity,
-                    "--far requires a finite number"
+                    "--far requires a number"
                 );
                 return 0;
             }
@@ -420,7 +419,7 @@ static int vector_normalize(
     const double squared_length = vector_dot(input, input);
     double inverse_length;
 
-    if (squared_length <= DBL_MIN || isfinite(squared_length) == 0) {
+    if (squared_length <= DBL_MIN) {
         return 0;
     }
 
@@ -428,18 +427,13 @@ static int vector_normalize(
     out_vector->x = input.x * inverse_length;
     out_vector->y = input.y * inverse_length;
     out_vector->z = input.z * inverse_length;
-    return isfinite(out_vector->x) != 0 &&
-        isfinite(out_vector->y) != 0 &&
-        isfinite(out_vector->z) != 0;
+    return 1;
 }
 
 static double vector_length(soc_cli_vector3d vector)
 {
     const double squared_length = vector_dot(vector, vector);
 
-    if (squared_length < 0.0 || isfinite(squared_length) == 0) {
-        return HUGE_VAL;
-    }
     return sqrt(squared_length);
 }
 
@@ -496,9 +490,7 @@ static int make_perspective(
 
     if (aspect <= 0.0 ||
         near_plane <= 0.0 ||
-        far_plane <= near_plane ||
-        isfinite(focal_length) == 0 ||
-        isfinite(depth_range) == 0) {
+        far_plane <= near_plane) {
         return 0;
     }
 
@@ -549,11 +541,6 @@ static int matrix_to_soc(
     size_t index;
 
     for (index = 0u; index < 16u; ++index) {
-        if (isfinite(source->values[index]) == 0 ||
-            source->values[index] < -(double)FLT_MAX ||
-            source->values[index] > (double)FLT_MAX) {
-            return 0;
-        }
         values[index] = (float)source->values[index];
     }
 
@@ -629,9 +616,7 @@ static int resolve_camera(
     soc_cli_vector3d view_forward;
     double center_depth;
 
-    if (isfinite(object_radius) == 0 ||
-        isfinite(limiting_half_angle) == 0 ||
-        limiting_half_angle <= 0.0) {
+    if (limiting_half_angle <= 0.0) {
         set_error(
             error,
             error_capacity,
@@ -647,14 +632,6 @@ static int resolve_camera(
         const double distance =
             fit_radius / sin(limiting_half_angle) * 1.1;
 
-        if (isfinite(distance) == 0) {
-            set_error(
-                error,
-                error_capacity,
-                "automatic camera distance is not finite"
-            );
-            return 0;
-        }
         options->eye = options->target;
         options->eye.z += distance;
     }
@@ -670,15 +647,6 @@ static int resolve_camera(
         vector_subtract(center, options->eye),
         view_forward
     );
-    if (isfinite(center_depth) == 0) {
-        set_error(
-            error,
-            error_capacity,
-            "camera position is too far from the OBJ"
-        );
-        return 0;
-    }
-
     if (options->has_near == 0) {
         const double minimum_near = fit_radius * 0.001;
         const double candidate = center_depth - fit_radius * 1.25;
@@ -691,9 +659,7 @@ static int resolve_camera(
     }
 
     if (options->near_plane <= 0.0 ||
-        options->far_plane <= options->near_plane ||
-        isfinite(options->near_plane) == 0 ||
-        isfinite(options->far_plane) == 0) {
+        options->far_plane <= options->near_plane) {
         set_error(
             error,
             error_capacity,

@@ -135,7 +135,6 @@ static int test_uint16_storage_and_explicit_destroy(void)
     CHECK(mesh->vertex_count == 3u);
     CHECK(mesh->index_count == 6u);
     CHECK(mesh->index_type == SOC_INDEX_UINT16);
-    CHECK(mesh->positions_all_finite == SOC_TRUE);
     CHECK(mesh->positions_xyz != NULL);
     CHECK(mesh->indices != NULL);
     CHECK(mesh->positions_xyz != source_positions);
@@ -216,8 +215,6 @@ static int test_uint32_unaligned_storage_and_context_destroy(void)
     CHECK(first->next == NULL);
 
     CHECK(first->index_type == SOC_INDEX_UINT32);
-    CHECK(first->positions_all_finite == SOC_TRUE);
-    CHECK(second->positions_all_finite == SOC_TRUE);
     CHECK(first->positions_xyz != NULL);
     CHECK(first->indices != NULL);
     CHECK(first->positions_xyz != (const void*)vertex_bytes);
@@ -320,40 +317,6 @@ static int test_invalid_indices_are_atomic(void)
     CHECK(recovery->next == NULL);
     CHECK_RESULT(soc_mesh_destroy(recovery), SOC_RESULT_OK);
     CHECK(context->meshes == NULL);
-    soc_context_destroy(context);
-    return 0;
-}
-
-static int test_nonfinite_position_cache(void)
-{
-    float positions[] = {
-        -1.0f, -1.0f, 0.0f,
-         1.0f, -1.0f, 0.0f,
-         0.0f,  1.0f, 0.0f,
-         2.0f,  2.0f, 2.0f,
-    };
-    const uint16_t indices[] = {0u, 1u, 2u};
-    const uint32_t nan_bits = UINT32_C(0x7fc12345);
-    soc_context* context;
-    soc_mesh_desc desc;
-    soc_mesh* mesh = NULL;
-
-    memcpy(&positions[9], &nan_bits, sizeof(nan_bits));
-    desc = make_mesh_desc(
-        positions,
-        indices,
-        4u,
-        3u * (uint32_t)sizeof(float),
-        0u,
-        3u,
-        SOC_INDEX_UINT16
-    );
-    context = create_context();
-    CHECK(context != NULL);
-    CHECK_RESULT(soc_mesh_create(context, &desc, &mesh), SOC_RESULT_OK);
-    CHECK(mesh != NULL);
-    CHECK(mesh->positions_all_finite == SOC_FALSE);
-
     soc_context_destroy(context);
     return 0;
 }
@@ -477,9 +440,6 @@ int main(void)
         return 1;
     }
     if (test_invalid_indices_are_atomic() != 0) {
-        return 1;
-    }
-    if (test_nonfinite_position_cache() != 0) {
         return 1;
     }
     if (test_invalid_layout_is_atomic() != 0) {

@@ -24,14 +24,6 @@
         } \
     } while (0)
 
-static float float_from_bits(uint32_t bits)
-{
-    float value;
-
-    memcpy(&value, &bits, sizeof(value));
-    return value;
-}
-
 static uint32_t float_bits(float value)
 {
     uint32_t bits;
@@ -278,7 +270,6 @@ static int compare_queries(
     const soc_snapshot* neon
 )
 {
-    const float nan_payload = float_from_bits(UINT32_C(0x7fc12345));
     const soc_bool reversed = scalar->frame.depth_direction ==
         SOC_DEPTH_REVERSED ? SOC_TRUE : SOC_FALSE;
     const soc_aabb bounds[] = {
@@ -303,8 +294,8 @@ static int compare_queries(
             .max = {-0.25f, 0.25f, 0.80f},
         },
         {
-            .min = {nan_payload, -0.10f, 0.20f},
-            .max = {0.10f, 0.10f, 0.80f},
+            .min = {-0.10f, 0.10f, 0.20f},
+            .max = {0.10f, -0.10f, 0.80f},
         },
         {
             .min = {-0.0f, 0.0f, 0.50f},

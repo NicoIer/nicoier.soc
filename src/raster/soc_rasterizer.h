@@ -52,6 +52,14 @@ soc_result soc_rasterizer_submit_occluders(
     uint32_t instance_count
 );
 
+soc_result soc_rasterizer_submit_occluder_triangles(
+    soc_rasterizer* rasterizer,
+    const soc_mesh* mesh,
+    const soc_mat4* object_to_world,
+    uint32_t triangle_begin,
+    uint32_t triangle_count
+);
+
 soc_result soc_rasterizer_finish_occluders(soc_rasterizer* rasterizer);
 
 soc_result soc_rasterizer_end_frame(soc_rasterizer* rasterizer);

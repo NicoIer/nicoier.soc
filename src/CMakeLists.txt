@@ -12,6 +12,7 @@ add_library(
         occlusion/soc_hiz.c
         occlusion/soc_visibility.c
         occlusion/soc_visibility_neon.c
+        platform/soc_thread_pool.c
         raster/soc_rasterizer.c
 )
 
@@ -23,6 +24,7 @@ target_include_directories(
 )
 
 target_compile_features(soc_core PRIVATE c_std_17)
+target_link_libraries(soc_core PRIVATE Threads::Threads)
 set_target_properties(
     soc_core
     PROPERTIES
@@ -75,6 +77,7 @@ target_include_directories(
 )
 
 target_compile_features(soc PUBLIC c_std_17)
+target_link_libraries(soc PUBLIC Threads::Threads)
 soc_enable_warnings(soc)
 
 set_target_properties(

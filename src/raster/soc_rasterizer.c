@@ -43,8 +43,7 @@ typedef uint8_t soc_clip_outcode;
     ((soc_clip_outcode)((1u << SOC_CLIP_PLANE_COUNT) - 1u))
 
 typedef enum soc_clip_classification {
-    SOC_CLIP_CLASSIFICATION_NONFINITE = 0,
-    SOC_CLIP_CLASSIFICATION_ACCEPT,
+    SOC_CLIP_CLASSIFICATION_ACCEPT = 0,
     SOC_CLIP_CLASSIFICATION_REJECT,
     SOC_CLIP_CLASSIFICATION_PARTIAL,
 } soc_clip_classification;
@@ -133,13 +132,6 @@ static soc_bool checked_size_multiply(
 
     *out_result = left * right;
     return SOC_TRUE;
-}
-
-static soc_bool finite_double(double value)
-{
-    return value == value && value >= -DBL_MAX && value <= DBL_MAX
-        ? SOC_TRUE
-        : SOC_FALSE;
 }
 
 static uint32_t read_mesh_index(
@@ -971,10 +963,6 @@ static soc_bool try_configure_fast_depth_plane(
             (numerator_x_term0 - numerator_x_term1) / area;
         out_setup->depth_step_y =
             (numerator_y_term0 - numerator_y_term1) / area;
-        if (finite_double(out_setup->depth_step_x) != SOC_TRUE ||
-            finite_double(out_setup->depth_step_y) != SOC_TRUE) {
-            return SOC_FALSE;
-        }
 
         evaluation_magnitude =
             absolute_double(out_setup->depth_anchor) +
@@ -1048,7 +1036,7 @@ static soc_bool try_configure_fast_depth_plane(
             }
         }
     }
-    return finite_double(out_setup->depth_error_bound);
+    return SOC_TRUE;
 }
 
 static void configure_depth_plane(
@@ -1120,10 +1108,6 @@ static soc_raster_setup_result prepare_screen_triangle(
         }
         ndc_x = clip_vertices[index]->x / clip_vertices[index]->w;
         ndc_y = clip_vertices[index]->y / clip_vertices[index]->w;
-        if (finite_double(ndc_x) != SOC_TRUE ||
-            finite_double(ndc_y) != SOC_TRUE) {
-            return SOC_RASTER_SETUP_REJECTED;
-        }
         ndc_x = clamp_double(ndc_x, -1.0, 1.0);
         ndc_y = clamp_double(ndc_y, -1.0, 1.0);
         screen[index].x =
@@ -1160,9 +1144,6 @@ static soc_raster_setup_result prepare_screen_triangle(
         if (rasterizer->frame.clip_depth_range ==
             SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) {
             depth = depth * 0.5 + 0.5;
-        }
-        if (finite_double(depth) != SOC_TRUE) {
-            return SOC_RASTER_SETUP_REJECTED;
         }
         screen[index].depth = clamp_double(depth, 0.0, 1.0);
     }
@@ -1470,12 +1451,6 @@ static float make_conservative_depth(
     uint32_t candidate_bits;
     uint32_t guard;
 
-    if (finite_double(depth) != SOC_TRUE) {
-        return rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
-            ? 0.0f
-            : 1.0f;
-    }
-
     depth = rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
         ? depth - depth_error_bound
         : depth + depth_error_bound;
@@ -1552,10 +1527,6 @@ static void rasterize_depth_sample(
     soc_bool passes_depth;
     uint32_t candidate_bits;
     uint32_t guard;
-
-    if (finite_double(depth) != SOC_TRUE) {
-        return;
-    }
 
     depth = rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
         ? depth - depth_error_bound
@@ -2323,6 +2294,164 @@ soc_result soc_rasterizer_begin_frame(
     return SOC_RESULT_OK;
 }
 
+soc_result soc_rasterizer_submit_occluder_triangles(
+    soc_rasterizer* rasterizer,
+    const soc_mesh* mesh,
+    const soc_mat4* object_to_world,
+    uint32_t triangle_begin,
+    uint32_t triangle_count
+)
+{
+    soc_kernel_mat4_f64 clip_from_world_f64;
+    soc_kernel_mat4_f64 object_to_world_f64;
+    soc_kernel_mat4_f64 clip_from_object_f64;
+    uint32_t triangle;
+    uint32_t triangle_end;
+    uint32_t mesh_triangle_count;
+
+    if (rasterizer == NULL ||
+        rasterizer->frame_active != SOC_TRUE ||
+        mesh == NULL ||
+        mesh->positions_xyz == NULL ||
+        mesh->indices == NULL ||
+        object_to_world == NULL ||
+        triangle_count == 0u) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+
+    mesh_triangle_count = mesh->index_count / 3u;
+    if (triangle_begin >= mesh_triangle_count ||
+        triangle_count > mesh_triangle_count - triangle_begin) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+    triangle_end = triangle_begin + triangle_count;
+
+    soc_kernel_mat4_f64_from_f32(
+        &rasterizer->frame.clip_from_world,
+        &clip_from_world_f64
+    );
+    soc_kernel_mat4_f64_from_f32(
+        object_to_world,
+        &object_to_world_f64
+    );
+    soc_kernel_mat4_f64_multiply(
+        &clip_from_world_f64,
+        &object_to_world_f64,
+        &clip_from_object_f64
+    );
+
+    for (triangle = triangle_begin; triangle < triangle_end; ++triangle) {
+        soc_clip_vertex clip_triangle_vertices[3];
+        soc_clip_vertex clipped_polygon[SOC_MAX_CLIPPED_VERTICES];
+        soc_raster_depth_plane fan_depth_plane;
+        const soc_raster_depth_plane* shared_depth_plane = NULL;
+        soc_clip_outcode active_planes;
+        soc_clip_classification clip_classification;
+        soc_kernel_clip_metadata clip_metadata;
+        uint32_t clipped_vertex_count;
+        uint32_t fan_index;
+        const uint32_t mesh_index0 = read_mesh_index(
+            mesh,
+            triangle * 3u
+        );
+        const uint32_t mesh_index1 = read_mesh_index(
+            mesh,
+            triangle * 3u + 1u
+        );
+        const uint32_t mesh_index2 = read_mesh_index(
+            mesh,
+            triangle * 3u + 2u
+        );
+
+        rasterizer->kernels->transform_triangle_f64(
+            &clip_from_object_f64,
+            mesh->positions_xyz + (size_t)mesh_index0 * 3u,
+            mesh->positions_xyz + (size_t)mesh_index1 * 3u,
+            mesh->positions_xyz + (size_t)mesh_index2 * 3u,
+            rasterizer->frame.clip_depth_range,
+            clip_triangle_vertices,
+            &clip_metadata
+        );
+        active_planes = clip_metadata.active_planes;
+        if (clip_metadata.common_planes != 0u) {
+            clip_classification = SOC_CLIP_CLASSIFICATION_REJECT;
+        } else {
+            clip_classification = active_planes == 0u
+                ? SOC_CLIP_CLASSIFICATION_ACCEPT
+                : SOC_CLIP_CLASSIFICATION_PARTIAL;
+        }
+        if (clip_classification == SOC_CLIP_CLASSIFICATION_REJECT) {
+            ++rasterizer->clipped_triangle_count;
+            continue;
+        }
+
+        if (clip_classification == SOC_CLIP_CLASSIFICATION_ACCEPT) {
+            if (rasterize_triangle(
+                    rasterizer,
+                    &clip_triangle_vertices[0],
+                    &clip_triangle_vertices[1],
+                    &clip_triangle_vertices[2],
+                    (mesh->flags & SOC_MESH_FLAG_TWO_SIDED) != 0u
+                        ? SOC_TRUE
+                        : SOC_FALSE
+                ) == SOC_TRUE) {
+                ++rasterizer->rasterized_triangle_count;
+            }
+            continue;
+        }
+
+        ++rasterizer->clipped_triangle_count;
+        clipped_vertex_count = clip_triangle(
+            rasterizer,
+            clip_triangle_vertices,
+            active_planes,
+            clipped_polygon
+        );
+        if (clipped_vertex_count < 3u) {
+            continue;
+        }
+
+        for (fan_index = 1u;
+             fan_index + 1u < clipped_vertex_count;
+             ++fan_index) {
+            soc_screen_vertex screen[3];
+            const soc_raster_setup_result setup_result =
+                prepare_screen_triangle(
+                    rasterizer,
+                    &clipped_polygon[0],
+                    &clipped_polygon[fan_index],
+                    &clipped_polygon[fan_index + 1u],
+                    (mesh->flags & SOC_MESH_FLAG_TWO_SIDED) != 0u
+                        ? SOC_TRUE
+                        : SOC_FALSE,
+                    screen
+                );
+
+            if (setup_result == SOC_RASTER_SETUP_REJECTED) {
+                continue;
+            }
+            if (clipped_vertex_count > 3u &&
+                shared_depth_plane == NULL &&
+                configure_shared_fan_depth_plane(
+                    rasterizer,
+                    screen,
+                    &fan_depth_plane
+                ) == SOC_TRUE) {
+                shared_depth_plane = &fan_depth_plane;
+            }
+            if (rasterize_prepared_triangle(
+                    rasterizer,
+                    screen,
+                    shared_depth_plane
+                ) == SOC_TRUE) {
+                ++rasterizer->rasterized_triangle_count;
+            }
+        }
+    }
+
+    return SOC_RESULT_OK;
+}
+
 soc_result soc_rasterizer_submit_occluders(
     soc_rasterizer* rasterizer,
     const soc_mesh* mesh,
@@ -2331,8 +2460,10 @@ soc_result soc_rasterizer_submit_occluders(
 )
 {
     size_t transform_byte_count;
-    soc_kernel_mat4_f64 clip_from_world_f64;
     uint32_t instance;
+    const uint32_t triangle_count = mesh != NULL
+        ? mesh->index_count / 3u
+        : 0u;
 
     if (rasterizer == NULL ||
         rasterizer->frame_active != SOC_TRUE ||
@@ -2349,139 +2480,18 @@ soc_result soc_rasterizer_submit_occluders(
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 
-    soc_kernel_mat4_f64_from_f32(
-        &rasterizer->frame.clip_from_world,
-        &clip_from_world_f64
-    );
-
     for (instance = 0u; instance < instance_count; ++instance) {
-        const soc_mat4* instance_transform = &object_to_world[instance];
-        soc_kernel_mat4_f64 object_to_world_f64;
-        soc_kernel_mat4_f64 clip_from_object_f64;
-        const uint32_t triangle_count = mesh->index_count / 3u;
-        uint32_t triangle;
-
-        soc_kernel_mat4_f64_from_f32(
-            instance_transform,
-            &object_to_world_f64
-        );
-        soc_kernel_mat4_f64_multiply(
-            &clip_from_world_f64,
-            &object_to_world_f64,
-            &clip_from_object_f64
-        );
-
-        for (triangle = 0u; triangle < triangle_count; ++triangle) {
-            soc_clip_vertex clip_triangle_vertices[3];
-            soc_clip_vertex clipped_polygon[SOC_MAX_CLIPPED_VERTICES];
-            soc_raster_depth_plane fan_depth_plane;
-            const soc_raster_depth_plane* shared_depth_plane = NULL;
-            soc_clip_outcode active_planes;
-            soc_clip_classification clip_classification;
-            soc_kernel_clip_metadata clip_metadata;
-            uint32_t clipped_vertex_count;
-            uint32_t fan_index;
-            const uint32_t mesh_index0 = read_mesh_index(
-                mesh,
-                triangle * 3u
-            );
-            const uint32_t mesh_index1 = read_mesh_index(
-                mesh,
-                triangle * 3u + 1u
-            );
-            const uint32_t mesh_index2 = read_mesh_index(
-                mesh,
-                triangle * 3u + 2u
-            );
-
-            rasterizer->kernels->transform_triangle_f64(
-                &clip_from_object_f64,
-                mesh->positions_xyz + (size_t)mesh_index0 * 3u,
-                mesh->positions_xyz + (size_t)mesh_index1 * 3u,
-                mesh->positions_xyz + (size_t)mesh_index2 * 3u,
-                mesh->positions_all_finite,
-                rasterizer->frame.clip_depth_range,
-                clip_triangle_vertices,
-                &clip_metadata
-            );
-            active_planes = clip_metadata.active_planes;
-            if (clip_metadata.all_finite != SOC_TRUE) {
-                clip_classification = SOC_CLIP_CLASSIFICATION_NONFINITE;
-            } else if (clip_metadata.common_planes != 0u) {
-                clip_classification = SOC_CLIP_CLASSIFICATION_REJECT;
-            } else {
-                clip_classification = active_planes == 0u
-                    ? SOC_CLIP_CLASSIFICATION_ACCEPT
-                    : SOC_CLIP_CLASSIFICATION_PARTIAL;
-            }
-            if (clip_classification == SOC_CLIP_CLASSIFICATION_NONFINITE ||
-                clip_classification == SOC_CLIP_CLASSIFICATION_REJECT) {
-                ++rasterizer->clipped_triangle_count;
-                continue;
-            }
-
-            if (clip_classification == SOC_CLIP_CLASSIFICATION_ACCEPT) {
-                if (rasterize_triangle(
-                        rasterizer,
-                        &clip_triangle_vertices[0],
-                        &clip_triangle_vertices[1],
-                        &clip_triangle_vertices[2],
-                        (mesh->flags & SOC_MESH_FLAG_TWO_SIDED) != 0u
-                            ? SOC_TRUE
-                            : SOC_FALSE
-                    ) == SOC_TRUE) {
-                    ++rasterizer->rasterized_triangle_count;
-                }
-                continue;
-            }
-
-            ++rasterizer->clipped_triangle_count;
-            clipped_vertex_count = clip_triangle(
+        const soc_result result =
+            soc_rasterizer_submit_occluder_triangles(
                 rasterizer,
-                clip_triangle_vertices,
-                active_planes,
-                clipped_polygon
+                mesh,
+                &object_to_world[instance],
+                0u,
+                triangle_count
             );
-            if (clipped_vertex_count < 3u) {
-                continue;
-            }
 
-            for (fan_index = 1u;
-                 fan_index + 1u < clipped_vertex_count;
-                 ++fan_index) {
-                soc_screen_vertex screen[3];
-                const soc_raster_setup_result setup_result =
-                    prepare_screen_triangle(
-                        rasterizer,
-                        &clipped_polygon[0],
-                        &clipped_polygon[fan_index],
-                        &clipped_polygon[fan_index + 1u],
-                        (mesh->flags & SOC_MESH_FLAG_TWO_SIDED) != 0u
-                            ? SOC_TRUE
-                            : SOC_FALSE,
-                        screen
-                    );
-
-                if (setup_result == SOC_RASTER_SETUP_REJECTED) {
-                    continue;
-                }
-                if (clipped_vertex_count > 3u &&
-                    shared_depth_plane == NULL &&
-                    configure_shared_fan_depth_plane(
-                        rasterizer,
-                        screen,
-                        &fan_depth_plane
-                    ) == SOC_TRUE) {
-                    shared_depth_plane = &fan_depth_plane;
-                }
-                if (rasterize_prepared_triangle(
-                        rasterizer,
-                        screen,
-                        shared_depth_plane
-                    ) == SOC_TRUE) {
-                    ++rasterizer->rasterized_triangle_count;
-                }
-            }
+        if (result != SOC_RESULT_OK) {
+            return result;
         }
     }
 

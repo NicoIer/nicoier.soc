@@ -49,13 +49,6 @@ static double fused_multiply_add_double(
 }
 #endif
 
-static soc_bool finite_double(double value)
-{
-    return value == value && value >= -DBL_MAX && value <= DBL_MAX
-        ? SOC_TRUE
-        : SOC_FALSE;
-}
-
 static double absolute_double(double value)
 {
     return value < 0.0 ? -value : value;
@@ -98,13 +91,7 @@ static double remap_negative_one_to_one_depth(double depth)
 
 static soc_bool valid_aabb(const soc_aabb* bounds)
 {
-    if (bounds == NULL ||
-        finite_double(bounds->min.x) != SOC_TRUE ||
-        finite_double(bounds->min.y) != SOC_TRUE ||
-        finite_double(bounds->min.z) != SOC_TRUE ||
-        finite_double(bounds->max.x) != SOC_TRUE ||
-        finite_double(bounds->max.y) != SOC_TRUE ||
-        finite_double(bounds->max.z) != SOC_TRUE) {
+    if (bounds == NULL) {
         return SOC_FALSE;
     }
 
@@ -161,19 +148,6 @@ static soc_visibility_clip_vertex transform_point(
         ),
     };
     return result;
-}
-
-static soc_bool finite_clip_vertex(
-    const soc_visibility_clip_vertex* vertex
-)
-{
-    return vertex != NULL &&
-        finite_double(vertex->x) == SOC_TRUE &&
-        finite_double(vertex->y) == SOC_TRUE &&
-        finite_double(vertex->z) == SOC_TRUE &&
-        finite_double(vertex->w) == SOC_TRUE
-        ? SOC_TRUE
-        : SOC_FALSE;
 }
 
 static soc_visibility_clip_vertex add_clip_vertices(
@@ -277,7 +251,6 @@ void soc_aabb_query_context_initialize(
         .clip_planes = {{0.0, 0.0, 0.0, 0.0}},
         .w_plane = {0.0, 0.0, 0.0, 0.0},
         .transform_error_scale = 0.0,
-        .all_finite = SOC_FALSE,
         .near_clip_plane_index =
             frame->depth_direction == SOC_DEPTH_REVERSED
             ? 5u
@@ -381,13 +354,6 @@ void soc_aabb_query_context_initialize(
         query.col2.w,
         query.col3.w
     );
-    query.all_finite =
-        finite_clip_vertex(&query.col0) == SOC_TRUE &&
-        finite_clip_vertex(&query.col1) == SOC_TRUE &&
-        finite_clip_vertex(&query.col2) == SOC_TRUE &&
-        finite_clip_vertex(&query.col3) == SOC_TRUE
-            ? SOC_TRUE
-            : SOC_FALSE;
     *out_query = query;
 }
 
@@ -453,9 +419,6 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
         absolute_double(bounds->max.z)
     );
     clip_error_margin = query->transform_error_scale * bounds_scale;
-    if (finite_double(clip_error_margin) != SOC_TRUE) {
-        return SOC_AABB_PROJECTION_UNKNOWN;
-    }
 
     /*
      * The positive vertex is the exact affine maximum for each clip plane.
@@ -470,9 +433,6 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
             bounds
         );
 
-        if (finite_double(maximum_distance) != SOC_TRUE) {
-            return SOC_AABB_PROJECTION_UNKNOWN;
-        }
         if (maximum_distance > clip_error_margin) {
             all_outside_mask &= ~(UINT32_C(1) << plane);
         } else if (maximum_distance >= -clip_error_margin) {
@@ -484,10 +444,6 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
         &query->clip_planes[query->near_clip_plane_index],
         bounds
     );
-    if (finite_double(minimum_w) != SOC_TRUE ||
-        finite_double(minimum_near_clip_distance) != SOC_TRUE) {
-        return SOC_AABB_PROJECTION_UNKNOWN;
-    }
     if (minimum_w < -clip_error_margin) {
         has_nonpositive_w = SOC_TRUE;
     } else if (minimum_w <= clip_error_margin) {
@@ -526,9 +482,6 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
             double near_clip_distance;
 
             *clip = transform_point(query, x, y, z);
-            if (finite_clip_vertex(clip) != SOC_TRUE) {
-                return SOC_AABB_PROJECTION_UNKNOWN;
-            }
             minimum_z_distance =
                 query->clip_depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE
                     ? clip->z
@@ -620,12 +573,6 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
         clip_corners[7] = add_clip_vertices(&clip_corners[3], &axis_z);
     }
 
-    for (corner = 0u; corner < SOC_AABB_CORNER_COUNT; ++corner) {
-        if (finite_clip_vertex(&clip_corners[corner]) != SOC_TRUE) {
-            return SOC_AABB_PROJECTION_UNKNOWN;
-        }
-    }
-
     out_projected->minimum_ndc_x = DBL_MAX;
     out_projected->maximum_ndc_x = -DBL_MAX;
     out_projected->minimum_ndc_y = DBL_MAX;
@@ -646,12 +593,6 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
             SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) {
             depth = remap_negative_one_to_one_depth(depth);
         }
-        if (finite_double(ndc_x) != SOC_TRUE ||
-            finite_double(ndc_y) != SOC_TRUE ||
-            finite_double(depth) != SOC_TRUE) {
-            return SOC_AABB_PROJECTION_UNKNOWN;
-        }
-
         if (ndc_x < out_projected->minimum_ndc_x) {
             out_projected->minimum_ndc_x = ndc_x;
         }
@@ -684,8 +625,7 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
             8.0 * clip_error_margin /
                 (minimum_w - clip_error_margin);
     }
-    if (finite_double(projection_margin) != SOC_TRUE ||
-        projection_margin < 0.0 ||
+    if (projection_margin < 0.0 ||
         projection_margin > 1.0) {
         projection_margin = 1.0;
     }

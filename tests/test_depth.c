@@ -999,16 +999,6 @@ static int test_clip_outcode_trivial_paths(void)
              0.00f,  0.50f, 1.25f,
         },
     };
-    const float nan_positions[] = {
-        NAN,   -0.50f, 0.50f,
-        0.50f, -0.50f, 0.50f,
-        0.00f,  0.50f, 0.50f,
-    };
-    const float infinite_positions[] = {
-        -0.50f, -0.50f, 0.50f,
-         0.50f, -0.50f, 0.50f,
-         0.00f, INFINITY, 0.50f,
-    };
     float negative_zero_positions[9];
     float accepted_positions[9];
     soc_context* context = NULL;
@@ -1097,12 +1087,6 @@ static int test_clip_outcode_trivial_paths(void)
             rejected_positions[case_index]
         ) == 0);
     }
-    CHECK(check_trivially_rejected_triangle(context, nan_positions) == 0);
-    CHECK(check_trivially_rejected_triangle(
-        context,
-        infinite_positions
-    ) == 0);
-
     soc_context_destroy(context);
     return 0;
 }

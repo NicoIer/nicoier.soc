@@ -32,6 +32,14 @@ soc_result SOC_CALL soc_context_resize(
     return soc_context_resize_internal(context, width, height);
 }
 
+soc_result SOC_CALL soc_context_get_runtime_info(
+    const soc_context* context,
+    soc_runtime_info* out_info
+)
+{
+    return soc_context_get_runtime_info_internal(context, out_info);
+}
+
 soc_result SOC_CALL soc_mesh_create(
     soc_context* context,
     const soc_mesh_desc* desc,

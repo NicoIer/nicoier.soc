@@ -5,7 +5,6 @@
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
-#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -192,7 +191,7 @@ static int parse_matrix(const char* text, soc_mat4* out_matrix)
         }
         errno = 0;
         values[index] = strtof(text, &end);
-        if (end == text || errno == ERANGE || isfinite(values[index]) == 0) {
+        if (end == text || errno == ERANGE) {
             return 0;
         }
         text = end;

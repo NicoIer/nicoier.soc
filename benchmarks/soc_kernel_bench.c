@@ -479,8 +479,6 @@ static uint64_t checksum_transform_outputs(
         hash *= UINT64_C(1099511628211);
         hash ^= metadata[set].common_planes;
         hash *= UINT64_C(1099511628211);
-        hash ^= metadata[set].all_finite;
-        hash *= UINT64_C(1099511628211);
     }
     return hash;
 }
@@ -537,8 +535,6 @@ static void initialize_transform_workload(transform_workload* workload)
         clip_columns,
         sizeof(clip_columns)
     );
-    object_to_world.all_finite = UINT64_C(1);
-    clip_from_world.all_finite = UINT64_C(1);
     soc_kernel_mat4_f64_multiply(
         &clip_from_world,
         &object_to_world,
@@ -579,7 +575,6 @@ static void execute_transform_operation(
             positions,
             positions + 3u,
             positions + 6u,
-            SOC_TRUE,
             SOC_CLIP_DEPTH_ZERO_TO_ONE,
             workload->outputs[set],
             &workload->metadata[set]

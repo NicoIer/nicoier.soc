@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define SOC_ABI_VERSION_MAJOR 2u
-#define SOC_ABI_VERSION_MINOR 0u
+#define SOC_ABI_VERSION_MINOR 1u
 #define SOC_ABI_VERSION \
     ((SOC_ABI_VERSION_MAJOR << 16u) | SOC_ABI_VERSION_MINOR)
 
@@ -30,6 +30,43 @@ typedef int32_t soc_result;
 typedef struct soc_context soc_context;
 typedef struct soc_mesh soc_mesh;
 typedef struct soc_snapshot soc_snapshot;
+
+typedef uint32_t soc_cpu_architecture;
+
+#define SOC_CPU_ARCHITECTURE_UNKNOWN ((soc_cpu_architecture)0u)
+#define SOC_CPU_ARCHITECTURE_X86 ((soc_cpu_architecture)1u)
+#define SOC_CPU_ARCHITECTURE_ARM32 ((soc_cpu_architecture)2u)
+#define SOC_CPU_ARCHITECTURE_ARM64 ((soc_cpu_architecture)3u)
+
+typedef uint32_t soc_cpu_feature_flags;
+
+#define SOC_CPU_FEATURE_NONE ((soc_cpu_feature_flags)0u)
+#define SOC_CPU_FEATURE_SSE2 ((soc_cpu_feature_flags)(1u << 0u))
+#define SOC_CPU_FEATURE_SSE4_1 ((soc_cpu_feature_flags)(1u << 1u))
+#define SOC_CPU_FEATURE_AVX2 ((soc_cpu_feature_flags)(1u << 2u))
+#define SOC_CPU_FEATURE_NEON ((soc_cpu_feature_flags)(1u << 3u))
+#define SOC_CPU_FEATURE_ALL_KNOWN \
+    (SOC_CPU_FEATURE_SSE2 | SOC_CPU_FEATURE_SSE4_1 | \
+        SOC_CPU_FEATURE_AVX2 | SOC_CPU_FEATURE_NEON)
+
+typedef uint32_t soc_execution_backend;
+
+#define SOC_EXECUTION_BACKEND_SCALAR ((soc_execution_backend)0u)
+#define SOC_EXECUTION_BACKEND_NEON ((soc_execution_backend)1u)
+
+typedef struct soc_runtime_info {
+    uint32_t struct_size;
+    soc_cpu_architecture cpu_architecture;
+    /* ISA features usable by the current process and operating system. */
+    soc_cpu_feature_flags cpu_features;
+    /* The backend actually selected by this context. */
+    soc_execution_backend execution_backend;
+    /* Total execution lanes, including the thread which calls build. */
+    uint32_t worker_count;
+} soc_runtime_info;
+
+#define SOC_RUNTIME_INFO_SIZE_V1 \
+    ((uint32_t)(offsetof(soc_runtime_info, worker_count) + sizeof(uint32_t)))
 
 typedef struct soc_vector2 {
     float x;
@@ -98,6 +135,7 @@ typedef uint32_t soc_front_face;
 #define SOC_FRONT_FACE_CW ((soc_front_face)1u)
 
 #define SOC_CONFIG_FLAG_NONE 0u
+#define SOC_MAX_WORKER_COUNT UINT32_C(256)
 
 typedef struct soc_config {
     uint32_t struct_size;

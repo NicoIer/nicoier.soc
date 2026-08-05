@@ -1,19 +1,7 @@
 #include "core/soc_kernels.h"
 
-#include <float.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
-
-static uint32_t nonfinite_f32_mask(float value)
-{
-    uint32_t bits;
-    uint32_t exponent;
-
-    memcpy(&bits, &value, sizeof(bits));
-    exponent = bits & UINT32_C(0x7f800000);
-    return (exponent + UINT32_C(0x00800000)) & UINT32_C(0x80000000);
-}
 
 static soc_kernel_clip_vertex transform_vertex_f64(
     const soc_kernel_mat4_f64* matrix,
@@ -44,13 +32,6 @@ static soc_kernel_clip_vertex transform_vertex_f64(
     return result;
 }
 
-static soc_bool finite_f64(double value)
-{
-    return value == value && value >= -DBL_MAX && value <= DBL_MAX
-        ? SOC_TRUE
-        : SOC_FALSE;
-}
-
 void soc_kernel_mat4_f64_multiply(
     const soc_kernel_mat4_f64* left,
     const soc_kernel_mat4_f64* right,
@@ -60,10 +41,6 @@ void soc_kernel_mat4_f64_multiply(
     soc_kernel_mat4_f64 result;
     size_t column;
 
-    result.all_finite = left->all_finite == UINT64_C(1) &&
-            right->all_finite == UINT64_C(1)
-        ? UINT64_C(1)
-        : UINT64_C(0);
     for (column = 0u; column < 4u; ++column) {
         const soc_kernel_clip_vertex right_column = {
             right->columns[column][0],
@@ -80,12 +57,6 @@ void soc_kernel_mat4_f64_multiply(
         result.columns[column][1] = product.y;
         result.columns[column][2] = product.z;
         result.columns[column][3] = product.w;
-        if (finite_f64(product.x) != SOC_TRUE ||
-            finite_f64(product.y) != SOC_TRUE ||
-            finite_f64(product.z) != SOC_TRUE ||
-            finite_f64(product.w) != SOC_TRUE) {
-            result.all_finite = UINT64_C(0);
-        }
     }
     *destination = result;
 }
@@ -131,7 +102,6 @@ void soc_kernel_mat4_f64_from_f32(
         source->col2.x, source->col2.y, source->col2.z, source->col2.w,
         source->col3.x, source->col3.y, source->col3.z, source->col3.w,
     };
-    uint32_t nonfinite_mask = 0u;
     size_t column;
 
     for (column = 0u; column < 4u; ++column) {
@@ -141,12 +111,8 @@ void soc_kernel_mat4_f64_from_f32(
             const float value = components[column * 4u + row];
 
             destination->columns[column][row] = value;
-            nonfinite_mask |= nonfinite_f32_mask(value);
         }
     }
-    destination->all_finite = nonfinite_mask == 0u
-        ? UINT64_C(1)
-        : UINT64_C(0);
 }
 
 void soc_kernel_transform_triangle_f64_scalar(
@@ -154,7 +120,6 @@ void soc_kernel_transform_triangle_f64_scalar(
     const float* position0_xyz,
     const float* position1_xyz,
     const float* position2_xyz,
-    soc_bool positions_all_finite,
     soc_clip_depth_range depth_range,
     soc_kernel_clip_vertex out_clip[3],
     soc_kernel_clip_metadata* out_metadata
@@ -167,11 +132,8 @@ void soc_kernel_transform_triangle_f64_scalar(
     };
     size_t index;
 
-    (void)positions_all_finite;
-
     out_metadata->active_planes = 0u;
     out_metadata->common_planes = UINT8_C(0x3f);
-    out_metadata->all_finite = SOC_TRUE;
 
     for (index = 0u; index < 3u; ++index) {
         const soc_kernel_clip_vertex object_position = {
@@ -187,18 +149,10 @@ void soc_kernel_transform_triangle_f64_scalar(
     }
 
     for (index = 0u; index < 3u; ++index) {
-        uint8_t outcode;
-
-        if (finite_f64(out_clip[index].x) != SOC_TRUE ||
-            finite_f64(out_clip[index].y) != SOC_TRUE ||
-            finite_f64(out_clip[index].z) != SOC_TRUE ||
-            finite_f64(out_clip[index].w) != SOC_TRUE) {
-            out_metadata->active_planes = 0u;
-            out_metadata->common_planes = 0u;
-            out_metadata->all_finite = SOC_FALSE;
-            return;
-        }
-        outcode = compute_clip_outcode_f64(&out_clip[index], depth_range);
+        const uint8_t outcode = compute_clip_outcode_f64(
+            &out_clip[index],
+            depth_range
+        );
         out_metadata->active_planes = (uint8_t)(
             out_metadata->active_planes | outcode
         );

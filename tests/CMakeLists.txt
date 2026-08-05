@@ -34,6 +34,19 @@ soc_enable_warnings(soc_test_cpu_features)
 
 add_test(NAME soc.cpu_features COMMAND soc_test_cpu_features)
 
+add_executable(soc_test_thread_pool test_thread_pool.c)
+target_link_libraries(soc_test_thread_pool PRIVATE soc_core)
+target_include_directories(
+    soc_test_thread_pool
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src"
+)
+target_compile_features(soc_test_thread_pool PRIVATE c_std_17)
+soc_enable_warnings(soc_test_thread_pool)
+
+add_test(NAME soc.thread_pool COMMAND soc_test_thread_pool)
+
 add_executable(soc_test_kernels test_kernels.c)
 target_link_libraries(soc_test_kernels PRIVATE soc_core)
 target_include_directories(
@@ -82,6 +95,13 @@ target_compile_features(soc_test_pipeline PRIVATE c_std_17)
 soc_enable_warnings(soc_test_pipeline)
 
 add_test(NAME soc.pipeline COMMAND soc_test_pipeline)
+
+add_executable(soc_test_parallel test_parallel.c)
+target_link_libraries(soc_test_parallel PRIVATE soc::soc)
+target_compile_features(soc_test_parallel PRIVATE c_std_17)
+soc_enable_warnings(soc_test_parallel)
+
+add_test(NAME soc.parallel COMMAND soc_test_parallel)
 
 add_executable(soc_test_mesh test_mesh.c)
 target_link_libraries(soc_test_mesh PRIVATE soc::soc)

@@ -24,10 +24,6 @@ uint64_t soc_cli_depth_to_gray8(
         double view_distance;
         double logarithmic_depth;
 
-        if (isfinite(value) == 0) {
-            pixels[pixel] = 0u;
-            continue;
-        }
         if ((reversed_z != 0 && value <= 0.0) ||
             (reversed_z == 0 && value >= 1.0)) {
             pixels[pixel] = 255u;
@@ -50,17 +46,13 @@ uint64_t soc_cli_depth_to_gray8(
             : far_plane;
         logarithmic_depth =
             log(view_distance / near_plane) / logarithmic_range;
-        if (isfinite(logarithmic_depth) == 0) {
-            pixels[pixel] = 0u;
-            continue;
-        }
         if (logarithmic_depth < 0.0) {
             logarithmic_depth = 0.0;
         } else if (logarithmic_depth > 1.0) {
             logarithmic_depth = 1.0;
         }
 
-        /* Reserve black and white for invalid and uncovered pixels. */
+        /* Reserve black and white for the covered and uncovered endpoints. */
         pixels[pixel] = (unsigned char)(
             1.0 + floor(logarithmic_depth * 253.0 + 0.5)
         );

@@ -79,11 +79,8 @@ static SOC_NEON_FORCE_INLINE void store_constant_depth_block_f32_neon_impl(
                         lane_bits
                     );
 
-                    /*
-                     * Uncovered lanes did not participate in the old Scalar
-                     * path. Compare the candidate with itself in those lanes
-                     * so an uncovered stored NaN cannot affect FP status.
-                     */
+                    /* Compare the candidate with itself in uncovered lanes
+                     * so their store-mask bits remain clear. */
                     compared_stored = vbslq_f32(
                         covered,
                         stored,
@@ -332,7 +329,6 @@ static void transform_triangle_f64_neon(
     const float* position0_xyz,
     const float* position1_xyz,
     const float* position2_xyz,
-    soc_bool positions_all_finite,
     soc_clip_depth_range depth_range,
     soc_kernel_clip_vertex out_clip[3],
     soc_kernel_clip_metadata* out_metadata
@@ -361,24 +357,8 @@ static void transform_triangle_f64_neon(
         vld1q_f64(&clip_from_object->columns[3][2]);
     size_t index;
 
-    if (clip_from_object->all_finite != UINT64_C(1) ||
-        positions_all_finite != SOC_TRUE) {
-        soc_kernel_transform_triangle_f64_scalar(
-            clip_from_object,
-            position0_xyz,
-            position1_xyz,
-            position2_xyz,
-            positions_all_finite,
-            depth_range,
-            out_clip,
-            out_metadata
-        );
-        return;
-    }
-
     out_metadata->active_planes = 0u;
     out_metadata->common_planes = UINT8_C(0x3f);
-    out_metadata->all_finite = SOC_TRUE;
 
     for (index = 0u; index < 3u; ++index) {
         const double x = positions[index][0];

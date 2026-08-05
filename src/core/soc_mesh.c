@@ -35,16 +35,6 @@ static soc_bool checked_size_add(
     return SOC_TRUE;
 }
 
-static soc_bool finite_f32(float value)
-{
-    uint32_t bits;
-
-    memcpy(&bits, &value, sizeof(bits));
-    return (bits & UINT32_C(0x7f800000)) != UINT32_C(0x7f800000)
-        ? SOC_TRUE
-        : SOC_FALSE;
-}
-
 static soc_result validate_mesh_desc(const soc_mesh_desc* desc)
 {
     if (desc == NULL ||
@@ -199,7 +189,6 @@ soc_result soc_mesh_create_internal(
     mesh->vertex_count = desc->vertex_count;
     mesh->index_count = desc->index_count;
     mesh->index_type = desc->index_type;
-    mesh->positions_all_finite = SOC_TRUE;
 
     mesh->indices = malloc(index_bytes);
     if (mesh->indices == NULL) {
@@ -233,11 +222,6 @@ soc_result soc_mesh_create_internal(
         mesh->positions_xyz[destination] = position[0];
         mesh->positions_xyz[destination + 1u] = position[1];
         mesh->positions_xyz[destination + 2u] = position[2];
-        if (finite_f32(position[0]) != SOC_TRUE ||
-            finite_f32(position[1]) != SOC_TRUE ||
-            finite_f32(position[2]) != SOC_TRUE) {
-            mesh->positions_all_finite = SOC_FALSE;
-        }
     }
 
     mesh->owner = context;

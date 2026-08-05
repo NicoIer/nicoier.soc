@@ -5,24 +5,6 @@
 
 #include <stdint.h>
 
-typedef uint32_t soc_cpu_architecture;
-
-#define SOC_CPU_ARCHITECTURE_UNKNOWN ((soc_cpu_architecture)0u)
-#define SOC_CPU_ARCHITECTURE_X86 ((soc_cpu_architecture)1u)
-#define SOC_CPU_ARCHITECTURE_ARM32 ((soc_cpu_architecture)2u)
-#define SOC_CPU_ARCHITECTURE_ARM64 ((soc_cpu_architecture)3u)
-
-typedef uint32_t soc_cpu_feature_flags;
-
-#define SOC_CPU_FEATURE_NONE ((soc_cpu_feature_flags)0u)
-#define SOC_CPU_FEATURE_SSE2 ((soc_cpu_feature_flags)(1u << 0u))
-#define SOC_CPU_FEATURE_SSE4_1 ((soc_cpu_feature_flags)(1u << 1u))
-#define SOC_CPU_FEATURE_AVX2 ((soc_cpu_feature_flags)(1u << 2u))
-#define SOC_CPU_FEATURE_NEON ((soc_cpu_feature_flags)(1u << 3u))
-#define SOC_CPU_FEATURE_ALL_KNOWN \
-    (SOC_CPU_FEATURE_SSE2 | SOC_CPU_FEATURE_SSE4_1 | \
-        SOC_CPU_FEATURE_AVX2 | SOC_CPU_FEATURE_NEON)
-
 typedef struct soc_cpu_features {
     soc_cpu_architecture architecture;
     /* Runtime-usable ISA features. AVX2 includes the required OS XCR0 state. */

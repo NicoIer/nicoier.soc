@@ -22,7 +22,6 @@
 static int test_reserved_values(void)
 {
     const float forward_depth[] = {
-        NAN,
         1.0f,
         0.0f,
         0.655646145f,
@@ -41,11 +40,10 @@ static int test_reserved_values(void)
     );
 
     CHECK(drawn_count == 3u);
-    CHECK(pixels[0] == 0u);
-    CHECK(pixels[1] == 255u);
-    CHECK(pixels[2] == 1u);
-    CHECK(pixels[3] > 1u && pixels[3] < 254u);
-    CHECK(pixels[4] == 254u);
+    CHECK(pixels[0] == 255u);
+    CHECK(pixels[1] == 1u);
+    CHECK(pixels[2] > 1u && pixels[2] < 254u);
+    CHECK(pixels[3] == 254u);
     return 0;
 }
 

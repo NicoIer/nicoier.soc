@@ -26,22 +26,9 @@
 #define SOC_NOINLINE
 #endif
 
-static soc_bool finite_double_neon(double value)
-{
-    return value == value && value >= -DBL_MAX && value <= DBL_MAX
-        ? SOC_TRUE
-        : SOC_FALSE;
-}
-
 static soc_bool valid_aabb_neon(const soc_aabb* bounds)
 {
-    return finite_double_neon(bounds->min.x) == SOC_TRUE &&
-        finite_double_neon(bounds->min.y) == SOC_TRUE &&
-        finite_double_neon(bounds->min.z) == SOC_TRUE &&
-        finite_double_neon(bounds->max.x) == SOC_TRUE &&
-        finite_double_neon(bounds->max.y) == SOC_TRUE &&
-        finite_double_neon(bounds->max.z) == SOC_TRUE &&
-        bounds->min.x <= bounds->max.x &&
+    return bounds->min.x <= bounds->max.x &&
         bounds->min.y <= bounds->max.y &&
         bounds->min.z <= bounds->max.z
             ? SOC_TRUE
@@ -242,8 +229,7 @@ static double projection_margin_f64(
             8.0 * clip_error_margin /
                 (minimum_w - clip_error_margin);
     }
-    if (finite_double_neon(projection_margin) != SOC_TRUE ||
-        projection_margin < 0.0 ||
+    if (projection_margin < 0.0 ||
         projection_margin > 1.0) {
         projection_margin = 1.0;
     }
@@ -288,7 +274,6 @@ static void project_aabb_pair_f64_neon(
     float64x2_t projected_minimum_y;
     float64x2_t projected_maximum_y;
     float64x2_t projected_nearest_depth;
-    soc_bool projected_finite[2] = {SOC_TRUE, SOC_TRUE};
     uint32_t lane;
     uint32_t plane;
     uint32_t corner;
@@ -369,10 +354,7 @@ static void project_aabb_pair_f64_neon(
             if (valid[lane] != SOC_TRUE) {
                 continue;
             }
-            if (finite_double_neon(scalar_distance) != SOC_TRUE ||
-                finite_double_neon(scalar_margin) != SOC_TRUE) {
-                use_scalar[lane] = SOC_TRUE;
-            } else if (scalar_distance > scalar_margin) {
+            if (scalar_distance > scalar_margin) {
                 all_outside_mask[lane] &= ~(UINT32_C(1) << plane);
             } else if (scalar_distance >= -scalar_margin) {
                 use_scalar[lane] = SOC_TRUE;
@@ -417,20 +399,15 @@ static void project_aabb_pair_f64_neon(
         if (valid[lane] != SOC_TRUE) {
             continue;
         }
-        if (finite_double_neon(scalar_minimum_w) != SOC_TRUE ||
-            finite_double_neon(scalar_minimum_near) != SOC_TRUE) {
+        if (scalar_minimum_w < -scalar_margin) {
+            has_nonpositive_w = SOC_TRUE;
+        } else if (scalar_minimum_w <= scalar_margin) {
             use_scalar[lane] = SOC_TRUE;
-        } else {
-            if (scalar_minimum_w < -scalar_margin) {
-                has_nonpositive_w = SOC_TRUE;
-            } else if (scalar_minimum_w <= scalar_margin) {
-                use_scalar[lane] = SOC_TRUE;
-            }
-            if (scalar_minimum_near < -scalar_margin) {
-                has_corner_outside_near = SOC_TRUE;
-            } else if (scalar_minimum_near <= scalar_margin) {
-                use_scalar[lane] = SOC_TRUE;
-            }
+        }
+        if (scalar_minimum_near < -scalar_margin) {
+            has_corner_outside_near = SOC_TRUE;
+        } else if (scalar_minimum_near <= scalar_margin) {
+            use_scalar[lane] = SOC_TRUE;
         }
 
         if (use_scalar[lane] == SOC_TRUE) {
@@ -565,18 +542,6 @@ static void project_aabb_pair_f64_neon(
                 vdupq_n_f64(0.5)
             );
         }
-        for (lane = 0u; lane < 2u; ++lane) {
-            if (analytic[lane] == SOC_TRUE &&
-                (finite_double_neon(get_pair_lane_f64(ndc_x, lane)) !=
-                        SOC_TRUE ||
-                    finite_double_neon(get_pair_lane_f64(ndc_y, lane)) !=
-                        SOC_TRUE ||
-                    finite_double_neon(get_pair_lane_f64(depth, lane)) !=
-                        SOC_TRUE)) {
-                projected_finite[lane] = SOC_FALSE;
-            }
-        }
-
         projected_minimum_x = ordered_min_pair_f64(
             projected_minimum_x,
             ndc_x
@@ -604,14 +569,6 @@ static void project_aabb_pair_f64_neon(
         double projection_margin;
 
         if (analytic[lane] != SOC_TRUE) {
-            continue;
-        }
-        if (projected_finite[lane] != SOC_TRUE) {
-            out_projection[lane] = soc_project_aabb_scalar(
-                query,
-                &bounds[lane],
-                &out_projected[lane]
-            );
             continue;
         }
         projection_margin = projection_margin_f64(
@@ -718,8 +675,7 @@ static SOC_NOINLINE soc_result soc_occlusion_test_aabbs_pair_neon(
         return result;
     }
 
-    if (query->all_finite != SOC_TRUE ||
-        ranges_overlap(
+    if (ranges_overlap(
             world_bounds,
             (size_t)bounds_count * sizeof(*world_bounds),
             out_visibility,

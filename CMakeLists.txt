@@ -82,6 +82,9 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(SocWarnings)
 include(GNUInstallDirs)
 
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 # Keep DLLs and the executables which load them in the same directory. This
 # also makes the native MSVC test configuration work without editing PATH.
 if(WIN32

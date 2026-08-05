@@ -2,9 +2,7 @@
 
 #include <ctype.h>
 #include <errno.h>
-#include <float.h>
 #include <limits.h>
-#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -218,13 +216,11 @@ static int parse_vertex(
         cursor = skip_space(cursor);
         errno = 0;
         components[component] = strtod(cursor, &end);
-        if (end == cursor ||
-            errno == ERANGE ||
-            isfinite(components[component]) == 0) {
+        if (end == cursor || errno == ERANGE) {
             set_error(
                 error,
                 error_capacity,
-                "line %zu: vertex component %zu is not finite",
+                "line %zu: invalid vertex component %zu",
                 line_number,
                 component + 1u
             );
@@ -241,12 +237,11 @@ static int parse_vertex(
         homogeneous_w = strtod(cursor, &end);
         if (end == cursor ||
             errno == ERANGE ||
-            isfinite(homogeneous_w) == 0 ||
             homogeneous_w == 0.0) {
             set_error(
                 error,
                 error_capacity,
-                "line %zu: homogeneous vertex w must be finite and non-zero",
+                "line %zu: homogeneous vertex w must be non-zero",
                 line_number
             );
             return 0;
@@ -266,17 +261,6 @@ static int parse_vertex(
 
     for (component = 0u; component < 3u; ++component) {
         components[component] /= homogeneous_w;
-        if (isfinite(components[component]) == 0 ||
-            components[component] < -(double)FLT_MAX ||
-            components[component] > (double)FLT_MAX) {
-            set_error(
-                error,
-                error_capacity,
-                "line %zu: homogeneous vertex exceeds float range",
-                line_number
-            );
-            return 0;
-        }
     }
 
     if (mesh->vertex_count == UINT32_MAX ||

@@ -5,6 +5,18 @@
 _Static_assert(sizeof(soc_bool) == 1u, "soc_bool must be one byte");
 _Static_assert(sizeof(soc_result) == 4u, "soc_result must be four bytes");
 _Static_assert(sizeof(soc_visibility) == 1u, "soc_visibility must be one byte");
+_Static_assert(
+    sizeof(soc_cpu_architecture) == 4u,
+    "soc_cpu_architecture must be four bytes"
+);
+_Static_assert(
+    sizeof(soc_cpu_feature_flags) == 4u,
+    "soc_cpu_feature_flags must be four bytes"
+);
+_Static_assert(
+    sizeof(soc_execution_backend) == 4u,
+    "soc_execution_backend must be four bytes"
+);
 _Static_assert(sizeof(soc_index_type) == 4u, "soc_index_type must be four bytes");
 _Static_assert(sizeof(soc_vector2) == 8u, "soc_vector2 must contain two floats");
 _Static_assert(sizeof(soc_vector3) == 12u, "soc_vector3 must contain three floats");
@@ -42,6 +54,10 @@ _Static_assert(
 _Static_assert(
     sizeof(soc_hiz_level_info) == SOC_HIZ_LEVEL_INFO_SIZE_V1,
     "soc_hiz_level_info V1 layout changed"
+);
+_Static_assert(
+    sizeof(soc_runtime_info) == SOC_RUNTIME_INFO_SIZE_V1,
+    "soc_runtime_info V1 layout changed"
 );
 _Static_assert(
     offsetof(soc_frame_desc, clip_from_world) == 4u,

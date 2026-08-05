@@ -87,12 +87,62 @@ static int test_context_captures_detection(void)
         .flags = SOC_CONFIG_FLAG_NONE,
     };
     const soc_cpu_features detected = soc_cpu_features_detect();
+    soc_runtime_info info = {
+        .struct_size = sizeof(soc_runtime_info),
+    };
     soc_context* context = NULL;
 
     CHECK(soc_context_create_internal(&config, &context) == SOC_RESULT_OK);
     CHECK(context != NULL);
     CHECK(context->cpu_features.architecture == detected.architecture);
     CHECK(context->cpu_features.flags == detected.flags);
+    CHECK(
+        soc_context_get_runtime_info_internal(context, &info) ==
+            SOC_RESULT_OK
+    );
+    CHECK(info.cpu_architecture == context->cpu_features.architecture);
+    CHECK(info.cpu_features == context->cpu_features.flags);
+    CHECK(info.worker_count == context->worker_count);
+    CHECK(info.worker_count >= 1u);
+    CHECK(info.worker_count <= SOC_MAX_WORKER_COUNT);
+    CHECK(
+        info.execution_backend ==
+            (context->kernels->backend == SOC_KERNEL_BACKEND_NEON
+                ? SOC_EXECUTION_BACKEND_NEON
+                : SOC_EXECUTION_BACKEND_SCALAR)
+    );
+
+    soc_context_destroy_internal(context);
+    return 0;
+}
+
+static int test_runtime_info_reports_forced_scalar(void)
+{
+    const soc_config config = {
+        .struct_size = sizeof(soc_config),
+        .width = 320u,
+        .height = 180u,
+        .worker_count = 0u,
+        .flags = SOC_CONFIG_FLAG_NONE,
+    };
+    soc_runtime_info info = {
+        .struct_size = sizeof(soc_runtime_info),
+    };
+    soc_context* context = NULL;
+
+    CHECK(
+        soc_context_create_for_backend_for_testing_internal(
+            &config,
+            SOC_KERNEL_BACKEND_SCALAR,
+            &context
+        ) == SOC_RESULT_OK
+    );
+    CHECK(context != NULL);
+    CHECK(
+        soc_context_get_runtime_info_internal(context, &info) ==
+            SOC_RESULT_OK
+    );
+    CHECK(info.execution_backend == SOC_EXECUTION_BACKEND_SCALAR);
 
     soc_context_destroy_internal(context);
     return 0;
@@ -107,6 +157,9 @@ int main(void)
         return 1;
     }
     if (test_context_captures_detection() != 0) {
+        return 1;
+    }
+    if (test_runtime_info_reports_forced_scalar() != 0) {
         return 1;
     }
     return 0;

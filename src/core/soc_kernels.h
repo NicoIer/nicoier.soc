@@ -21,7 +21,6 @@ typedef uint32_t soc_kernel_backend;
 
 typedef struct soc_kernel_mat4_f64 {
     double columns[4][4];
-    uint64_t all_finite;
 } soc_kernel_mat4_f64;
 
 typedef struct soc_kernel_clip_vertex {
@@ -34,7 +33,6 @@ typedef struct soc_kernel_clip_vertex {
 typedef struct soc_kernel_clip_metadata {
     uint8_t active_planes;
     uint8_t common_planes;
-    soc_bool all_finite;
 } soc_kernel_clip_metadata;
 
 typedef struct soc_kernel_table {
@@ -62,7 +60,6 @@ typedef struct soc_kernel_table {
         const float* position0_xyz,
         const float* position1_xyz,
         const float* position2_xyz,
-        soc_bool positions_all_finite,
         soc_clip_depth_range depth_range,
         soc_kernel_clip_vertex out_clip[3],
         soc_kernel_clip_metadata* out_metadata
@@ -110,7 +107,6 @@ void soc_kernel_transform_triangle_f64_scalar(
     const float* position0_xyz,
     const float* position1_xyz,
     const float* position2_xyz,
-    soc_bool positions_all_finite,
     soc_clip_depth_range depth_range,
     soc_kernel_clip_vertex out_clip[3],
     soc_kernel_clip_metadata* out_metadata

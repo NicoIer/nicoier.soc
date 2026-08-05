@@ -290,8 +290,10 @@ static int test_empty_frame_and_fail_open_inputs(void)
     soc_snapshot* snapshot = NULL;
     size_t index;
 
-    bounds[2].min.x = NAN;
-    bounds[3].max.y = INFINITY;
+    bounds[2].min.z = 0.30f;
+    bounds[2].max.z = 0.20f;
+    bounds[3].min.z = -0.10f;
+    bounds[3].max.z = 0.10f;
     for (index = 0u; index < ARRAY_COUNT(actual); ++index) {
         actual[index] = SOC_VISIBILITY_OCCLUDED;
     }
@@ -627,8 +629,10 @@ static int test_perspective_convention_batch(
     soc_mesh* mesh = NULL;
     soc_snapshot* snapshot = NULL;
 
-    bounds[7].min.x = NAN;
-    bounds[8].max.y = INFINITY;
+    bounds[7].min.x = 0.20f;
+    bounds[7].max.x = -0.20f;
+    bounds[8].min.z = 0.80f;
+    bounds[8].max.z = 1.20f;
 
     CHECK_RESULT(create_context(9u, 6u, &context), SOC_RESULT_OK);
     CHECK_RESULT(
@@ -829,21 +833,21 @@ static void make_deterministic_random_aabbs(
             break;
         case 8u:
             bounds[index] = make_aabb(
-                NAN,
+                centered_x - radius,
                 centered_y - radius,
-                2.0f,
+                0.80f,
                 centered_x + radius,
                 centered_y + radius,
-                3.0f
+                1.20f
             );
             break;
         default:
             bounds[index] = make_aabb(
-                centered_x - radius,
+                centered_x + radius,
                 centered_y - radius,
                 2.0f,
-                centered_x + radius,
-                INFINITY,
+                centered_x - radius,
+                centered_y + radius,
                 3.0f
             );
             break;

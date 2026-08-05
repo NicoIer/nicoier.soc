@@ -93,17 +93,6 @@ static uint32_t random_u32(uint32_t* state)
     return value;
 }
 
-static uint32_t quiet_nan_bits(uint32_t bits)
-{
-    const uint32_t exponent = bits & UINT32_C(0x7f800000);
-    const uint32_t significand = bits & UINT32_C(0x007fffff);
-
-    if (exponent == UINT32_C(0x7f800000) && significand != 0u) {
-        bits |= UINT32_C(0x00400000);
-    }
-    return bits;
-}
-
 static int run_clear_case(
     const soc_kernel_table* scalar,
     const soc_kernel_table* neon,
@@ -181,10 +170,6 @@ static int test_clear_differential(
     static const uint32_t special_values[] = {
         UINT32_C(0x00000000),
         UINT32_C(0x80000000),
-        UINT32_C(0x7f800000),
-        UINT32_C(0xff800000),
-        UINT32_C(0x7fc12345),
-        UINT32_C(0xffc54321),
         UINT32_C(0x3f800000),
         UINT32_C(0xbf000000),
     };
@@ -211,9 +196,8 @@ static int test_clear_differential(
                 }
             }
             for (value_index = 0u; value_index < 4u; ++value_index) {
-                const uint32_t bits = quiet_nan_bits(
-                    random_u32(&random_state)
-                );
+                const uint32_t bits = random_u32(&random_state) &
+                    ~UINT32_C(0x00800000);
 
                 if (run_clear_case(
                         scalar,
@@ -264,10 +248,6 @@ static int run_raster_depth_block_case(
         UINT32_C(0x3e800000),
         UINT32_C(0x3f000000),
         UINT32_C(0x3f800000),
-        UINT32_C(0x7f800000),
-        UINT32_C(0xff800000),
-        UINT32_C(0x7fc12345),
-        UINT32_C(0xffc54321),
         UINT32_C(0x00000001),
         UINT32_C(0x80000001),
     };
@@ -374,10 +354,6 @@ static int test_raster_depth_block_differential(
         UINT32_C(0x3e800000),
         UINT32_C(0x3f000000),
         UINT32_C(0x3f800000),
-        UINT32_C(0x7f800000),
-        UINT32_C(0xff800000),
-        UINT32_C(0x7fc13579),
-        UINT32_C(0xffc2468a),
         UINT32_C(0x00000001),
     };
     static const soc_depth_direction depth_directions[] = {
@@ -560,11 +536,6 @@ static void make_hiz_source_bits(
     static const uint32_t special_values[] = {
         UINT32_C(0x00000000),
         UINT32_C(0x80000000),
-        UINT32_C(0x7f800000),
-        UINT32_C(0xff800000),
-        UINT32_C(0x7fc12345),
-        UINT32_C(0x7fc54321),
-        UINT32_C(0xffc23456),
         UINT32_C(0x3f000000),
         UINT32_C(0xbf000000),
         UINT32_C(0x3f800000),
@@ -590,7 +561,8 @@ static void make_hiz_source_bits(
                 (index + rotation) % ARRAY_COUNT(special_values)
             ];
         } else {
-            output[index] = quiet_nan_bits(random_u32(&random_state));
+            output[index] = random_u32(&random_state) &
+                ~UINT32_C(0x00800000);
         }
     }
 }
@@ -1102,25 +1074,6 @@ static soc_mat4 transform_matrix_from_values(const float values[16])
     return matrix;
 }
 
-static soc_bool transform_matrix_is_finite(const soc_mat4* matrix)
-{
-    const float components[16] = {
-        matrix->col0.x, matrix->col0.y, matrix->col0.z, matrix->col0.w,
-        matrix->col1.x, matrix->col1.y, matrix->col1.z, matrix->col1.w,
-        matrix->col2.x, matrix->col2.y, matrix->col2.z, matrix->col2.w,
-        matrix->col3.x, matrix->col3.y, matrix->col3.z, matrix->col3.w,
-    };
-    size_t index;
-
-    for (index = 0u; index < ARRAY_COUNT(components); ++index) {
-        if ((float_bits(components[index]) & UINT32_C(0x7f800000)) ==
-            UINT32_C(0x7f800000)) {
-            return SOC_FALSE;
-        }
-    }
-    return SOC_TRUE;
-}
-
 static int run_transform_case(
     const soc_kernel_table* scalar,
     const soc_kernel_table* neon,
@@ -1145,11 +1098,10 @@ static int run_transform_case(
     soc_kernel_mat4_f64 clip_from_object_before;
     transform_output_storage scalar_output;
     transform_output_storage neon_output;
-    soc_kernel_clip_metadata scalar_metadata = {0xa5u, 0xa5u, 0xa5u};
-    soc_kernel_clip_metadata neon_metadata = {0x5au, 0x5au, 0x5au};
+    soc_kernel_clip_metadata scalar_metadata = {0xa5u, 0xa5u};
+    soc_kernel_clip_metadata neon_metadata = {0x5au, 0x5au};
     size_t vertex;
     size_t index;
-    soc_bool positions_all_finite = SOC_TRUE;
 
     fill_with_bits(
         position_storage,
@@ -1160,10 +1112,6 @@ static int run_transform_case(
         for (index = 0u; index < 3u; ++index) {
             position_storage[position_starts[vertex] + offset + index] =
                 float_from_bits(position_bits[vertex * 3u + index]);
-            if ((position_bits[vertex * 3u + index] &
-                    UINT32_C(0x7f800000)) == UINT32_C(0x7f800000)) {
-                positions_all_finite = SOC_FALSE;
-            }
         }
     }
     memcpy(position_before, position_storage, sizeof(position_storage));
@@ -1174,17 +1122,6 @@ static int run_transform_case(
         &object_f64,
         &clip_from_object_f64
     );
-    if (object_f64.all_finite !=
-            (transform_matrix_is_finite(object_to_world) == SOC_TRUE
-                ? UINT64_C(1)
-                : UINT64_C(0)) ||
-        clip_f64.all_finite !=
-            (transform_matrix_is_finite(clip_from_world) == SOC_TRUE
-                ? UINT64_C(1)
-                : UINT64_C(0))) {
-        fprintf(stderr, "transform matrix finite cache mismatch: %s\n", label);
-        return 1;
-    }
     object_before = object_f64;
     clip_before = clip_f64;
     clip_from_object_before = clip_from_object_f64;
@@ -1202,7 +1139,6 @@ static int run_transform_case(
         position_storage + position_starts[0] + offset,
         position_storage + position_starts[1] + offset,
         position_storage + position_starts[2] + offset,
-        positions_all_finite,
         depth_range,
         scalar_output.vertices,
         &scalar_metadata
@@ -1229,11 +1165,10 @@ static int run_transform_case(
         ) != 0) {
         fprintf(
             stderr,
-            "transform metadata mismatch: %s active=%u common=%u finite=%u\n",
+            "transform metadata mismatch: %s active=%u common=%u\n",
             label,
             (unsigned)scalar_metadata.active_planes,
-            (unsigned)scalar_metadata.common_planes,
-            (unsigned)scalar_metadata.all_finite
+            (unsigned)scalar_metadata.common_planes
         );
         return 1;
     }
@@ -1243,7 +1178,6 @@ static int run_transform_case(
         position_storage + position_starts[0] + offset,
         position_storage + position_starts[1] + offset,
         position_storage + position_starts[2] + offset,
-        positions_all_finite,
         depth_range,
         neon_output.vertices,
         &neon_metadata
@@ -1419,10 +1353,6 @@ static soc_kernel_mat4_f64 transform_reference_matrix_multiply(
     soc_kernel_mat4_f64 result;
     size_t column;
 
-    result.all_finite = left->all_finite == UINT64_C(1) &&
-            right->all_finite == UINT64_C(1)
-        ? UINT64_C(1)
-        : UINT64_C(0);
     for (column = 0u; column < 4u; ++column) {
         const soc_kernel_clip_vertex right_column = {
             right->columns[column][0],
@@ -1515,7 +1445,6 @@ static int test_transform_reference(
         positions,
         positions + 3u,
         positions + 6u,
-        SOC_TRUE,
         SOC_CLIP_DEPTH_ZERO_TO_ONE,
         scalar_output,
         &scalar_metadata
@@ -1525,7 +1454,6 @@ static int test_transform_reference(
         positions,
         positions + 3u,
         positions + 6u,
-        SOC_TRUE,
         SOC_CLIP_DEPTH_ZERO_TO_ONE,
         neon_output,
         &neon_metadata
@@ -1572,8 +1500,6 @@ static int test_transform_differential(
         UINT32_C(0x007fffff), UINT32_C(0x807fffff),
         UINT32_C(0x3f800000), UINT32_C(0xbf800000),
         UINT32_C(0x7f7fffff), UINT32_C(0xff7fffff),
-        UINT32_C(0x7f800000), UINT32_C(0xff800000),
-        UINT32_C(0x7fc12345), UINT32_C(0xffc54321),
     };
     soc_mat4 identity = transform_matrix_from_values(identity_values);
     soc_mat4 object = transform_matrix_from_values(object_values);
@@ -1592,7 +1518,6 @@ static int test_transform_differential(
         const soc_kernel_clip_metadata boundary_metadata = {
             .active_planes = (offset & 1u) == 0u ? UINT8_C(0x10) : 0u,
             .common_planes = 0u,
-            .all_finite = SOC_TRUE,
         };
 
         if (run_transform_case(
@@ -1630,39 +1555,15 @@ static int test_transform_differential(
     }
 
     {
-        float nonfinite_matrix_values[16];
         static const uint32_t rejected_positions[9] = {
             UINT32_C(0x40000000), UINT32_C(0x00000000), UINT32_C(0x00000000),
             UINT32_C(0x40400000), UINT32_C(0x3f000000), UINT32_C(0x3f000000),
             UINT32_C(0x40800000), UINT32_C(0xbf000000), UINT32_C(0x3f800000),
         };
-        static const uint32_t nonfinite_positions[9] = {
-            UINT32_C(0x7fc12345), UINT32_C(0x00000000), UINT32_C(0x00000000),
-            UINT32_C(0x00000000), UINT32_C(0x00000000), UINT32_C(0x00000000),
-            UINT32_C(0x3f800000), UINT32_C(0x3f800000), UINT32_C(0x3f800000),
-        };
         const soc_kernel_clip_metadata rejected_metadata = {
             .active_planes = UINT8_C(0x02),
             .common_planes = UINT8_C(0x02),
-            .all_finite = SOC_TRUE,
         };
-        const soc_kernel_clip_metadata nonfinite_metadata = {
-            .active_planes = 0u,
-            .common_planes = 0u,
-            .all_finite = SOC_FALSE,
-        };
-        soc_mat4 nonfinite_matrix;
-
-        memcpy(
-            nonfinite_matrix_values,
-            identity_values,
-            sizeof(nonfinite_matrix_values)
-        );
-        nonfinite_matrix_values[5] =
-            float_from_bits(UINT32_C(0x7fc54321));
-        nonfinite_matrix = transform_matrix_from_values(
-            nonfinite_matrix_values
-        );
 
         if (run_transform_case(
                 scalar,
@@ -1674,28 +1575,6 @@ static int test_transform_differential(
                 SOC_CLIP_DEPTH_ZERO_TO_ONE,
                 &rejected_metadata,
                 "trivial-reject"
-            ) != 0 ||
-            run_transform_case(
-                scalar,
-                neon,
-                &identity,
-                &identity,
-                nonfinite_positions,
-                0u,
-                SOC_CLIP_DEPTH_ZERO_TO_ONE,
-                &nonfinite_metadata,
-                "nonfinite-fallback"
-            ) != 0 ||
-            run_transform_case(
-                scalar,
-                neon,
-                &nonfinite_matrix,
-                &identity,
-                boundary_positions,
-                0u,
-                SOC_CLIP_DEPTH_ZERO_TO_ONE,
-                &nonfinite_metadata,
-                "nonfinite-matrix-fallback"
             ) != 0) {
             return 1;
         }
@@ -1785,7 +1664,7 @@ static int test_transform_differential(
                     ? SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE
                     : SOC_CLIP_DEPTH_ZERO_TO_ONE,
                 NULL,
-                "nonfinite-and-special"
+                "finite-specials"
             ) != 0) {
             return 1;
         }
@@ -1937,10 +1816,10 @@ static void initialize_aabb_test_bounds(
 
         switch (index % 23u) {
         case 0u:
-            bounds[index].min.x = NAN;
+            bounds[index].min.x = bounds[index].max.x + 1.0f;
             break;
         case 1u:
-            bounds[index].max.y = INFINITY;
+            bounds[index].max.y = bounds[index].min.y - 1.0f;
             break;
         case 2u:
             bounds[index].min.z = bounds[index].max.z + 1.0f;
@@ -2264,7 +2143,7 @@ static int test_aabb_fallback_lane_order(
         SOC_FALSE
     );
     const soc_aabb invalid = make_kernel_aabb(
-        NAN, -0.1f, 0.2f, 0.1f, 0.1f, 0.3f
+        0.1f, -0.1f, 0.2f, -0.1f, 0.1f, 0.3f
     );
     const soc_aabb fast_visible = make_kernel_aabb(
         -0.1f, -0.1f, 0.2f, 0.1f, 0.1f, 0.3f
@@ -2341,7 +2220,7 @@ static int test_aabb_fallback_lane_order(
     return 0;
 }
 
-static int test_aabb_overlap_and_nonfinite_query(
+static int test_aabb_overlap(
     const soc_kernel_table* scalar,
     const soc_kernel_table* neon
 )
@@ -2367,8 +2246,6 @@ static int test_aabb_overlap_and_nonfinite_query(
     soc_occlusion_query_counts neon_counts;
     soc_aabb_query_context query;
     soc_hiz hiz = {0};
-    soc_visibility scalar_nonfinite[3] = {0};
-    soc_visibility neon_nonfinite[3] = {0};
 
     scalar_storage.bounds[0] = source[0];
     scalar_storage.bounds[1] = source[1];
@@ -2408,37 +2285,6 @@ static int test_aabb_overlap_and_nonfinite_query(
         return 1;
     }
 
-    frame.clip_from_world.col1.y = NAN;
-    soc_aabb_query_context_initialize(&frame, &query);
-    if (query.all_finite != SOC_FALSE ||
-        scalar->test_aabbs(
-            &hiz,
-            &query,
-            source,
-            3u,
-            scalar_nonfinite,
-            &scalar_counts
-        ) != SOC_RESULT_OK ||
-        neon->test_aabbs(
-            &hiz,
-            &query,
-            source,
-            3u,
-            neon_nonfinite,
-            &neon_counts
-        ) != SOC_RESULT_OK ||
-        memcmp(scalar_nonfinite, neon_nonfinite, sizeof(scalar_nonfinite)) !=
-            0 ||
-        memcmp(&scalar_counts, &neon_counts, sizeof(scalar_counts)) != 0 ||
-        scalar_nonfinite[0] != SOC_VISIBILITY_UNKNOWN ||
-        scalar_nonfinite[1] != SOC_VISIBILITY_UNKNOWN ||
-        scalar_nonfinite[2] != SOC_VISIBILITY_UNKNOWN ||
-        scalar_counts.visible != 0u || scalar_counts.occluded != 0u ||
-        scalar_counts.unknown != 3u) {
-        fprintf(stderr, "nonfinite AABB query fallback mismatch\n");
-        soc_hiz_shutdown(&hiz);
-        return 1;
-    }
     soc_hiz_shutdown(&hiz);
     return 0;
 }
@@ -2664,7 +2510,7 @@ static int test_aabb_query_differential(
     if (test_aabb_fallback_lane_order(scalar, neon) != 0) {
         return 1;
     }
-    return test_aabb_overlap_and_nonfinite_query(scalar, neon);
+    return test_aabb_overlap(scalar, neon);
 }
 
 #endif

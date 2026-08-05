@@ -24,8 +24,20 @@
 extern "C" {
 #endif
 
+/*
+ * All floating-point inputs to this API must be finite and within ranges that
+ * keep the documented calculations representable. Passing NaN, infinity, or
+ * values that overflow intermediate calculations violates the API contract
+ * and results in undefined behavior.
+ */
+
 SOC_API uint32_t SOC_CALL soc_get_abi_version(void);
 
+/*
+ * config->worker_count is the total execution lane count, including the
+ * thread which calls build. Zero selects the online logical CPU count (clamped
+ * to 1..SOC_MAX_WORKER_COUNT); one keeps build execution serial.
+ */
 SOC_API soc_result SOC_CALL soc_context_create(
     const soc_config* config,
     soc_context** out_context
@@ -37,6 +49,17 @@ SOC_API soc_result SOC_CALL soc_context_resize(
     soc_context* context,
     uint32_t width,
     uint32_t height
+);
+
+/*
+ * Reports the CPU ISA features available to this process and the execution
+ * backend actually selected by this context. A NEON-capable CPU only means
+ * SIMD is active when execution_backend is SOC_EXECUTION_BACKEND_NEON.
+ * The caller must initialize out_info->struct_size before calling.
+ */
+SOC_API soc_result SOC_CALL soc_context_get_runtime_info(
+    const soc_context* context,
+    soc_runtime_info* out_info
 );
 
 /*
@@ -77,8 +100,8 @@ SOC_API void SOC_CALL soc_snapshot_destroy(soc_snapshot* snapshot);
  * Conservatively projects world-space AABBs and tests them against Hi-Z.
  * SOC_VISIBILITY_OCCLUDED is written only when the selected Hi-Z coverage
  * strictly proves the complete projected bounds to be behind occluder depth.
- * Invalid, non-finite, near-plane-crossing, or otherwise unprojectable bounds
- * produce SOC_VISIBILITY_UNKNOWN (fail-open); other bounds produce
+ * Unordered, near-plane-crossing, or otherwise unprojectable bounds produce
+ * SOC_VISIBILITY_UNKNOWN (fail-open); other bounds produce
  * SOC_VISIBILITY_VISIBLE. The frame's clip depth range and depth direction are
  * honored. When out_stats is non-null it receives counters for this call only;
  * the snapshot itself is never mutated by a query.
