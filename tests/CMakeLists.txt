@@ -117,6 +117,10 @@ add_test(NAME soc.mesh COMMAND soc_test_mesh)
 
 add_executable(soc_test_depth test_depth.c)
 target_link_libraries(soc_test_depth PRIVATE soc::soc)
+if(SOC_BUILD_SHARED)
+    # The dense backend is intentionally internal and hidden from the DSO.
+    target_sources(soc_test_depth PRIVATE $<TARGET_OBJECTS:soc_core>)
+endif()
 target_include_directories(
     soc_test_depth
     PRIVATE

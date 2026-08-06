@@ -5,7 +5,6 @@
 
 #include <math.h>
 #include <stddef.h>
-#include <string.h>
 
 void soc_kernel_clear_f32_scalar(
     float* destination,
@@ -144,21 +143,9 @@ void soc_kernel_store_constant_depth_block_f32_scalar(
     }
 }
 
-static float make_far_biased_plane_depth_scalar(float depth)
+static float clamp_plane_depth_scalar(float depth)
 {
-    uint32_t bits;
-
-    if (depth <= 0.0f) {
-        depth = 0.0f;
-    } else if (depth > 1.0f) {
-        depth = 1.0f;
-    }
-    memcpy(&bits, &depth, sizeof(bits));
-    bits = bits > SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
-        ? bits - SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
-        : 0u;
-    memcpy(&depth, &bits, sizeof(depth));
-    return depth;
+    return depth < 0.0f ? 0.0f : (depth > 1.0f ? 1.0f : depth);
 }
 
 void soc_kernel_store_depth_plane_block_f32_scalar(
@@ -191,7 +178,7 @@ void soc_kernel_store_depth_plane_block_f32_scalar(
 
             if ((row_mask & (UINT32_C(1) << column)) != 0u) {
                 const float candidate_depth =
-                    make_far_biased_plane_depth_scalar(
+                    clamp_plane_depth_scalar(
                         fmaf(depth_step_x, (float)column, row_depth)
                     );
                 if (candidate_depth > stored_depth) {
@@ -211,7 +198,6 @@ static const soc_kernel_table scalar_kernels = {
     .store_depth_plane_block_f32 =
         soc_kernel_store_depth_plane_block_f32_scalar,
     .reduce_hiz_level_f32 = soc_hiz_reduce_level_scalar,
-    .transform_triangle_f64 = soc_kernel_transform_triangle_f64_scalar,
     .test_aabbs = soc_occlusion_test_aabbs,
 };
 

@@ -262,6 +262,7 @@ static int compare_snapshots(
         float* single_depth;
         float* parallel_depth;
         size_t byte_count;
+        size_t depth_index;
 
         CHECK_RESULT(
             soc_snapshot_hiz_level_query(
@@ -320,7 +321,21 @@ static int compare_snapshots(
             ),
             SOC_RESULT_OK
         );
-        CHECK(memcmp(single_depth, parallel_depth, byte_count) == 0);
+        for (depth_index = 0u;
+             depth_index < (size_t)single_info.required_element_count;
+             ++depth_index) {
+            float difference = single_depth[depth_index] -
+                parallel_depth[depth_index];
+            float scale = single_depth[depth_index];
+
+            if (difference < 0.0f) {
+                difference = -difference;
+            }
+            if (scale < 0.0f) {
+                scale = -scale;
+            }
+            CHECK(difference <= 2.0e-5f * (1.0f + scale));
+        }
         free(parallel_depth);
         free(single_depth);
     }

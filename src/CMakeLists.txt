@@ -39,18 +39,41 @@ soc_enable_warnings(soc_core)
 
 if(MSVC)
     target_compile_options(soc_core PUBLIC /experimental:c11atomics)
-    set_source_files_properties(
-        core/soc_kernels_neon.c
-        core/soc_kernels_transform.c
-        PROPERTIES COMPILE_OPTIONS /fp:strict
+    target_compile_options(
+        soc_core
+        PRIVATE
+            $<$<CONFIG:Release>:/fp:fast>
     )
 elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-    set_source_files_properties(
-        core/soc_kernels_neon.c
-        core/soc_kernels_transform.c
-        PROPERTIES COMPILE_OPTIONS -ffp-contract=off
+    target_compile_options(
+        soc_core
+        PRIVATE
+            $<$<CONFIG:Release>:-ffast-math>
+            $<$<CONFIG:Release>:-ffp-contract=fast>
     )
 endif()
+
+set(_soc_native_apple_arm64 OFF)
+if(
+    APPLE
+    AND NOT CMAKE_CROSSCOMPILING
+    AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$"
+)
+    if(
+        NOT CMAKE_OSX_ARCHITECTURES
+        OR CMAKE_OSX_ARCHITECTURES STREQUAL "arm64"
+    )
+        set(_soc_native_apple_arm64 ON)
+    endif()
+endif()
+if(_soc_native_apple_arm64 AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(
+        soc_core
+        PRIVATE
+            $<$<CONFIG:Release>:-mcpu=native>
+    )
+endif()
+unset(_soc_native_apple_arm64)
 
 if(SOC_BUILD_SHARED)
     add_library(

@@ -50,7 +50,6 @@ static soc_bool kernel_table_is_valid(const soc_kernel_table* kernels)
         kernels->store_constant_depth_block_f32 != NULL &&
         kernels->store_depth_plane_block_f32 != NULL &&
         kernels->reduce_hiz_level_f32 != NULL &&
-        kernels->transform_triangle_f64 != NULL &&
         kernels->test_aabbs != NULL;
 }
 

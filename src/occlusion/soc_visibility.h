@@ -11,17 +11,17 @@
     (UINT32_C(1) << SOC_VISIBILITY_NEAR_CLIP_PLANE_INDEX)
 
 typedef struct soc_visibility_clip_vertex {
-    double x;
-    double y;
-    double z;
-    double w;
+    float x;
+    float y;
+    float z;
+    float w;
 } soc_visibility_clip_vertex;
 
 typedef struct soc_visibility_world_plane {
-    double x;
-    double y;
-    double z;
-    double d;
+    float x;
+    float y;
+    float z;
+    float d;
 } soc_visibility_world_plane;
 
 typedef struct soc_aabb_query_context {
@@ -33,16 +33,15 @@ typedef struct soc_aabb_query_context {
         SOC_VISIBILITY_CLIP_PLANE_COUNT
     ];
     soc_visibility_world_plane w_plane;
-    double transform_error_scale;
     soc_clip_depth_range clip_depth_range;
 } soc_aabb_query_context;
 
 typedef struct soc_projected_aabb {
-    double minimum_ndc_x;
-    double maximum_ndc_x;
-    double minimum_ndc_y;
-    double maximum_ndc_y;
-    double nearest_depth;
+    float minimum_ndc_x;
+    float maximum_ndc_x;
+    float minimum_ndc_y;
+    float maximum_ndc_y;
+    float nearest_depth;
 } soc_projected_aabb;
 
 typedef enum soc_aabb_projection {

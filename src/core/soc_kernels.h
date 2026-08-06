@@ -18,17 +18,16 @@ typedef uint32_t soc_kernel_backend;
 #define SOC_KERNEL_BACKEND_NEON ((soc_kernel_backend)1u)
 
 #define SOC_KERNEL_RASTER_BLOCK_SIZE 8u
-#define SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS 4u
 
-typedef struct soc_kernel_mat4_f64 {
-    double columns[4][4];
-} soc_kernel_mat4_f64;
+typedef struct soc_kernel_mat4_f32 {
+    float columns[4][4];
+} soc_kernel_mat4_f32;
 
 typedef struct soc_kernel_clip_vertex {
-    double x;
-    double y;
-    double z;
-    double w;
+    float x;
+    float y;
+    float z;
+    float w;
 } soc_kernel_clip_vertex;
 
 typedef struct soc_kernel_clip_metadata {
@@ -70,15 +69,6 @@ typedef struct soc_kernel_table {
         uint32_t source_width,
         uint32_t source_height,
         float* destination
-    );
-    void (*transform_triangle_f64)(
-        const soc_kernel_mat4_f64* clip_from_object,
-        const float* position0_xyz,
-        const float* position1_xyz,
-        const float* position2_xyz,
-        soc_clip_depth_range depth_range,
-        soc_kernel_clip_vertex out_clip[3],
-        soc_kernel_clip_metadata* out_metadata
     );
     soc_result (*test_aabbs)(
         const struct soc_hiz* hiz,
@@ -125,20 +115,20 @@ void soc_kernel_store_depth_plane_block_f32_scalar(
     float depth_step_y
 );
 
-void soc_kernel_mat4_f64_from_f32(
+void soc_kernel_mat4_f32_from_f32(
     const soc_mat4* source,
-    soc_kernel_mat4_f64* destination
+    soc_kernel_mat4_f32* destination
 );
 
 /* Column-major destination = left * right; destination may alias either input. */
-void soc_kernel_mat4_f64_multiply(
-    const soc_kernel_mat4_f64* left,
-    const soc_kernel_mat4_f64* right,
-    soc_kernel_mat4_f64* destination
+void soc_kernel_mat4_f32_multiply(
+    const soc_kernel_mat4_f32* left,
+    const soc_kernel_mat4_f32* right,
+    soc_kernel_mat4_f32* destination
 );
 
-void soc_kernel_transform_triangle_f64_scalar(
-    const soc_kernel_mat4_f64* clip_from_object,
+void soc_kernel_transform_triangle_f32_scalar(
+    const soc_kernel_mat4_f32* clip_from_object,
     const float* position0_xyz,
     const float* position1_xyz,
     const float* position2_xyz,
@@ -146,6 +136,52 @@ void soc_kernel_transform_triangle_f64_scalar(
     soc_kernel_clip_vertex out_clip[3],
     soc_kernel_clip_metadata* out_metadata
 );
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+void soc_kernel_transform_triangle_f32_neon(
+    const soc_kernel_mat4_f32* clip_from_object,
+    const float* position0_xyz,
+    const float* position1_xyz,
+    const float* position2_xyz,
+    soc_clip_depth_range depth_range,
+    soc_kernel_clip_vertex out_clip[3],
+    soc_kernel_clip_metadata* out_metadata
+);
+#endif
+
+/* Compile-time direct call: AArch64 always has Advanced SIMD. */
+static inline void soc_kernel_transform_triangle_f32(
+    const soc_kernel_mat4_f32* clip_from_object,
+    const float* position0_xyz,
+    const float* position1_xyz,
+    const float* position2_xyz,
+    soc_clip_depth_range depth_range,
+    soc_kernel_clip_vertex out_clip[3],
+    soc_kernel_clip_metadata* out_metadata
+)
+{
+#if defined(__aarch64__) || defined(_M_ARM64)
+    soc_kernel_transform_triangle_f32_neon(
+        clip_from_object,
+        position0_xyz,
+        position1_xyz,
+        position2_xyz,
+        depth_range,
+        out_clip,
+        out_metadata
+    );
+#else
+    soc_kernel_transform_triangle_f32_scalar(
+        clip_from_object,
+        position0_xyz,
+        position1_xyz,
+        position2_xyz,
+        depth_range,
+        out_clip,
+        out_metadata
+    );
+#endif
+}
 
 const soc_kernel_table* soc_kernel_table_scalar(void);
 

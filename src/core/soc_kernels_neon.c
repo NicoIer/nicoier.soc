@@ -11,7 +11,6 @@
 #endif
 
 #include <math.h>
-#include <string.h>
 
 #if defined(_MSC_VER)
 #define SOC_NEON_FORCE_INLINE __forceinline
@@ -218,37 +217,18 @@ static void store_constant_depth_block_f32_neon(
 }
 
 static SOC_NEON_FORCE_INLINE float32x4_t
-make_far_biased_plane_depth_neon(float32x4_t depth)
+clamp_plane_depth_neon(float32x4_t depth)
 {
-    const uint32x4_t guard =
-        vdupq_n_u32(SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS);
     const float32x4_t zero = vdupq_n_f32(0.0f);
-    uint32x4_t bits;
 
     depth = vmaxq_f32(depth, zero);
-    depth = vminq_f32(depth, vdupq_n_f32(1.0f));
-    depth = vbslq_f32(vceqq_f32(depth, zero), zero, depth);
-    bits = vreinterpretq_u32_f32(depth);
-    bits = vqsubq_u32(bits, guard);
-    return vreinterpretq_f32_u32(bits);
+    return vminq_f32(depth, vdupq_n_f32(1.0f));
 }
 
 static SOC_NEON_FORCE_INLINE float
-make_far_biased_plane_depth_neon_tail(float depth)
+clamp_plane_depth_neon_tail(float depth)
 {
-    uint32_t bits;
-
-    if (depth <= 0.0f) {
-        depth = 0.0f;
-    } else if (depth > 1.0f) {
-        depth = 1.0f;
-    }
-    memcpy(&bits, &depth, sizeof(bits));
-    bits = bits > SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
-        ? bits - SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
-        : 0u;
-    memcpy(&depth, &bits, sizeof(depth));
-    return depth;
+    return depth < 0.0f ? 0.0f : (depth > 1.0f ? 1.0f : depth);
 }
 
 static void store_depth_plane_block_f32_neon(
@@ -298,7 +278,7 @@ static void store_depth_plane_block_f32_neon(
                 float32x4_t compared_stored = stored;
                 uint32x4_t store_mask;
 
-                candidates = make_far_biased_plane_depth_neon(candidates);
+                candidates = clamp_plane_depth_neon(candidates);
                 if (lane_mask != 0x0fu) {
                     const uint32x4_t covered = vtstq_u32(
                         vdupq_n_u32(lane_mask),
@@ -325,7 +305,7 @@ static void store_depth_plane_block_f32_neon(
 
             if ((row_mask & (UINT32_C(1) << column)) != 0u) {
                 const float candidate_depth =
-                    make_far_biased_plane_depth_neon_tail(
+                    clamp_plane_depth_neon_tail(
                         fmaf(depth_step_x, (float)column, row_depth)
                     );
                 if (candidate_depth > stored_depth) {
@@ -442,58 +422,40 @@ static void reduce_hiz_level_f32_neon(
     }
 }
 
-static SOC_NEON_FORCE_INLINE float64x2_t transform_pair_f64_neon(
-    float64x2_t column0,
-    float64x2_t column1,
-    float64x2_t column2,
-    float64x2_t column3,
-    double x,
-    double y,
-    double z,
-    double w
-)
-{
-    float64x2_t result = vmulq_n_f64(column0, x);
-
-    result = vaddq_f64(result, vmulq_n_f64(column1, y));
-    result = vaddq_f64(result, vmulq_n_f64(column2, z));
-    result = vaddq_f64(result, vmulq_n_f64(column3, w));
-    return result;
-}
-
-static SOC_NEON_FORCE_INLINE uint8_t compute_clip_outcode_f64_neon(
-    double x,
-    double y,
-    double z,
-    double w,
+static SOC_NEON_FORCE_INLINE uint8_t compute_clip_outcode_f32_neon(
+    float32x4_t clip,
     soc_clip_depth_range depth_range
 )
 {
+    const float x = vgetq_lane_f32(clip, 0);
+    const float y = vgetq_lane_f32(clip, 1);
+    const float z = vgetq_lane_f32(clip, 2);
+    const float w = vgetq_lane_f32(clip, 3);
     uint8_t outcode = 0u;
 
-    if (x + w < 0.0) {
+    if (x + w < 0.0f) {
         outcode = (uint8_t)(outcode | (UINT8_C(1) << 0u));
     }
-    if (w - x < 0.0) {
+    if (w - x < 0.0f) {
         outcode = (uint8_t)(outcode | (UINT8_C(1) << 1u));
     }
-    if (y + w < 0.0) {
+    if (y + w < 0.0f) {
         outcode = (uint8_t)(outcode | (UINT8_C(1) << 2u));
     }
-    if (w - y < 0.0) {
+    if (w - y < 0.0f) {
         outcode = (uint8_t)(outcode | (UINT8_C(1) << 3u));
     }
-    if ((depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE ? z : z + w) < 0.0) {
+    if ((depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE ? z : z + w) < 0.0f) {
         outcode = (uint8_t)(outcode | (UINT8_C(1) << 4u));
     }
-    if (w - z < 0.0) {
+    if (w - z < 0.0f) {
         outcode = (uint8_t)(outcode | (UINT8_C(1) << 5u));
     }
     return outcode;
 }
 
-static void transform_triangle_f64_neon(
-    const soc_kernel_mat4_f64* clip_from_object,
+void soc_kernel_transform_triangle_f32_neon(
+    const soc_kernel_mat4_f32* clip_from_object,
     const float* position0_xyz,
     const float* position1_xyz,
     const float* position2_xyz,
@@ -507,73 +469,32 @@ static void transform_triangle_f64_neon(
         position1_xyz,
         position2_xyz,
     };
-    const float64x2_t clip_xy0 =
-        vld1q_f64(&clip_from_object->columns[0][0]);
-    const float64x2_t clip_xy1 =
-        vld1q_f64(&clip_from_object->columns[1][0]);
-    const float64x2_t clip_xy2 =
-        vld1q_f64(&clip_from_object->columns[2][0]);
-    const float64x2_t clip_xy3 =
-        vld1q_f64(&clip_from_object->columns[3][0]);
-    const float64x2_t clip_zw0 =
-        vld1q_f64(&clip_from_object->columns[0][2]);
-    const float64x2_t clip_zw1 =
-        vld1q_f64(&clip_from_object->columns[1][2]);
-    const float64x2_t clip_zw2 =
-        vld1q_f64(&clip_from_object->columns[2][2]);
-    const float64x2_t clip_zw3 =
-        vld1q_f64(&clip_from_object->columns[3][2]);
+    const float32x4_t column0 =
+        vld1q_f32(&clip_from_object->columns[0][0]);
+    const float32x4_t column1 =
+        vld1q_f32(&clip_from_object->columns[1][0]);
+    const float32x4_t column2 =
+        vld1q_f32(&clip_from_object->columns[2][0]);
+    const float32x4_t column3 =
+        vld1q_f32(&clip_from_object->columns[3][0]);
+    uint8_t active_planes = 0u;
+    uint8_t common_planes = UINT8_C(0x3f);
     size_t index;
 
-    out_metadata->active_planes = 0u;
-    out_metadata->common_planes = UINT8_C(0x3f);
-
     for (index = 0u; index < 3u; ++index) {
-        const double x = positions[index][0];
-        const double y = positions[index][1];
-        const double z = positions[index][2];
-        const float64x2_t clip_xy = transform_pair_f64_neon(
-            clip_xy0,
-            clip_xy1,
-            clip_xy2,
-            clip_xy3,
-            x,
-            y,
-            z,
-            1.0
-        );
-        const float64x2_t clip_zw = transform_pair_f64_neon(
-            clip_zw0,
-            clip_zw1,
-            clip_zw2,
-            clip_zw3,
-            x,
-            y,
-            z,
-            1.0
-        );
+        float32x4_t clip = column3;
+        uint8_t outcode;
 
-        out_clip[index].x = vgetq_lane_f64(clip_xy, 0);
-        out_clip[index].y = vgetq_lane_f64(clip_xy, 1);
-        out_clip[index].z = vgetq_lane_f64(clip_zw, 0);
-        out_clip[index].w = vgetq_lane_f64(clip_zw, 1);
-        {
-            const uint8_t outcode = compute_clip_outcode_f64_neon(
-                out_clip[index].x,
-                out_clip[index].y,
-                out_clip[index].z,
-                out_clip[index].w,
-                depth_range
-            );
-
-            out_metadata->active_planes = (uint8_t)(
-                out_metadata->active_planes | outcode
-            );
-            out_metadata->common_planes = (uint8_t)(
-                out_metadata->common_planes & outcode
-            );
-        }
+        clip = vfmaq_n_f32(clip, column0, positions[index][0]);
+        clip = vfmaq_n_f32(clip, column1, positions[index][1]);
+        clip = vfmaq_n_f32(clip, column2, positions[index][2]);
+        vst1q_f32(&out_clip[index].x, clip);
+        outcode = compute_clip_outcode_f32_neon(clip, depth_range);
+        active_planes = (uint8_t)(active_planes | outcode);
+        common_planes = (uint8_t)(common_planes & outcode);
     }
+    out_metadata->active_planes = active_planes;
+    out_metadata->common_planes = common_planes;
 }
 
 static const soc_kernel_table neon_kernels = {
@@ -585,7 +506,6 @@ static const soc_kernel_table neon_kernels = {
     .store_depth_plane_block_f32 =
         store_depth_plane_block_f32_neon,
     .reduce_hiz_level_f32 = reduce_hiz_level_f32_neon,
-    .transform_triangle_f64 = transform_triangle_f64_neon,
     .test_aabbs = soc_occlusion_test_aabbs_neon,
 };
 

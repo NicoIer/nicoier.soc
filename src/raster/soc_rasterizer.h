@@ -64,10 +64,9 @@ typedef struct soc_raster_prepared_triangle {
     soc_raster_prepared_edge edges[3];
     soc_raster_prepared_region bounds;
     /* Depth at pixel sample (0.5, 0.5). */
-    double depth_sample_origin;
-    double depth_step_x;
-    double depth_step_y;
-    double depth_error_bound;
+    float depth_sample_origin;
+    float depth_step_x;
+    float depth_step_y;
     uint16_t first_tile_column;
     uint16_t first_tile_row;
     uint16_t end_tile_column;

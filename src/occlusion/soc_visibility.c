@@ -1,20 +1,12 @@
 #include "occlusion/soc_visibility.h"
 
 #include <float.h>
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_ARM64)
-#include <arm64_neon.h>
-#endif
-
 #define SOC_AABB_CORNER_COUNT 8u
-#define SOC_PROJECTION_SAFETY_EPSILON (32.0 * DBL_EPSILON)
-#define SOC_TRANSFORM_ERROR_FACTOR (128.0 * DBL_EPSILON)
-#define SOC_SMALL_ERROR_RATIO 0x1p-40
-#define SOC_SMALL_ERROR_PROJECTION_MARGIN 0x1p-36
 
-#define SOC_CLIP_MINIMUM_Z_BIT (UINT32_C(1) << 4u)
 #define SOC_CLIP_MAXIMUM_Z_BIT (UINT32_C(1) << 5u)
 #define SOC_CLIP_ALL_BITS \
     ((UINT32_C(1) << SOC_VISIBILITY_CLIP_PLANE_COUNT) - 1u)
@@ -27,66 +19,26 @@
 #define SOC_FORCE_INLINE static inline
 #endif
 
-#if defined(__aarch64__) || defined(_M_ARM64)
-static double fused_multiply_add_double(
-    double left,
-    double right,
-    double addend
+static float affine_component(
+    float col0,
+    float col1,
+    float col2,
+    float col3,
+    float x,
+    float y,
+    float z
 )
 {
-#if defined(_MSC_VER) && !defined(__clang__)
-    float64x2_t result = vdupq_n_f64(addend);
+    float result = col1 * y;
 
-    result = vfmaq_f64(
-        result,
-        vdupq_n_f64(left),
-        vdupq_n_f64(right)
-    );
-    return vgetq_lane_f64(result, 0);
-#else
-    return __builtin_fma(left, right, addend);
-#endif
-}
-#endif
-
-static double absolute_double(double value)
-{
-    return value < 0.0 ? -value : value;
-}
-
-static double maximum_double(double left, double right)
-{
-    return left > right ? left : right;
-}
-
-static double affine_component(
-    double col0,
-    double col1,
-    double col2,
-    double col3,
-    double x,
-    double y,
-    double z
-)
-{
-#if defined(__aarch64__) || defined(_M_ARM64)
-    double result = col1 * y;
-
-    result = fused_multiply_add_double(col0, x, result);
-    result = fused_multiply_add_double(col2, z, result);
+    result = fmaf(col0, x, result);
+    result = fmaf(col2, z, result);
     return result + col3;
-#else
-    return col0 * x + col1 * y + col2 * z + col3;
-#endif
 }
 
-static double remap_negative_one_to_one_depth(double depth)
+static float remap_negative_one_to_one_depth(float depth)
 {
-#if defined(__aarch64__) || defined(_M_ARM64)
-    return fused_multiply_add_double(depth, 0.5, 0.5);
-#else
-    return depth * 0.5 + 0.5;
-#endif
+    return fmaf(depth, 0.5f, 0.5f);
 }
 
 static soc_bool valid_aabb(const soc_aabb* bounds)
@@ -104,9 +56,9 @@ static soc_bool valid_aabb(const soc_aabb* bounds)
 
 static soc_visibility_clip_vertex transform_point(
     const soc_aabb_query_context* query,
-    double x,
-    double y,
-    double z
+    float x,
+    float y,
+    float z
 )
 {
     const soc_visibility_clip_vertex result = {
@@ -164,29 +116,18 @@ static soc_visibility_clip_vertex add_clip_vertices(
     return result;
 }
 
-static double clip_row_scale(
-    double col0,
-    double col1,
-    double col2,
-    double col3
-)
-{
-    return absolute_double(col0) + absolute_double(col1) +
-        absolute_double(col2) + absolute_double(col3);
-}
-
 static soc_visibility_world_plane make_world_plane(
-    double x,
-    double y,
-    double z,
-    double d
+    float x,
+    float y,
+    float z,
+    float d
 )
 {
     const soc_visibility_world_plane plane = {x, y, z, d};
     return plane;
 }
 
-static double maximum_plane_distance(
+static float maximum_plane_distance(
     const soc_visibility_world_plane* plane,
     const soc_aabb* bounds
 )
@@ -196,13 +137,13 @@ static double maximum_plane_distance(
         plane->y,
         plane->z,
         plane->d,
-        plane->x >= 0.0 ? bounds->max.x : bounds->min.x,
-        plane->y >= 0.0 ? bounds->max.y : bounds->min.y,
-        plane->z >= 0.0 ? bounds->max.z : bounds->min.z
+        plane->x >= 0.0f ? bounds->max.x : bounds->min.x,
+        plane->y >= 0.0f ? bounds->max.y : bounds->min.y,
+        plane->z >= 0.0f ? bounds->max.z : bounds->min.z
     );
 }
 
-static double minimum_plane_distance(
+static float minimum_plane_distance(
     const soc_visibility_world_plane* plane,
     const soc_aabb* bounds
 )
@@ -212,9 +153,9 @@ static double minimum_plane_distance(
         plane->y,
         plane->z,
         plane->d,
-        plane->x >= 0.0 ? bounds->min.x : bounds->max.x,
-        plane->y >= 0.0 ? bounds->min.y : bounds->max.y,
-        plane->z >= 0.0 ? bounds->min.z : bounds->max.z
+        plane->x >= 0.0f ? bounds->min.x : bounds->max.x,
+        plane->y >= 0.0f ? bounds->min.y : bounds->max.y,
+        plane->z >= 0.0f ? bounds->min.z : bounds->max.z
     );
 }
 
@@ -248,47 +189,10 @@ void soc_aabb_query_context_initialize(
             frame->clip_from_world.col3.z,
             frame->clip_from_world.col3.w,
         },
-        .clip_planes = {{0.0, 0.0, 0.0, 0.0}},
-        .w_plane = {0.0, 0.0, 0.0, 0.0},
-        .transform_error_scale = 0.0,
+        .clip_planes = {{0.0f, 0.0f, 0.0f, 0.0f}},
+        .w_plane = {0.0f, 0.0f, 0.0f, 0.0f},
         .clip_depth_range = frame->clip_depth_range,
     };
-    double maximum_row_scale = clip_row_scale(
-        query.col0.x,
-        query.col1.x,
-        query.col2.x,
-        query.col3.x
-    );
-
-    maximum_row_scale = maximum_double(
-        maximum_row_scale,
-        clip_row_scale(
-            query.col0.y,
-            query.col1.y,
-            query.col2.y,
-            query.col3.y
-        )
-    );
-    maximum_row_scale = maximum_double(
-        maximum_row_scale,
-        clip_row_scale(
-            query.col0.z,
-            query.col1.z,
-            query.col2.z,
-            query.col3.z
-        )
-    );
-    maximum_row_scale = maximum_double(
-        maximum_row_scale,
-        clip_row_scale(
-            query.col0.w,
-            query.col1.w,
-            query.col2.w,
-            query.col3.w
-        )
-    );
-    query.transform_error_scale =
-        maximum_row_scale * SOC_TRANSFORM_ERROR_FACTOR;
 
     /*
      * Convert the six homogeneous clip inequalities to world-space planes
@@ -348,7 +252,7 @@ void soc_aabb_query_context_initialize(
     *out_query = query;
 }
 
-static double clamp_double(double value, double minimum, double maximum)
+static float clamp_float(float value, float minimum, float maximum)
 {
     if (value < minimum) {
         return minimum;
@@ -370,14 +274,8 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
     soc_visibility_clip_vertex axis_y;
     soc_visibility_clip_vertex axis_z;
     uint32_t all_outside_mask = SOC_CLIP_ALL_BITS;
-    soc_bool has_nonpositive_w = SOC_FALSE;
-    soc_bool has_corner_outside_near_clip_plane = SOC_FALSE;
-    soc_bool use_direct_corners = SOC_FALSE;
-    double bounds_scale = 1.0;
-    double minimum_w = DBL_MAX;
-    double minimum_near_clip_distance;
-    double clip_error_margin;
-    double projection_margin;
+    float minimum_w;
+    float minimum_near_clip_distance;
     uint32_t corner;
     uint32_t plane;
 
@@ -385,49 +283,17 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
         return SOC_AABB_PROJECTION_UNKNOWN;
     }
 
-    bounds_scale = maximum_double(
-        bounds_scale,
-        absolute_double(bounds->min.x)
-    );
-    bounds_scale = maximum_double(
-        bounds_scale,
-        absolute_double(bounds->min.y)
-    );
-    bounds_scale = maximum_double(
-        bounds_scale,
-        absolute_double(bounds->min.z)
-    );
-    bounds_scale = maximum_double(
-        bounds_scale,
-        absolute_double(bounds->max.x)
-    );
-    bounds_scale = maximum_double(
-        bounds_scale,
-        absolute_double(bounds->max.y)
-    );
-    bounds_scale = maximum_double(
-        bounds_scale,
-        absolute_double(bounds->max.z)
-    );
-    clip_error_margin = query->transform_error_scale * bounds_scale;
-
-    /*
-     * The positive vertex is the exact affine maximum for each clip plane.
-     * The scale-aware margin distinguishes confident classifications from
-     * boundary cases, which take the direct-corner path below.
-     */
+    /* The positive vertex is the affine maximum for each clip plane. */
     for (plane = 0u;
          plane < SOC_VISIBILITY_CLIP_PLANE_COUNT;
          ++plane) {
-        const double maximum_distance = maximum_plane_distance(
+        const float maximum_distance = maximum_plane_distance(
             &query->clip_planes[plane],
             bounds
         );
 
-        if (maximum_distance > clip_error_margin) {
+        if (maximum_distance >= 0.0f) {
             all_outside_mask &= ~(UINT32_C(1) << plane);
-        } else if (maximum_distance >= -clip_error_margin) {
-            use_direct_corners = SOC_TRUE;
         }
     }
     minimum_w = minimum_plane_distance(&query->w_plane, bounds);
@@ -435,81 +301,10 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
         &query->clip_planes[SOC_VISIBILITY_NEAR_CLIP_PLANE_INDEX],
         bounds
     );
-    if (minimum_w < -clip_error_margin) {
-        has_nonpositive_w = SOC_TRUE;
-    } else if (minimum_w <= clip_error_margin) {
-        use_direct_corners = SOC_TRUE;
-    }
-    if (minimum_near_clip_distance < -clip_error_margin) {
-        has_corner_outside_near_clip_plane = SOC_TRUE;
-    } else if (minimum_near_clip_distance <= clip_error_margin) {
-        use_direct_corners = SOC_TRUE;
-    }
-
-    /*
-     * Preserve exact boundary behavior with the original corner-by-corner
-     * classification. This path is entered only when an analytic extremum is
-     * inside the scale-aware floating-point uncertainty band.
-     */
-    if (use_direct_corners == SOC_TRUE) {
-        all_outside_mask = SOC_CLIP_ALL_BITS;
-        has_nonpositive_w = SOC_FALSE;
-        has_corner_outside_near_clip_plane = SOC_FALSE;
-        minimum_w = DBL_MAX;
-
-        for (corner = 0u; corner < SOC_AABB_CORNER_COUNT; ++corner) {
-            const double x = (corner & 1u) != 0u
-                ? bounds->max.x
-                : bounds->min.x;
-            const double y = (corner & 2u) != 0u
-                ? bounds->max.y
-                : bounds->min.y;
-            const double z = (corner & 4u) != 0u
-                ? bounds->max.z
-                : bounds->min.z;
-            soc_visibility_clip_vertex* clip = &clip_corners[corner];
-            double minimum_z_distance;
-            double maximum_z_distance;
-
-            *clip = transform_point(query, x, y, z);
-            minimum_z_distance =
-                query->clip_depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE
-                    ? clip->z
-                    : clip->z + clip->w;
-            maximum_z_distance = clip->w - clip->z;
-
-            if (clip->x + clip->w >= 0.0) {
-                all_outside_mask &= ~(UINT32_C(1) << 0u);
-            }
-            if (clip->w - clip->x >= 0.0) {
-                all_outside_mask &= ~(UINT32_C(1) << 1u);
-            }
-            if (clip->y + clip->w >= 0.0) {
-                all_outside_mask &= ~(UINT32_C(1) << 2u);
-            }
-            if (clip->w - clip->y >= 0.0) {
-                all_outside_mask &= ~(UINT32_C(1) << 3u);
-            }
-            if (minimum_z_distance >= 0.0) {
-                all_outside_mask &= ~SOC_CLIP_MINIMUM_Z_BIT;
-            }
-            if (maximum_z_distance >= 0.0) {
-                all_outside_mask &= ~SOC_CLIP_MAXIMUM_Z_BIT;
-            }
-            if (clip->w <= 0.0) {
-                has_nonpositive_w = SOC_TRUE;
-            }
-            if (maximum_z_distance < 0.0) {
-                has_corner_outside_near_clip_plane = SOC_TRUE;
-            }
-            minimum_w = clip->w < minimum_w ? clip->w : minimum_w;
-        }
-    }
-
-    if (has_nonpositive_w == SOC_TRUE) {
+    if (minimum_w <= 0.0f) {
         return SOC_AABB_PROJECTION_UNKNOWN;
     }
-    if (has_corner_outside_near_clip_plane == SOC_TRUE &&
+    if (minimum_near_clip_distance < 0.0f &&
         (all_outside_mask & SOC_CLIP_MAXIMUM_Z_BIT) == 0u) {
         return SOC_AABB_PROJECTION_UNKNOWN;
     }
@@ -517,60 +312,46 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
         return SOC_AABB_PROJECTION_OUTSIDE;
     }
 
-    if (use_direct_corners != SOC_TRUE) {
-        clip_corners[0] = transform_point(
-            query,
-            bounds->min.x,
-            bounds->min.y,
-            bounds->min.z
-        );
-        axis_x.x = query->col0.x *
-            ((double)bounds->max.x - bounds->min.x);
-        axis_x.y = query->col0.y *
-            ((double)bounds->max.x - bounds->min.x);
-        axis_x.z = query->col0.z *
-            ((double)bounds->max.x - bounds->min.x);
-        axis_x.w = query->col0.w *
-            ((double)bounds->max.x - bounds->min.x);
-        axis_y.x = query->col1.x *
-            ((double)bounds->max.y - bounds->min.y);
-        axis_y.y = query->col1.y *
-            ((double)bounds->max.y - bounds->min.y);
-        axis_y.z = query->col1.z *
-            ((double)bounds->max.y - bounds->min.y);
-        axis_y.w = query->col1.w *
-            ((double)bounds->max.y - bounds->min.y);
-        axis_z.x = query->col2.x *
-            ((double)bounds->max.z - bounds->min.z);
-        axis_z.y = query->col2.y *
-            ((double)bounds->max.z - bounds->min.z);
-        axis_z.z = query->col2.z *
-            ((double)bounds->max.z - bounds->min.z);
-        axis_z.w = query->col2.w *
-            ((double)bounds->max.z - bounds->min.z);
+    clip_corners[0] = transform_point(
+        query,
+        bounds->min.x,
+        bounds->min.y,
+        bounds->min.z
+    );
+    axis_x.x = query->col0.x * (bounds->max.x - bounds->min.x);
+    axis_x.y = query->col0.y * (bounds->max.x - bounds->min.x);
+    axis_x.z = query->col0.z * (bounds->max.x - bounds->min.x);
+    axis_x.w = query->col0.w * (bounds->max.x - bounds->min.x);
+    axis_y.x = query->col1.x * (bounds->max.y - bounds->min.y);
+    axis_y.y = query->col1.y * (bounds->max.y - bounds->min.y);
+    axis_y.z = query->col1.z * (bounds->max.y - bounds->min.y);
+    axis_y.w = query->col1.w * (bounds->max.y - bounds->min.y);
+    axis_z.x = query->col2.x * (bounds->max.z - bounds->min.z);
+    axis_z.y = query->col2.y * (bounds->max.z - bounds->min.z);
+    axis_z.z = query->col2.z * (bounds->max.z - bounds->min.z);
+    axis_z.w = query->col2.w * (bounds->max.z - bounds->min.z);
 
-        /* One full transform plus three axis deltas reconstructs all corners. */
-        clip_corners[1] = add_clip_vertices(&clip_corners[0], &axis_x);
-        clip_corners[2] = add_clip_vertices(&clip_corners[0], &axis_y);
-        clip_corners[3] = add_clip_vertices(&clip_corners[1], &axis_y);
-        clip_corners[4] = add_clip_vertices(&clip_corners[0], &axis_z);
-        clip_corners[5] = add_clip_vertices(&clip_corners[1], &axis_z);
-        clip_corners[6] = add_clip_vertices(&clip_corners[2], &axis_z);
-        clip_corners[7] = add_clip_vertices(&clip_corners[3], &axis_z);
-    }
+    /* One full transform plus three axis deltas reconstructs all corners. */
+    clip_corners[1] = add_clip_vertices(&clip_corners[0], &axis_x);
+    clip_corners[2] = add_clip_vertices(&clip_corners[0], &axis_y);
+    clip_corners[3] = add_clip_vertices(&clip_corners[1], &axis_y);
+    clip_corners[4] = add_clip_vertices(&clip_corners[0], &axis_z);
+    clip_corners[5] = add_clip_vertices(&clip_corners[1], &axis_z);
+    clip_corners[6] = add_clip_vertices(&clip_corners[2], &axis_z);
+    clip_corners[7] = add_clip_vertices(&clip_corners[3], &axis_z);
 
-    out_projected->minimum_ndc_x = DBL_MAX;
-    out_projected->maximum_ndc_x = -DBL_MAX;
-    out_projected->minimum_ndc_y = DBL_MAX;
-    out_projected->maximum_ndc_y = -DBL_MAX;
-    out_projected->nearest_depth = -DBL_MAX;
+    out_projected->minimum_ndc_x = FLT_MAX;
+    out_projected->maximum_ndc_x = -FLT_MAX;
+    out_projected->minimum_ndc_y = FLT_MAX;
+    out_projected->maximum_ndc_y = -FLT_MAX;
+    out_projected->nearest_depth = -FLT_MAX;
 
     for (corner = 0u; corner < SOC_AABB_CORNER_COUNT; ++corner) {
         const soc_visibility_clip_vertex* clip = &clip_corners[corner];
-        const double inverse_w = 1.0 / clip->w;
-        const double ndc_x = clip->x * inverse_w;
-        const double ndc_y = clip->y * inverse_w;
-        double depth = clip->z * inverse_w;
+        const float inverse_w = 1.0f / clip->w;
+        const float ndc_x = clip->x * inverse_w;
+        const float ndc_y = clip->y * inverse_w;
+        float depth = clip->z * inverse_w;
 
         if (query->clip_depth_range ==
             SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) {
@@ -589,50 +370,36 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
             out_projected->maximum_ndc_y = ndc_y;
         }
 
-        depth = clamp_double(depth, 0.0, 1.0);
+        depth = clamp_float(depth, 0.0f, 1.0f);
         if (depth > out_projected->nearest_depth) {
             out_projected->nearest_depth = depth;
         }
     }
 
-    /* Avoid another divide when the precomputed error ratio is tiny. */
-    if (clip_error_margin <= minimum_w * SOC_SMALL_ERROR_RATIO) {
-        projection_margin = SOC_PROJECTION_SAFETY_EPSILON +
-            SOC_SMALL_ERROR_PROJECTION_MARGIN;
-    } else {
-        projection_margin = SOC_PROJECTION_SAFETY_EPSILON +
-            8.0 * clip_error_margin /
-                (minimum_w - clip_error_margin);
-    }
-    if (projection_margin < 0.0 ||
-        projection_margin > 1.0) {
-        projection_margin = 1.0;
-    }
-
-    out_projected->minimum_ndc_x = clamp_double(
-        out_projected->minimum_ndc_x - projection_margin,
-        -1.0,
-        1.0
+    out_projected->minimum_ndc_x = clamp_float(
+        out_projected->minimum_ndc_x,
+        -1.0f,
+        1.0f
     );
-    out_projected->maximum_ndc_x = clamp_double(
-        out_projected->maximum_ndc_x + projection_margin,
-        -1.0,
-        1.0
+    out_projected->maximum_ndc_x = clamp_float(
+        out_projected->maximum_ndc_x,
+        -1.0f,
+        1.0f
     );
-    out_projected->minimum_ndc_y = clamp_double(
-        out_projected->minimum_ndc_y - projection_margin,
-        -1.0,
-        1.0
+    out_projected->minimum_ndc_y = clamp_float(
+        out_projected->minimum_ndc_y,
+        -1.0f,
+        1.0f
     );
-    out_projected->maximum_ndc_y = clamp_double(
-        out_projected->maximum_ndc_y + projection_margin,
-        -1.0,
-        1.0
+    out_projected->maximum_ndc_y = clamp_float(
+        out_projected->maximum_ndc_y,
+        -1.0f,
+        1.0f
     );
-    out_projected->nearest_depth = clamp_double(
-        out_projected->nearest_depth + projection_margin,
-        0.0,
-        1.0
+    out_projected->nearest_depth = clamp_float(
+        out_projected->nearest_depth,
+        0.0f,
+        1.0f
     );
     return SOC_AABB_PROJECTION_VALID;
 }
@@ -656,14 +423,14 @@ static void projected_pixel_bounds(
     uint32_t* out_maximum_y
 )
 {
-    const double minimum_x =
-        (projected->minimum_ndc_x * 0.5 + 0.5) * width;
-    const double maximum_x =
-        (projected->maximum_ndc_x * 0.5 + 0.5) * width;
-    const double minimum_y =
-        (0.5 - projected->maximum_ndc_y * 0.5) * height;
-    const double maximum_y =
-        (0.5 - projected->minimum_ndc_y * 0.5) * height;
+    const float minimum_x =
+        (projected->minimum_ndc_x * 0.5f + 0.5f) * (float)width;
+    const float maximum_x =
+        (projected->maximum_ndc_x * 0.5f + 0.5f) * (float)width;
+    const float minimum_y =
+        (0.5f - projected->maximum_ndc_y * 0.5f) * (float)height;
+    const float maximum_y =
+        (0.5f - projected->minimum_ndc_y * 0.5f) * (float)height;
 
     *out_minimum_x = minimum_x >= width
         ? width - 1u
@@ -708,7 +475,7 @@ SOC_FORCE_INLINE soc_visibility test_projected_aabb_scalar_impl(
     soc_bool masked_layout
 )
 {
-    const float nearest_depth = (float)projected->nearest_depth;
+    const float nearest_depth = projected->nearest_depth;
     uint32_t minimum_x;
     uint32_t maximum_x;
     uint32_t minimum_y;

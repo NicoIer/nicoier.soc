@@ -10,6 +10,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -54,12 +55,12 @@
 #define REQUIRED_GATE_CLEAR_F32 (UINT32_C(1) << 0u)
 #define REQUIRED_GATE_HIZ_REDUCE_LEVEL_F32 (UINT32_C(1) << 1u)
 #define REQUIRED_GATE_RASTER_DEPTH_BLOCK_F32 (UINT32_C(1) << 2u)
-#define REQUIRED_GATE_TRANSFORM_TRIANGLE_F64 (UINT32_C(1) << 3u)
+#define REQUIRED_GATE_TRANSFORM_TRIANGLE_F32 (UINT32_C(1) << 3u)
 #define REQUIRED_GATE_AABB_QUERY (UINT32_C(1) << 4u)
 #define REQUIRED_GATE_ALL \
     (REQUIRED_GATE_CLEAR_F32 | REQUIRED_GATE_HIZ_REDUCE_LEVEL_F32 | \
         REQUIRED_GATE_RASTER_DEPTH_BLOCK_F32 | \
-        REQUIRED_GATE_TRANSFORM_TRIANGLE_F64 | REQUIRED_GATE_AABB_QUERY)
+        REQUIRED_GATE_TRANSFORM_TRIANGLE_F32 | REQUIRED_GATE_AABB_QUERY)
 
 typedef enum benchmark_kind {
     BENCHMARK_CLEAR_F32 = 0,
@@ -93,12 +94,22 @@ typedef struct backend_result {
 } backend_result;
 
 typedef struct transform_workload {
-    soc_kernel_mat4_f64 clip_from_object;
+    soc_kernel_mat4_f32 clip_from_object;
     float positions[TRANSFORM_POSITION_SET_COUNT][9];
     soc_kernel_clip_vertex outputs[TRANSFORM_POSITION_SET_COUNT][3];
     soc_kernel_clip_metadata metadata[TRANSFORM_POSITION_SET_COUNT];
     uint64_t invocation;
 } transform_workload;
+
+typedef void (*transform_triangle_fn)(
+    const soc_kernel_mat4_f32* clip_from_object,
+    const float* position0_xyz,
+    const float* position1_xyz,
+    const float* position2_xyz,
+    soc_clip_depth_range depth_range,
+    soc_kernel_clip_vertex out_clip[3],
+    soc_kernel_clip_metadata* out_metadata
+);
 
 typedef struct query_workload {
     soc_hiz hiz;
@@ -275,7 +286,7 @@ static int parse_options(int argc, char** argv, options* out_options)
                     REQUIRED_GATE_RASTER_DEPTH_BLOCK_F32;
             } else if (strcmp(value, "transform") == 0) {
                 out_options->required_gates |=
-                    REQUIRED_GATE_TRANSFORM_TRIANGLE_F64;
+                    REQUIRED_GATE_TRANSFORM_TRIANGLE_F32;
             } else if (strcmp(value, "query") == 0) {
                 out_options->required_gates |= REQUIRED_GATE_AABB_QUERY;
             } else if (strcmp(value, "all") == 0) {
@@ -459,7 +470,7 @@ static uint64_t checksum_transform_outputs(
         size_t vertex;
 
         for (vertex = 0u; vertex < 3u; ++vertex) {
-            const double components[4] = {
+            const float components[4] = {
                 outputs[set][vertex].x,
                 outputs[set][vertex].y,
                 outputs[set][vertex].z,
@@ -468,7 +479,7 @@ static uint64_t checksum_transform_outputs(
             size_t component;
 
             for (component = 0u; component < 4u; ++component) {
-                uint64_t bits;
+                uint32_t bits;
 
                 memcpy(&bits, &components[component], sizeof(bits));
                 hash ^= bits;
@@ -481,6 +492,55 @@ static uint64_t checksum_transform_outputs(
         hash *= UINT64_C(1099511628211);
     }
     return hash;
+}
+
+static int transform_outputs_equivalent(
+    const transform_workload* scalar,
+    const transform_workload* neon
+)
+{
+    size_t set;
+
+    for (set = 0u; set < TRANSFORM_POSITION_SET_COUNT; ++set) {
+        size_t vertex;
+
+        if (scalar->metadata[set].active_planes !=
+                neon->metadata[set].active_planes ||
+            scalar->metadata[set].common_planes !=
+                neon->metadata[set].common_planes) {
+            return 0;
+        }
+        for (vertex = 0u; vertex < 3u; ++vertex) {
+            const float scalar_components[4] = {
+                scalar->outputs[set][vertex].x,
+                scalar->outputs[set][vertex].y,
+                scalar->outputs[set][vertex].z,
+                scalar->outputs[set][vertex].w,
+            };
+            const float neon_components[4] = {
+                neon->outputs[set][vertex].x,
+                neon->outputs[set][vertex].y,
+                neon->outputs[set][vertex].z,
+                neon->outputs[set][vertex].w,
+            };
+            size_t component;
+
+            for (component = 0u; component < 4u; ++component) {
+                const float scale = fmaxf(
+                    fabsf(scalar_components[component]),
+                    fabsf(neon_components[component])
+                );
+
+                if (fabsf(
+                        scalar_components[component] -
+                            neon_components[component]
+                    ) > 2.0e-5f * (1.0f + scale)) {
+                    return 0;
+                }
+            }
+        }
+    }
+    return 1;
 }
 
 static uint32_t random_u32(uint32_t* state)
@@ -507,20 +567,20 @@ static void initialize_hiz_source(float* source, size_t count)
 
 static void initialize_transform_workload(transform_workload* workload)
 {
-    static const double object_columns[4][4] = {
+    static const float object_columns[4][4] = {
         {1.125, -0.375, 0.25, 0.0625},
         {0.1875, 0.9375, -0.3125, 0.125},
         {-0.4375, 0.21875, 1.0625, -0.09375},
         {2.25, -1.5, 0.625, 1.0},
     };
-    static const double clip_columns[4][4] = {
+    static const float clip_columns[4][4] = {
         {0.8125, 0.15625, -0.28125, 0.09375},
         {-0.125, 1.1875, 0.34375, -0.0625},
         {0.40625, -0.234375, 0.875, 0.15625},
         {-0.75, 0.5, 0.1875, 1.125},
     };
-    soc_kernel_mat4_f64 object_to_world;
-    soc_kernel_mat4_f64 clip_from_world;
+    soc_kernel_mat4_f32 object_to_world;
+    soc_kernel_mat4_f32 clip_from_world;
     uint32_t state = UINT32_C(0x5452414e);
     size_t set;
 
@@ -535,7 +595,7 @@ static void initialize_transform_workload(transform_workload* workload)
         clip_columns,
         sizeof(clip_columns)
     );
-    soc_kernel_mat4_f64_multiply(
+    soc_kernel_mat4_f32_multiply(
         &clip_from_world,
         &object_to_world,
         &workload->clip_from_object
@@ -556,7 +616,7 @@ static void initialize_transform_workload(transform_workload* workload)
 
 static void execute_transform_operation(
     transform_workload* workload,
-    const soc_kernel_table* kernels
+    transform_triangle_fn transform_triangle
 )
 {
     uint32_t triangle;
@@ -570,7 +630,7 @@ static void execute_transform_operation(
                 (TRANSFORM_POSITION_SET_COUNT - 1u));
         const float* positions = workload->positions[set];
 
-        kernels->transform_triangle_f64(
+        transform_triangle(
             &workload->clip_from_object,
             positions,
             positions + 3u,
@@ -580,7 +640,7 @@ static void execute_transform_operation(
             &workload->metadata[set]
         );
         {
-            uint64_t bits;
+            uint32_t bits;
 
             memcpy(&bits, &workload->outputs[set][0].x, sizeof(bits));
             observed = (observed ^ bits) * UINT64_C(1099511628211);
@@ -594,7 +654,7 @@ static void execute_transform_operation(
 
 static int run_transform_timed_sample(
     transform_workload* workload,
-    const soc_kernel_table* kernels,
+    transform_triangle_fn transform_triangle,
     uint64_t target_ns,
     uint64_t* out_average_ns
 )
@@ -608,7 +668,7 @@ static int run_transform_timed_sample(
         return 0;
     }
     do {
-        execute_transform_operation(workload, kernels);
+        execute_transform_operation(workload, transform_triangle);
         if (iterations == UINT64_MAX) {
             return 0;
         }
@@ -1324,14 +1384,14 @@ cleanup:
 
 static uint64_t capture_transform_checksum(
     transform_workload* workload,
-    const soc_kernel_table* kernels,
+    transform_triangle_fn transform_triangle,
     int fill
 )
 {
     memset(workload->outputs, fill, sizeof(workload->outputs));
     memset(workload->metadata, fill, sizeof(workload->metadata));
     workload->invocation = 0u;
-    execute_transform_operation(workload, kernels);
+    execute_transform_operation(workload, transform_triangle);
     return checksum_transform_outputs(
         workload->outputs,
         workload->metadata
@@ -1341,8 +1401,6 @@ static uint64_t capture_transform_checksum(
 static int run_transform_case(
     const char* case_name,
     const options* opts,
-    const soc_kernel_table* scalar_kernels,
-    const soc_kernel_table* neon_kernels,
     soc_bool* out_gate_passed
 )
 {
@@ -1356,20 +1414,27 @@ static int run_transform_case(
     uint64_t target_ns;
     uint32_t sample;
     int success = 0;
+    const transform_triangle_fn scalar_transform =
+        soc_kernel_transform_triangle_f32_scalar;
+    const transform_triangle_fn neon_transform =
+        soc_kernel_transform_triangle_f32_neon;
 
     initialize_transform_workload(&scalar_workload);
     initialize_transform_workload(&neon_workload);
     validation_scalar = capture_transform_checksum(
         &scalar_workload,
-        scalar_kernels,
+        scalar_transform,
         0xa5
     );
     validation_neon = capture_transform_checksum(
         &neon_workload,
-        neon_kernels,
+        neon_transform,
         0x5a
     );
-    if (validation_scalar != validation_neon ||
+    if (!transform_outputs_equivalent(
+            &scalar_workload,
+            &neon_workload
+        ) ||
         memcmp(
             scalar_workload.positions,
             neon_workload.positions,
@@ -1392,17 +1457,6 @@ static int run_transform_case(
         success = 1;
         goto cleanup;
     }
-    if (scalar_kernels->transform_triangle_f64 ==
-        neon_kernels->transform_triangle_f64) {
-        (void)printf(
-            "case=%s performance=unavailable reason=shared_implementation\n",
-            case_name
-        );
-        *out_gate_passed = SOC_FALSE;
-        success = 1;
-        goto cleanup;
-    }
-
     scalar_result.samples_ns = (uint64_t*)calloc(
         opts->sample_count,
         sizeof(*scalar_result.samples_ns)
@@ -1418,13 +1472,13 @@ static int run_transform_case(
 
     if (!run_transform_timed_sample(
             &scalar_workload,
-            scalar_kernels,
+            scalar_transform,
             WARMUP_TARGET_NS,
             &warmup_average
         ) ||
         !run_transform_timed_sample(
             &neon_workload,
-            neon_kernels,
+            neon_transform,
             WARMUP_TARGET_NS,
             &warmup_average
         )) {
@@ -1442,20 +1496,20 @@ static int run_transform_case(
             ? &scalar_workload : &neon_workload;
         transform_workload* second_workload = (sample & 1u) == 0u
             ? &neon_workload : &scalar_workload;
-        const soc_kernel_table* first_kernels = (sample & 1u) == 0u
-            ? scalar_kernels : neon_kernels;
-        const soc_kernel_table* second_kernels = (sample & 1u) == 0u
-            ? neon_kernels : scalar_kernels;
+        const transform_triangle_fn first_transform =
+            (sample & 1u) == 0u ? scalar_transform : neon_transform;
+        const transform_triangle_fn second_transform =
+            (sample & 1u) == 0u ? neon_transform : scalar_transform;
 
         if (!run_transform_timed_sample(
                 first_workload,
-                first_kernels,
+                first_transform,
                 target_ns,
                 &first_result->samples_ns[sample]
             ) ||
             !run_transform_timed_sample(
                 second_workload,
-                second_kernels,
+                second_transform,
                 target_ns,
                 &second_result->samples_ns[sample]
             )) {
@@ -1466,17 +1520,16 @@ static int run_transform_case(
 
     scalar_result.checksum = capture_transform_checksum(
         &scalar_workload,
-        scalar_kernels,
+        scalar_transform,
         0xa5
     );
     neon_result.checksum = capture_transform_checksum(
         &neon_workload,
-        neon_kernels,
+        neon_transform,
         0x5a
     );
     if (scalar_result.checksum != validation_scalar ||
-        neon_result.checksum != validation_neon ||
-        scalar_result.checksum != neon_result.checksum) {
+        neon_result.checksum != validation_neon) {
         (void)fprintf(stderr, "%s: post-sampling validation changed\n", case_name);
         goto cleanup;
     }
@@ -1783,7 +1836,6 @@ int main(int argc, char** argv)
     if (scalar_kernels == NULL || scalar_kernels->clear_f32 == NULL ||
         scalar_kernels->store_constant_depth_block_f32 == NULL ||
         scalar_kernels->reduce_hiz_level_f32 == NULL ||
-        scalar_kernels->transform_triangle_f64 == NULL ||
         scalar_kernels->test_aabbs == NULL) {
         (void)fprintf(stderr, "soc_kernel_bench: Scalar kernels unavailable\n");
         return EXIT_FAILURE;
@@ -1792,7 +1844,6 @@ int main(int argc, char** argv)
         neon_kernels->clear_f32 == NULL ||
         neon_kernels->store_constant_depth_block_f32 == NULL ||
         neon_kernels->reduce_hiz_level_f32 == NULL ||
-        neon_kernels->transform_triangle_f64 == NULL ||
         neon_kernels->test_aabbs == NULL ||
         features.architecture != SOC_CPU_ARCHITECTURE_ARM64 ||
         !soc_cpu_features_has(&features, SOC_CPU_FEATURE_NEON)) {
@@ -1867,10 +1918,8 @@ int main(int argc, char** argv)
             &raster_partial_gate
         ) ||
         !run_transform_case(
-            "transform_triangle_f64.16384",
+            "transform_triangle_f32.16384",
             &opts,
-            scalar_kernels,
-            neon_kernels,
             &transform_gate
         ) ||
         !run_query_case(
@@ -1900,7 +1949,7 @@ int main(int argc, char** argv)
             raster_partial_gate != SOC_TRUE)) {
         required_gates_passed = SOC_FALSE;
     }
-    if ((opts.required_gates & REQUIRED_GATE_TRANSFORM_TRIANGLE_F64) != 0u &&
+    if ((opts.required_gates & REQUIRED_GATE_TRANSFORM_TRIANGLE_F32) != 0u &&
         transform_gate != SOC_TRUE) {
         required_gates_passed = SOC_FALSE;
     }

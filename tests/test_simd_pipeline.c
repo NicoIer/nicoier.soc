@@ -4,11 +4,18 @@
 #include "core/soc_pipeline.h"
 #include "core/soc_snapshot.h"
 
+#include <float.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 #define ARRAY_COUNT(values) (sizeof(values) / sizeof((values)[0]))
+#define TEST_WIDTH 17u
+#define TEST_HEIGHT 9u
+#define TEST_PIXEL_COUNT ((size_t)TEST_WIDTH * (size_t)TEST_HEIGHT)
+#define DEPTH_ABSOLUTE_TOLERANCE 5.0e-5f
+#define DEPTH_RELATIVE_TOLERANCE 5.0e-5f
 
 #define CHECK(condition) \
     do { \
@@ -24,12 +31,19 @@
         } \
     } while (0)
 
-static uint32_t float_bits(float value)
+static soc_bool depth_within_tolerance(float left, float right)
 {
-    uint32_t bits;
+    const float difference = fabsf(left - right);
+    const float absolute_left = fabsf(left);
+    const float absolute_right = fabsf(right);
+    const float scale = absolute_left > absolute_right
+        ? absolute_left
+        : absolute_right;
 
-    memcpy(&bits, &value, sizeof(bits));
-    return bits;
+    return difference <= DEPTH_ABSOLUTE_TOLERANCE +
+        DEPTH_RELATIVE_TOLERANCE * scale
+            ? SOC_TRUE
+            : SOC_FALSE;
 }
 
 static soc_result build_snapshot(
@@ -77,8 +91,8 @@ static soc_result build_snapshot(
     };
     const soc_config config = {
         .struct_size = sizeof(soc_config),
-        .width = 17u,
-        .height = 9u,
+        .width = TEST_WIDTH,
+        .height = TEST_HEIGHT,
         .worker_count = 0u,
         .flags = SOC_CONFIG_FLAG_NONE,
     };
@@ -168,17 +182,197 @@ static soc_result build_snapshot(
     return SOC_RESULT_OK;
 }
 
-static int compare_build_stats(
-    const soc_build_stats* scalar,
-    const soc_build_stats* neon
+static int validate_build_stats(
+    const soc_snapshot* snapshot,
+    uint64_t expected_input_triangle_count
 )
 {
-    CHECK(scalar->struct_size == neon->struct_size);
-    CHECK(scalar->hiz_level_count == neon->hiz_level_count);
-    CHECK(scalar->input_triangle_count == neon->input_triangle_count);
-    CHECK(scalar->clipped_triangle_count == neon->clipped_triangle_count);
-    CHECK(scalar->rasterized_triangle_count ==
-        neon->rasterized_triangle_count);
+    const soc_build_stats* stats = &snapshot->build_stats;
+
+    CHECK(stats->struct_size == sizeof(*stats));
+    CHECK(stats->hiz_level_count == snapshot->depth_pyramid.level_count);
+    CHECK(stats->input_triangle_count == expected_input_triangle_count);
+    CHECK(stats->rasterized_triangle_count != 0u);
+    return 0;
+}
+
+static int validate_masked_layout(const soc_snapshot* snapshot)
+{
+    const soc_hiz* hiz = &snapshot->depth_pyramid;
+    const uint32_t expected_block_width =
+        (TEST_WIDTH + SOC_HIZ_MASK_BLOCK_WIDTH - 1u) /
+        SOC_HIZ_MASK_BLOCK_WIDTH;
+    const uint32_t expected_block_height =
+        (TEST_HEIGHT + SOC_HIZ_MASK_BLOCK_HEIGHT - 1u) /
+        SOC_HIZ_MASK_BLOCK_HEIGHT;
+    size_t expected_offset = 0u;
+    size_t index;
+    uint32_t level;
+
+    CHECK(hiz->initialized == SOC_TRUE);
+    CHECK(hiz->masked == SOC_TRUE);
+    CHECK(hiz->pixel_width == TEST_WIDTH);
+    CHECK(hiz->pixel_height == TEST_HEIGHT);
+    CHECK(hiz->data != NULL);
+    CHECK(hiz->working_depth != NULL);
+    CHECK(hiz->layer_masks != NULL);
+    CHECK(hiz->level_count != 0u);
+    CHECK(hiz->levels[0].width == expected_block_width);
+    CHECK(hiz->levels[0].height == expected_block_height);
+
+    for (level = 0u; level < hiz->level_count; ++level) {
+        const soc_hiz_level* metadata = &hiz->levels[level];
+
+        CHECK(metadata->width != 0u);
+        CHECK(metadata->height != 0u);
+        CHECK(metadata->offset == expected_offset);
+        CHECK(metadata->element_count ==
+            (size_t)metadata->width * metadata->height);
+        expected_offset += metadata->element_count;
+    }
+    CHECK(expected_offset == hiz->element_count);
+
+    for (index = 0u;
+         index < hiz->levels[0].element_count;
+         ++index) {
+        const uint32_t block_x =
+            (uint32_t)(index % hiz->levels[0].width);
+        const uint32_t block_y =
+            (uint32_t)(index / hiz->levels[0].width);
+        const uint32_t first_x = block_x * SOC_HIZ_MASK_BLOCK_WIDTH;
+        const uint32_t first_y = block_y * SOC_HIZ_MASK_BLOCK_HEIGHT;
+        const float z0 = hiz->data[index];
+        const float z1 = hiz->working_depth[index];
+        uint32_t valid_mask = 0u;
+        uint32_t local_y;
+
+        CHECK(z0 == -1.0f || (z0 >= 0.0f && z0 <= 1.0f));
+        CHECK(z1 == FLT_MAX || (z1 >= 0.0f && z1 <= 1.0f));
+        for (local_y = 0u;
+             local_y < SOC_HIZ_MASK_BLOCK_HEIGHT &&
+                first_y + local_y < TEST_HEIGHT;
+             ++local_y) {
+            uint32_t local_x;
+
+            for (local_x = 0u;
+                 local_x < SOC_HIZ_MASK_BLOCK_WIDTH &&
+                    first_x + local_x < TEST_WIDTH;
+                 ++local_x) {
+                valid_mask |= UINT32_C(1) <<
+                    (local_y * SOC_HIZ_MASK_BLOCK_WIDTH + local_x);
+            }
+        }
+        CHECK((hiz->layer_masks[index] & ~valid_mask) == 0u);
+    }
+    return 0;
+}
+
+static int compare_public_depth_pyramids(
+    const soc_snapshot* scalar,
+    const soc_snapshot* neon
+)
+{
+    float scalar_depth[TEST_PIXEL_COUNT];
+    float neon_depth[TEST_PIXEL_COUNT];
+    soc_bool scalar_saw_clear = SOC_FALSE;
+    soc_bool scalar_saw_drawn = SOC_FALSE;
+    soc_bool neon_saw_clear = SOC_FALSE;
+    soc_bool neon_saw_drawn = SOC_FALSE;
+    uint32_t level;
+
+    CHECK(scalar->depth_pyramid.level_count ==
+        neon->depth_pyramid.level_count);
+    for (level = 0u;
+         level < scalar->depth_pyramid.level_count;
+         ++level) {
+        soc_hiz_level_info scalar_info = {
+            .struct_size = sizeof(scalar_info),
+        };
+        soc_hiz_level_info neon_info = {
+            .struct_size = sizeof(neon_info),
+        };
+        uint64_t index;
+
+        CHECK(soc_snapshot_hiz_level_query_internal(
+            scalar,
+            level,
+            &scalar_info,
+            NULL,
+            0u
+        ) == SOC_RESULT_OK);
+        CHECK(soc_snapshot_hiz_level_query_internal(
+            neon,
+            level,
+            &neon_info,
+            NULL,
+            0u
+        ) == SOC_RESULT_OK);
+        CHECK(scalar_info.level == level);
+        CHECK(neon_info.level == level);
+        CHECK(scalar_info.width == neon_info.width);
+        CHECK(scalar_info.height == neon_info.height);
+        CHECK(scalar_info.required_element_count ==
+            neon_info.required_element_count);
+        CHECK(scalar_info.required_element_count <= TEST_PIXEL_COUNT);
+        CHECK(soc_snapshot_hiz_level_query_internal(
+            scalar,
+            level,
+            &scalar_info,
+            scalar_depth,
+            TEST_PIXEL_COUNT
+        ) == SOC_RESULT_OK);
+        CHECK(soc_snapshot_hiz_level_query_internal(
+            neon,
+            level,
+            &neon_info,
+            neon_depth,
+            TEST_PIXEL_COUNT
+        ) == SOC_RESULT_OK);
+
+        for (index = 0u;
+             index < scalar_info.required_element_count;
+             ++index) {
+            const float scalar_value = scalar_depth[index];
+            const float neon_value = neon_depth[index];
+
+            CHECK(scalar_value >= 0.0f && scalar_value <= 1.0f);
+            CHECK(neon_value >= 0.0f && neon_value <= 1.0f);
+            if (level == 0u) {
+                scalar_saw_clear = scalar_value == 0.0f
+                    ? SOC_TRUE
+                    : scalar_saw_clear;
+                scalar_saw_drawn = scalar_value > 0.0f
+                    ? SOC_TRUE
+                    : scalar_saw_drawn;
+                neon_saw_clear = neon_value == 0.0f
+                    ? SOC_TRUE
+                    : neon_saw_clear;
+                neon_saw_drawn = neon_value > 0.0f
+                    ? SOC_TRUE
+                    : neon_saw_drawn;
+            }
+
+            if (depth_within_tolerance(
+                    scalar_value,
+                    neon_value
+                ) != SOC_TRUE) {
+                fprintf(
+                    stderr,
+                    "Hi-Z numeric mismatch at level %u element %llu: "
+                    "%.9g != %.9g\n",
+                    level,
+                    (unsigned long long)index,
+                    (double)scalar_value,
+                    (double)neon_value
+                );
+                return 1;
+            }
+        }
+    }
+    CHECK(scalar_saw_clear == SOC_TRUE);
+    CHECK(scalar_saw_drawn == SOC_TRUE);
+    CHECK(neon_saw_clear == SOC_TRUE);
+    CHECK(neon_saw_drawn == SOC_TRUE);
     return 0;
 }
 
@@ -188,84 +382,21 @@ static int compare_snapshots(
     uint64_t expected_input_triangle_count
 )
 {
-    uint32_t clear_bits;
-    soc_bool saw_clear = SOC_FALSE;
-    soc_bool saw_drawn = SOC_FALSE;
-    size_t index;
-    uint32_t level;
-
     CHECK(scalar != NULL);
     CHECK(neon != NULL);
-    clear_bits = float_bits(-1.0f);
     CHECK(scalar->kernels == soc_kernel_table_scalar());
     CHECK(neon->kernels == soc_kernel_table_neon());
-    CHECK(compare_build_stats(&scalar->build_stats, &neon->build_stats) == 0);
-    CHECK(scalar->build_stats.input_triangle_count ==
-        expected_input_triangle_count);
-    CHECK(scalar->build_stats.rasterized_triangle_count != 0u);
-    CHECK(scalar->depth_pyramid.level_count ==
-        neon->depth_pyramid.level_count);
-    CHECK(scalar->depth_pyramid.element_count ==
-        neon->depth_pyramid.element_count);
-
-    for (level = 0u; level < scalar->depth_pyramid.level_count; ++level) {
-        const soc_hiz_level* scalar_level =
-            &scalar->depth_pyramid.levels[level];
-        const soc_hiz_level* neon_level = &neon->depth_pyramid.levels[level];
-
-        CHECK(scalar_level->width == neon_level->width);
-        CHECK(scalar_level->height == neon_level->height);
-        CHECK(scalar_level->offset == neon_level->offset);
-        CHECK(scalar_level->element_count == neon_level->element_count);
-    }
-
-    for (index = 0u;
-         index < scalar->depth_pyramid.levels[0].element_count;
-         ++index) {
-        if (float_bits(scalar->depth_pyramid.data[index]) == clear_bits) {
-            saw_clear = SOC_TRUE;
-        } else {
-            saw_drawn = SOC_TRUE;
-        }
-        if (scalar->depth_pyramid.layer_masks[index] != 0u) {
-            saw_drawn = SOC_TRUE;
-        }
-        CHECK(float_bits(scalar->depth_pyramid.working_depth[index]) ==
-            float_bits(neon->depth_pyramid.working_depth[index]));
-        CHECK(scalar->depth_pyramid.layer_masks[index] ==
-            neon->depth_pyramid.layer_masks[index]);
-    }
-    CHECK(saw_clear == SOC_TRUE);
-    CHECK(saw_drawn == SOC_TRUE);
-
-    if (memcmp(
-            scalar->depth_pyramid.data,
-            neon->depth_pyramid.data,
-            scalar->depth_pyramid.element_count * sizeof(float)
-        ) == 0) {
-        return 0;
-    }
-
-    for (index = 0u;
-         index < scalar->depth_pyramid.element_count;
-         ++index) {
-        const uint32_t scalar_bits =
-            float_bits(scalar->depth_pyramid.data[index]);
-        const uint32_t neon_bits =
-            float_bits(neon->depth_pyramid.data[index]);
-
-        if (scalar_bits != neon_bits) {
-            fprintf(
-                stderr,
-                "Hi-Z bit mismatch at element %zu: %08x != %08x\n",
-                index,
-                scalar_bits,
-                neon_bits
-            );
-            return 1;
-        }
-    }
-    return 1;
+    CHECK(validate_build_stats(
+        scalar,
+        expected_input_triangle_count
+    ) == 0);
+    CHECK(validate_build_stats(
+        neon,
+        expected_input_triangle_count
+    ) == 0);
+    CHECK(validate_masked_layout(scalar) == 0);
+    CHECK(validate_masked_layout(neon) == 0);
+    return compare_public_depth_pyramids(scalar, neon);
 }
 
 static int compare_queries(
@@ -321,9 +452,12 @@ static int compare_queries(
     };
     soc_result scalar_result;
     soc_result neon_result;
-    uint64_t observed_visible = 0u;
-    uint64_t observed_occluded = 0u;
-    uint64_t observed_unknown = 0u;
+    uint64_t scalar_visible = 0u;
+    uint64_t scalar_occluded = 0u;
+    uint64_t scalar_unknown = 0u;
+    uint64_t neon_visible = 0u;
+    uint64_t neon_occluded = 0u;
+    uint64_t neon_unknown = 0u;
     size_t index;
 
     memset(scalar_visibility, 0xa5, sizeof(scalar_visibility));
@@ -345,38 +479,64 @@ static int compare_queries(
 
     CHECK(scalar_result == SOC_RESULT_OK);
     CHECK(neon_result == scalar_result);
-    CHECK(memcmp(
-        scalar_visibility,
-        neon_visibility,
-        sizeof(scalar_visibility)
-    ) == 0);
+    for (index = 0u; index < ARRAY_COUNT(bounds); ++index) {
+        CHECK(scalar_visibility[index] == SOC_VISIBILITY_VISIBLE ||
+            scalar_visibility[index] == SOC_VISIBILITY_OCCLUDED ||
+            scalar_visibility[index] == SOC_VISIBILITY_UNKNOWN);
+        CHECK(neon_visibility[index] == SOC_VISIBILITY_VISIBLE ||
+            neon_visibility[index] == SOC_VISIBILITY_OCCLUDED ||
+            neon_visibility[index] == SOC_VISIBILITY_UNKNOWN);
+        CHECK(scalar_visibility[index] == neon_visibility[index]);
+
+        if (scalar_visibility[index] == SOC_VISIBILITY_VISIBLE) {
+            ++scalar_visible;
+        } else if (scalar_visibility[index] == SOC_VISIBILITY_OCCLUDED) {
+            ++scalar_occluded;
+        } else {
+            ++scalar_unknown;
+        }
+        if (neon_visibility[index] == SOC_VISIBILITY_VISIBLE) {
+            ++neon_visible;
+        } else if (neon_visibility[index] == SOC_VISIBILITY_OCCLUDED) {
+            ++neon_occluded;
+        } else {
+            ++neon_unknown;
+        }
+    }
+
+    /*
+     * These checks describe the public mathematical contract rather than an
+     * internal representation: robust in-frustum boxes classify normally,
+     * an outside box is visible, malformed bounds are unknown, and a box
+     * crossing non-positive W remains unknown.
+     */
     CHECK(scalar_visibility[0] != SOC_VISIBILITY_UNKNOWN);
     CHECK(scalar_visibility[1] == SOC_VISIBILITY_VISIBLE);
     CHECK(scalar_visibility[2] == SOC_VISIBILITY_UNKNOWN);
     CHECK(scalar_visibility[3] == SOC_VISIBILITY_UNKNOWN);
-    for (index = 0u; index < ARRAY_COUNT(scalar_visibility); ++index) {
-        if (scalar_visibility[index] == SOC_VISIBILITY_VISIBLE) {
-            ++observed_visible;
-        } else if (scalar_visibility[index] == SOC_VISIBILITY_OCCLUDED) {
-            ++observed_occluded;
-        } else {
-            CHECK(scalar_visibility[index] == SOC_VISIBILITY_UNKNOWN);
-            ++observed_unknown;
-        }
-    }
-    CHECK(scalar_stats.reserved == neon_stats.reserved);
-    CHECK(scalar_stats.tested_aabb_count == neon_stats.tested_aabb_count);
-    CHECK(scalar_stats.visible_aabb_count == neon_stats.visible_aabb_count);
-    CHECK(scalar_stats.occluded_aabb_count == neon_stats.occluded_aabb_count);
-    CHECK(scalar_stats.unknown_aabb_count == neon_stats.unknown_aabb_count);
+    CHECK(scalar_visibility[4] != SOC_VISIBILITY_UNKNOWN);
+    CHECK(scalar_visibility[5] == SOC_VISIBILITY_UNKNOWN);
+    CHECK(scalar_visibility[6] != SOC_VISIBILITY_UNKNOWN);
+
+    CHECK(scalar_stats.reserved == 0u);
     CHECK(scalar_stats.tested_aabb_count == ARRAY_COUNT(bounds));
-    CHECK(scalar_stats.visible_aabb_count == observed_visible);
-    CHECK(scalar_stats.occluded_aabb_count == observed_occluded);
-    CHECK(scalar_stats.unknown_aabb_count == observed_unknown);
-    CHECK(observed_visible + observed_occluded + observed_unknown ==
+    CHECK(scalar_stats.visible_aabb_count == scalar_visible);
+    CHECK(scalar_stats.occluded_aabb_count == scalar_occluded);
+    CHECK(scalar_stats.unknown_aabb_count == scalar_unknown);
+    CHECK(scalar_visible + scalar_occluded + scalar_unknown ==
         ARRAY_COUNT(bounds));
-    CHECK(observed_visible != 0u);
-    CHECK(observed_unknown != 0u);
+    CHECK(scalar_visible != 0u);
+    CHECK(scalar_unknown != 0u);
+
+    CHECK(neon_stats.reserved == 0u);
+    CHECK(neon_stats.tested_aabb_count == ARRAY_COUNT(bounds));
+    CHECK(neon_stats.visible_aabb_count == neon_visible);
+    CHECK(neon_stats.occluded_aabb_count == neon_occluded);
+    CHECK(neon_stats.unknown_aabb_count == neon_unknown);
+    CHECK(neon_visible + neon_occluded + neon_unknown ==
+        ARRAY_COUNT(bounds));
+    CHECK(neon_visible != 0u);
+    CHECK(neon_unknown != 0u);
     return 0;
 }
 

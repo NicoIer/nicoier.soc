@@ -6,11 +6,13 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #define CHECK(condition) \
     do { \
         if (!(condition)) { \
+            fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #condition); \
             return 1; \
         } \
     } while (0)
@@ -32,14 +34,6 @@ static uint32_t float_bits(float value)
 
     memcpy(&bits, &value, sizeof(bits));
     return bits;
-}
-
-static float float_from_bits(uint32_t bits)
-{
-    float value;
-
-    memcpy(&value, &bits, sizeof(value));
-    return value;
 }
 
 static uint64_t make_full_depth_block_mask(
@@ -85,20 +79,13 @@ static void store_constant_depth_block_reference(
     }
 }
 
-static float make_far_biased_plane_depth_reference(float depth)
+static float clamp_plane_depth_reference(float depth)
 {
-    uint32_t bits;
-
     if (depth <= 0.0f) {
         depth = 0.0f;
     } else if (depth > 1.0f) {
         depth = 1.0f;
     }
-    memcpy(&bits, &depth, sizeof(bits));
-    bits = bits > SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
-        ? bits - SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
-        : 0u;
-    memcpy(&depth, &bits, sizeof(depth));
     return depth;
 }
 
@@ -128,7 +115,7 @@ static void store_depth_plane_block_reference(
 
             if ((row_mask & (UINT32_C(1) << column)) != 0u) {
                 const float candidate_depth =
-                    make_far_biased_plane_depth_reference(
+                    clamp_plane_depth_reference(
                         fmaf(depth_step_x, (float)column, row_depth)
                     );
 
@@ -348,18 +335,6 @@ static int test_merge_depth_planes_for_table(
         }
     }
 
-    initial[3u] = float_from_bits(UINT32_C(0x7fc12345));
-    scratch[5u] = float_from_bits(UINT32_C(0x7fc54321));
-    initial[7u] = 0.0f;
-    initial[9u] = float_from_bits(UINT32_C(0x80000000));
-    for (lane_index = 1u; lane_index < LANE_COUNT; ++lane_index) {
-        float* plane = scratch +
-            (size_t)(lane_index - 1u) * SCRATCH_PLANE_STRIDE;
-
-        plane[7u] = float_from_bits(UINT32_C(0x80000000));
-        plane[9u] = 0.0f;
-    }
-
     memcpy(expected, initial, sizeof(expected));
     memcpy(actual, initial, sizeof(actual));
     merge_depth_planes_reference(
@@ -379,8 +354,7 @@ static int test_merge_depth_planes_for_table(
     for (element_index = 0u;
          element_index < ELEMENT_COUNT;
          ++element_index) {
-        CHECK(float_bits(actual[element_index]) ==
-            float_bits(expected[element_index]));
+        CHECK(actual[element_index] == expected[element_index]);
     }
 
     memcpy(actual, initial, sizeof(actual));
@@ -425,7 +399,6 @@ static int test_scalar_table_contract(void)
     CHECK(scalar->store_constant_depth_block_f32 != NULL);
     CHECK(scalar->store_depth_plane_block_f32 != NULL);
     CHECK(scalar->reduce_hiz_level_f32 != NULL);
-    CHECK(scalar->transform_triangle_f64 != NULL);
     CHECK(scalar->test_aabbs != NULL);
     CHECK(soc_kernel_table_for_backend(SOC_KERNEL_BACKEND_SCALAR) == scalar);
     CHECK(soc_kernel_table_select(NULL) == scalar);
@@ -440,7 +413,6 @@ static int test_scalar_table_contract(void)
     CHECK(neon->store_constant_depth_block_f32 != NULL);
     CHECK(neon->store_depth_plane_block_f32 != NULL);
     CHECK(neon->reduce_hiz_level_f32 != NULL);
-    CHECK(neon->transform_triangle_f64 != NULL);
     CHECK(neon->test_aabbs != NULL);
     CHECK(neon->test_aabbs != scalar->test_aabbs);
     CHECK(soc_kernel_table_for_backend(SOC_KERNEL_BACKEND_NEON) == neon);

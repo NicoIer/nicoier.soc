@@ -2,6 +2,7 @@
 #include "occlusion/soc_hiz.h"
 #include "occlusion/soc_visibility.h"
 
+#include <float.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -69,6 +70,24 @@ static float float_from_bits(uint32_t bits)
     return value;
 }
 
+static int float_is_close(float left, float right)
+{
+    const float absolute_tolerance = 1.0e-6f;
+    const float relative_tolerance = 8.0f * FLT_EPSILON;
+    float difference;
+    float scale;
+
+    if (left == right) {
+        return 1;
+    }
+    if (!isfinite(left) || !isfinite(right)) {
+        return 0;
+    }
+    difference = fabsf(left - right);
+    scale = fmaxf(fabsf(left), fabsf(right));
+    return difference <= absolute_tolerance + relative_tolerance * scale;
+}
+
 static void fill_with_bits(float* values, size_t count, uint32_t bits)
 {
     const float value = float_from_bits(bits);
@@ -91,6 +110,14 @@ static uint32_t random_u32(uint32_t* state)
     value ^= value << 5u;
     *state = value;
     return value;
+}
+
+static float random_transform_value(uint32_t* state)
+{
+    const int32_t scaled =
+        (int32_t)(random_u32(state) & UINT32_C(0xffff)) - INT32_C(32768);
+
+    return (float)scaled * (1.0f / 4096.0f);
 }
 
 static int run_clear_case(
@@ -482,8 +509,10 @@ static int test_raster_depth_plane_block_differential(
                     for (index = 0u;
                          index < ARRAY_COUNT(scalar_storage);
                          ++index) {
-                        if (float_bits(scalar_storage[index]) !=
-                            float_bits(neon_storage[index])) {
+                        if (!float_is_close(
+                                scalar_storage[index],
+                                neon_storage[index]
+                            )) {
                             fprintf(
                                 stderr,
                                 "raster plane mismatch: %ux%u mask=%zu "
@@ -546,7 +575,7 @@ static int test_raster_depth_block_redzones(
                     scalar_storage[index] = float_from_bits(
                         (index & 1u) == 0u
                             ? UINT32_C(0x3e800000)
-                            : UINT32_C(0x7fc12345)
+                            : UINT32_C(0x3f000000)
                     );
                 }
                 memcpy(
@@ -1103,6 +1132,33 @@ typedef struct transform_output_storage {
     uint64_t after[TRANSFORM_OUTPUT_GUARD_COUNT];
 } transform_output_storage;
 
+static int transform_vertices_are_close(
+    const soc_kernel_clip_vertex left[3],
+    const soc_kernel_clip_vertex right[3]
+)
+{
+    size_t vertex;
+
+    for (vertex = 0u; vertex < 3u; ++vertex) {
+        if (!float_is_close(left[vertex].x, right[vertex].x) ||
+            !float_is_close(left[vertex].y, right[vertex].y) ||
+            !float_is_close(left[vertex].z, right[vertex].z) ||
+            !float_is_close(left[vertex].w, right[vertex].w)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int transform_metadata_is_equal(
+    const soc_kernel_clip_metadata* left,
+    const soc_kernel_clip_metadata* right
+)
+{
+    return left->active_planes == right->active_planes &&
+        left->common_planes == right->common_planes;
+}
+
 static soc_mat4 transform_matrix_from_values(const float values[16])
 {
     const soc_mat4 matrix = {
@@ -1115,8 +1171,6 @@ static soc_mat4 transform_matrix_from_values(const float values[16])
 }
 
 static int run_transform_case(
-    const soc_kernel_table* scalar,
-    const soc_kernel_table* neon,
     const soc_mat4* object_to_world,
     const soc_mat4* clip_from_world,
     const uint32_t position_bits[9],
@@ -1130,12 +1184,12 @@ static int run_transform_case(
     static const uint64_t guard_value = UINT64_C(0x7ff8cafe12345678);
     float position_storage[TRANSFORM_POSITION_STORAGE_COUNT];
     float position_before[TRANSFORM_POSITION_STORAGE_COUNT];
-    soc_kernel_mat4_f64 object_f64;
-    soc_kernel_mat4_f64 clip_f64;
-    soc_kernel_mat4_f64 clip_from_object_f64;
-    soc_kernel_mat4_f64 object_before;
-    soc_kernel_mat4_f64 clip_before;
-    soc_kernel_mat4_f64 clip_from_object_before;
+    soc_kernel_mat4_f32 object_f32;
+    soc_kernel_mat4_f32 clip_f32;
+    soc_kernel_mat4_f32 clip_from_object_f32;
+    soc_kernel_mat4_f32 object_before;
+    soc_kernel_mat4_f32 clip_before;
+    soc_kernel_mat4_f32 clip_from_object_before;
     transform_output_storage scalar_output;
     transform_output_storage neon_output;
     soc_kernel_clip_metadata scalar_metadata = {0xa5u, 0xa5u};
@@ -1155,16 +1209,16 @@ static int run_transform_case(
         }
     }
     memcpy(position_before, position_storage, sizeof(position_storage));
-    soc_kernel_mat4_f64_from_f32(object_to_world, &object_f64);
-    soc_kernel_mat4_f64_from_f32(clip_from_world, &clip_f64);
-    soc_kernel_mat4_f64_multiply(
-        &clip_f64,
-        &object_f64,
-        &clip_from_object_f64
+    soc_kernel_mat4_f32_from_f32(object_to_world, &object_f32);
+    soc_kernel_mat4_f32_from_f32(clip_from_world, &clip_f32);
+    soc_kernel_mat4_f32_multiply(
+        &clip_f32,
+        &object_f32,
+        &clip_from_object_f32
     );
-    object_before = object_f64;
-    clip_before = clip_f64;
-    clip_from_object_before = clip_from_object_f64;
+    object_before = object_f32;
+    clip_before = clip_f32;
+    clip_from_object_before = clip_from_object_f32;
     for (index = 0u; index < TRANSFORM_OUTPUT_GUARD_COUNT; ++index) {
         scalar_output.before[index] = guard_value;
         scalar_output.after[index] = guard_value;
@@ -1174,8 +1228,8 @@ static int run_transform_case(
     memset(scalar_output.vertices, 0xa5, sizeof(scalar_output.vertices));
     memset(neon_output.vertices, 0x5a, sizeof(neon_output.vertices));
 
-    scalar->transform_triangle_f64(
-        &clip_from_object_f64,
+    soc_kernel_transform_triangle_f32_scalar(
+        &clip_from_object_f32,
         position_storage + position_starts[0] + offset,
         position_storage + position_starts[1] + offset,
         position_storage + position_starts[2] + offset,
@@ -1188,21 +1242,20 @@ static int run_transform_case(
             position_before,
             sizeof(position_storage)
         ) != 0 ||
-        memcmp(&object_f64, &object_before, sizeof(object_f64)) != 0 ||
-        memcmp(&clip_f64, &clip_before, sizeof(clip_f64)) != 0 ||
+        memcmp(&object_f32, &object_before, sizeof(object_f32)) != 0 ||
+        memcmp(&clip_f32, &clip_before, sizeof(clip_f32)) != 0 ||
         memcmp(
-            &clip_from_object_f64,
+            &clip_from_object_f32,
             &clip_from_object_before,
-            sizeof(clip_from_object_f64)
+            sizeof(clip_from_object_f32)
         ) != 0) {
         fprintf(stderr, "transform Scalar modified input: %s\n", label);
         return 1;
     }
-    if (expected_metadata != NULL && memcmp(
+    if (expected_metadata != NULL && !transform_metadata_is_equal(
             &scalar_metadata,
-            expected_metadata,
-            sizeof(scalar_metadata)
-        ) != 0) {
+            expected_metadata
+        )) {
         fprintf(
             stderr,
             "transform metadata mismatch: %s active=%u common=%u\n",
@@ -1213,8 +1266,8 @@ static int run_transform_case(
         return 1;
     }
 
-    neon->transform_triangle_f64(
-        &clip_from_object_f64,
+    soc_kernel_transform_triangle_f32_neon(
+        &clip_from_object_f32,
         position_storage + position_starts[0] + offset,
         position_storage + position_starts[1] + offset,
         position_storage + position_starts[2] + offset,
@@ -1227,26 +1280,21 @@ static int run_transform_case(
             position_before,
             sizeof(position_storage)
         ) != 0 ||
-        memcmp(&object_f64, &object_before, sizeof(object_f64)) != 0 ||
-        memcmp(&clip_f64, &clip_before, sizeof(clip_f64)) != 0 ||
+        memcmp(&object_f32, &object_before, sizeof(object_f32)) != 0 ||
+        memcmp(&clip_f32, &clip_before, sizeof(clip_f32)) != 0 ||
         memcmp(
-            &clip_from_object_f64,
+            &clip_from_object_f32,
             &clip_from_object_before,
-            sizeof(clip_from_object_f64)
+            sizeof(clip_from_object_f32)
         ) != 0) {
         fprintf(stderr, "transform NEON modified input: %s\n", label);
         return 1;
     }
-    if (memcmp(
+    if (!transform_vertices_are_close(
             scalar_output.vertices,
-            neon_output.vertices,
-            sizeof(scalar_output.vertices)
-        ) != 0 ||
-        memcmp(
-            &scalar_metadata,
-            &neon_metadata,
-            sizeof(scalar_metadata)
-        ) != 0) {
+            neon_output.vertices
+        ) ||
+        !transform_metadata_is_equal(&scalar_metadata, &neon_metadata)) {
         fprintf(
             stderr,
             "transform mismatch: %s offset=%zu\n",
@@ -1254,13 +1302,13 @@ static int run_transform_case(
             offset
         );
         for (vertex = 0u; vertex < 3u; ++vertex) {
-            const double scalar_components[4] = {
+            const float scalar_components[4] = {
                 scalar_output.vertices[vertex].x,
                 scalar_output.vertices[vertex].y,
                 scalar_output.vertices[vertex].z,
                 scalar_output.vertices[vertex].w,
             };
-            const double neon_components[4] = {
+            const float neon_components[4] = {
                 neon_output.vertices[vertex].x,
                 neon_output.vertices[vertex].y,
                 neon_output.vertices[vertex].z,
@@ -1268,28 +1316,18 @@ static int run_transform_case(
             };
 
             for (index = 0u; index < 4u; ++index) {
-                uint64_t scalar_bits;
-                uint64_t neon_bits;
-
-                memcpy(
-                    &scalar_bits,
-                    &scalar_components[index],
-                    sizeof(scalar_bits)
-                );
-                memcpy(
-                    &neon_bits,
-                    &neon_components[index],
-                    sizeof(neon_bits)
-                );
-                if (scalar_bits != neon_bits) {
+                if (!float_is_close(
+                        scalar_components[index],
+                        neon_components[index]
+                    )) {
                     fprintf(
                         stderr,
-                        "  vertex=%zu component=%zu scalar=%016llx "
-                        "neon=%016llx\n",
+                        "  vertex=%zu component=%zu scalar=%.9g "
+                        "neon=%.9g\n",
                         vertex,
                         index,
-                        (unsigned long long)scalar_bits,
-                        (unsigned long long)neon_bits
+                        scalar_components[index],
+                        neon_components[index]
                     );
                 }
             }
@@ -1308,47 +1346,24 @@ static int run_transform_case(
     return 0;
 }
 
-static double transform_reference_multiply(double left, double right)
-{
-    volatile double result = left * right;
-
-    return result;
-}
-
-static double transform_reference_add(double left, double right)
-{
-    volatile double result = left + right;
-
-    return result;
-}
-
-static double transform_reference_component(
-    double column0,
-    double column1,
-    double column2,
-    double column3,
+static float transform_reference_component(
+    float column0,
+    float column1,
+    float column2,
+    float column3,
     const soc_kernel_clip_vertex* vertex
 )
 {
-    double result = transform_reference_multiply(column0, vertex->x);
+    float result = column3 * vertex->w;
 
-    result = transform_reference_add(
-        result,
-        transform_reference_multiply(column1, vertex->y)
-    );
-    result = transform_reference_add(
-        result,
-        transform_reference_multiply(column2, vertex->z)
-    );
-    result = transform_reference_add(
-        result,
-        transform_reference_multiply(column3, vertex->w)
-    );
+    result = fmaf(column0, vertex->x, result);
+    result = fmaf(column1, vertex->y, result);
+    result = fmaf(column2, vertex->z, result);
     return result;
 }
 
 static soc_kernel_clip_vertex transform_reference_vertex(
-    const soc_kernel_mat4_f64* matrix,
+    const soc_kernel_mat4_f32* matrix,
     const soc_kernel_clip_vertex* vertex
 )
 {
@@ -1385,12 +1400,12 @@ static soc_kernel_clip_vertex transform_reference_vertex(
     return result;
 }
 
-static soc_kernel_mat4_f64 transform_reference_matrix_multiply(
-    const soc_kernel_mat4_f64* left,
-    const soc_kernel_mat4_f64* right
+static soc_kernel_mat4_f32 transform_reference_matrix_multiply(
+    const soc_kernel_mat4_f32* left,
+    const soc_kernel_mat4_f32* right
 )
 {
-    soc_kernel_mat4_f64 result;
+    soc_kernel_mat4_f32 result;
     size_t column;
 
     for (column = 0u; column < 4u; ++column) {
@@ -1413,10 +1428,28 @@ static soc_kernel_mat4_f64 transform_reference_matrix_multiply(
     return result;
 }
 
-static int test_transform_reference(
-    const soc_kernel_table* scalar,
-    const soc_kernel_table* neon
+static int transform_matrices_are_close(
+    const soc_kernel_mat4_f32* left,
+    const soc_kernel_mat4_f32* right
 )
+{
+    size_t column;
+    size_t row;
+
+    for (column = 0u; column < 4u; ++column) {
+        for (row = 0u; row < 4u; ++row) {
+            if (!float_is_close(
+                    left->columns[column][row],
+                    right->columns[column][row]
+                )) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static int test_transform_reference(void)
 {
     static const float object_values[16] = {
         1.234567f, -0.918273f, 0.314159f, 0.271828f,
@@ -1437,10 +1470,10 @@ static int test_transform_reference(
     };
     const soc_mat4 object = transform_matrix_from_values(object_values);
     const soc_mat4 clip = transform_matrix_from_values(clip_values);
-    soc_kernel_mat4_f64 object_f64;
-    soc_kernel_mat4_f64 clip_f64;
-    soc_kernel_mat4_f64 clip_from_object_f64;
-    soc_kernel_mat4_f64 expected_matrix;
+    soc_kernel_mat4_f32 object_f32;
+    soc_kernel_mat4_f32 clip_f32;
+    soc_kernel_mat4_f32 clip_from_object_f32;
+    soc_kernel_mat4_f32 expected_matrix;
     soc_kernel_clip_vertex expected[3];
     soc_kernel_clip_vertex scalar_output[3];
     soc_kernel_clip_vertex neon_output[3];
@@ -1448,22 +1481,21 @@ static int test_transform_reference(
     soc_kernel_clip_metadata neon_metadata;
     size_t index;
 
-    soc_kernel_mat4_f64_from_f32(&object, &object_f64);
-    soc_kernel_mat4_f64_from_f32(&clip, &clip_f64);
-    soc_kernel_mat4_f64_multiply(
-        &clip_f64,
-        &object_f64,
-        &clip_from_object_f64
+    soc_kernel_mat4_f32_from_f32(&object, &object_f32);
+    soc_kernel_mat4_f32_from_f32(&clip, &clip_f32);
+    soc_kernel_mat4_f32_multiply(
+        &clip_f32,
+        &object_f32,
+        &clip_from_object_f32
     );
     expected_matrix = transform_reference_matrix_multiply(
-        &clip_f64,
-        &object_f64
+        &clip_f32,
+        &object_f32
     );
-    if (memcmp(
+    if (!transform_matrices_are_close(
             &expected_matrix,
-            &clip_from_object_f64,
-            sizeof(expected_matrix)
-        ) != 0) {
+            &clip_from_object_f32
+        )) {
         fprintf(stderr, "transform matrix composition mismatch\n");
         return 1;
     }
@@ -1472,7 +1504,7 @@ static int test_transform_reference(
             positions[index * 3u],
             positions[index * 3u + 1u],
             positions[index * 3u + 2u],
-            1.0,
+            1.0f,
         };
         expected[index] = transform_reference_vertex(
             &expected_matrix,
@@ -1480,8 +1512,8 @@ static int test_transform_reference(
         );
     }
 
-    scalar->transform_triangle_f64(
-        &clip_from_object_f64,
+    soc_kernel_transform_triangle_f32_scalar(
+        &clip_from_object_f32,
         positions,
         positions + 3u,
         positions + 6u,
@@ -1489,8 +1521,8 @@ static int test_transform_reference(
         scalar_output,
         &scalar_metadata
     );
-    neon->transform_triangle_f64(
-        &clip_from_object_f64,
+    soc_kernel_transform_triangle_f32_neon(
+        &clip_from_object_f32,
         positions,
         positions + 3u,
         positions + 6u,
@@ -1498,18 +1530,16 @@ static int test_transform_reference(
         neon_output,
         &neon_metadata
     );
-    if (memcmp(expected, scalar_output, sizeof(expected)) != 0 ||
-        memcmp(expected, neon_output, sizeof(expected)) != 0) {
+    if (!transform_vertices_are_close(expected, scalar_output) ||
+        !transform_vertices_are_close(expected, neon_output) ||
+        !transform_metadata_is_equal(&scalar_metadata, &neon_metadata)) {
         fprintf(stderr, "transform composed reference mismatch\n");
         return 1;
     }
     return 0;
 }
 
-static int test_transform_differential(
-    const soc_kernel_table* scalar,
-    const soc_kernel_table* neon
-)
+static int test_transform_differential(void)
 {
     static const float identity_values[16] = {
         1.0f, 0.0f, 0.0f, 0.0f,
@@ -1536,10 +1566,10 @@ static int test_transform_differential(
     };
     static const uint32_t special_bits[] = {
         UINT32_C(0x00000000), UINT32_C(0x80000000),
-        UINT32_C(0x00000001), UINT32_C(0x80000001),
-        UINT32_C(0x007fffff), UINT32_C(0x807fffff),
+        UINT32_C(0x3a800000), UINT32_C(0xba800000),
+        UINT32_C(0x3e800000), UINT32_C(0xbe800000),
         UINT32_C(0x3f800000), UINT32_C(0xbf800000),
-        UINT32_C(0x7f7fffff), UINT32_C(0xff7fffff),
+        UINT32_C(0x41800000), UINT32_C(0xc1800000),
     };
     soc_mat4 identity = transform_matrix_from_values(identity_values);
     soc_mat4 object = transform_matrix_from_values(object_values);
@@ -1550,7 +1580,7 @@ static int test_transform_differential(
     size_t index;
     size_t iteration;
 
-    if (test_transform_reference(scalar, neon) != 0) {
+    if (test_transform_reference() != 0) {
         return 1;
     }
 
@@ -1561,8 +1591,6 @@ static int test_transform_differential(
         };
 
         if (run_transform_case(
-                scalar,
-                neon,
                 &identity,
                 &identity,
                 boundary_positions,
@@ -1574,8 +1602,6 @@ static int test_transform_differential(
                 "clip-boundaries"
             ) != 0 ||
             run_transform_case(
-                scalar,
-                neon,
                 &object,
                 &clip,
                 boundary_positions,
@@ -1606,8 +1632,6 @@ static int test_transform_differential(
         };
 
         if (run_transform_case(
-                scalar,
-                neon,
                 &identity,
                 &identity,
                 rejected_positions,
@@ -1621,8 +1645,6 @@ static int test_transform_differential(
     }
     for (offset = 0u; offset < 4u; ++offset) {
         if (run_transform_case(
-                scalar,
-                neon,
                 &object,
                 &clip,
                 positions,
@@ -1642,22 +1664,15 @@ static int test_transform_differential(
         float clip_random[16];
 
         for (index = 0u; index < ARRAY_COUNT(object_random); ++index) {
-            object_random[index] = float_from_bits(
-                random_u32(&state) & ~UINT32_C(0x00800000)
-            );
-            clip_random[index] = float_from_bits(
-                random_u32(&state) & ~UINT32_C(0x00800000)
-            );
+            object_random[index] = random_transform_value(&state);
+            clip_random[index] = random_transform_value(&state);
         }
         for (index = 0u; index < ARRAY_COUNT(positions); ++index) {
-            positions[index] =
-                random_u32(&state) & ~UINT32_C(0x00800000);
+            positions[index] = float_bits(random_transform_value(&state));
         }
         object = transform_matrix_from_values(object_random);
         clip = transform_matrix_from_values(clip_random);
         if (run_transform_case(
-                scalar,
-                neon,
                 &object,
                 &clip,
                 positions,
@@ -1694,8 +1709,6 @@ static int test_transform_differential(
         object = transform_matrix_from_values(object_special);
         clip = transform_matrix_from_values(clip_special);
         if (run_transform_case(
-                scalar,
-                neon,
                 &object,
                 &clip,
                 positions,
@@ -2522,7 +2535,6 @@ int main(void)
     CHECK(scalar->store_constant_depth_block_f32 != NULL);
     CHECK(scalar->store_depth_plane_block_f32 != NULL);
     CHECK(scalar->reduce_hiz_level_f32 != NULL);
-    CHECK(scalar->transform_triangle_f64 != NULL);
     CHECK(soc_kernel_table_for_backend(SOC_KERNEL_BACKEND_SCALAR) == scalar);
 
 #if SOC_TEST_AARCH64
@@ -2532,7 +2544,6 @@ int main(void)
     CHECK(neon->store_constant_depth_block_f32 != NULL);
     CHECK(neon->store_depth_plane_block_f32 != NULL);
     CHECK(neon->reduce_hiz_level_f32 != NULL);
-    CHECK(neon->transform_triangle_f64 != NULL);
     CHECK(neon->test_aabbs != NULL);
     CHECK(neon->clear_f32 == scalar->clear_f32);
     CHECK(neon->store_constant_depth_block_f32 !=
@@ -2540,7 +2551,6 @@ int main(void)
     CHECK(neon->store_depth_plane_block_f32 !=
         scalar->store_depth_plane_block_f32);
     CHECK(neon->reduce_hiz_level_f32 != scalar->reduce_hiz_level_f32);
-    CHECK(neon->transform_triangle_f64 != scalar->transform_triangle_f64);
     CHECK(neon->test_aabbs != scalar->test_aabbs);
     CHECK(soc_kernel_table_for_backend(SOC_KERNEL_BACKEND_NEON) == neon);
 
@@ -2562,7 +2572,7 @@ int main(void)
     if (test_hiz_redzones(scalar, neon) != 0) {
         return 1;
     }
-    if (test_transform_differential(scalar, neon) != 0) {
+    if (test_transform_differential() != 0) {
         return 1;
     }
     if (test_aabb_query_differential(scalar, neon) != 0) {

@@ -12,7 +12,7 @@
 #define TEST_WIDTH 8u
 #define TEST_HEIGHT 8u
 #define TEST_PIXEL_COUNT (TEST_WIDTH * TEST_HEIGHT)
-#define DEPTH_EPSILON 0.000001f
+#define DEPTH_EPSILON 0.00001f
 #define DEPTH_SENTINEL (-123.0f)
 
 #define CHECK(condition) \

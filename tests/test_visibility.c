@@ -360,11 +360,7 @@ static int test_empty_frame_and_fail_open_inputs(void)
     soc_snapshot_destroy(snapshot);
     snapshot = NULL;
 
-    /*
-     * A positive W smaller than the transform error margin must expand the
-     * projection conservatively. A negative safety margin could otherwise
-     * invert the pixel bounds and incorrectly report occlusion.
-     */
+    /* Any positive finite W is projected directly; there is no error margin. */
     frame_desc = make_frame_desc();
     frame_desc.clip_from_world.col2.z = 0.0f;
     frame_desc.clip_from_world.col3.z = 5.0e-16f;
