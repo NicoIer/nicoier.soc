@@ -188,7 +188,7 @@ soc_result soc_rasterizer_begin_frame(
     const soc_frame_desc* desc
 );
 
-/* Dense-only: begins a frame without touching caller-initialized depth. */
+/* Begins a frame while preserving every caller-owned depth stream. */
 soc_result soc_rasterizer_begin_frame_no_clear(
     soc_rasterizer* rasterizer,
     const soc_frame_desc* desc
@@ -254,9 +254,10 @@ soc_result soc_rasterizer_rasterize_prepared_region(
 );
 
 /*
- * Dense-only hot-path variant for an already validated active raster phase.
- * The caller guarantees non-NULL arguments, valid prepared bounds and a
- * well-formed region; empty intersections remain no-ops.
+ * Hot-path variant for an already validated active raster phase. For masked
+ * output, the caller additionally guarantees 8x4-aligned disjoint region
+ * ownership and disabled frame-summary tracking. Empty intersections remain
+ * no-ops.
  */
 void soc_rasterizer_rasterize_prepared_region_unchecked(
     soc_rasterizer* rasterizer,

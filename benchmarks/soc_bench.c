@@ -149,6 +149,7 @@ typedef struct options {
     const char* output;
     uint32_t samples;
     uint32_t sample_ms;
+    uint32_t worker_count;
     uint64_t seed;
     unsigned suite_tier;
     soc_bool list;
@@ -176,6 +177,7 @@ typedef struct bench_result {
 typedef struct workload {
     const bench_case* definition;
     uint64_t seed;
+    uint32_t worker_count;
     soc_context* context;
     soc_mesh* mesh;
     soc_snapshot* snapshot;
@@ -269,6 +271,22 @@ static const bench_case g_cases[] = {
      .kind = BENCH_GEOMETRY, .tier = 1u, .width = 640u, .height = 360u,
      .triangle_count = 16384u, .instance_count = 1u,
      .geometry_pattern = GEOMETRY_DEGENERATE},
+    {.name = "geometry.msoc.1280x720.4096",
+     .description = "Build 4096 triangles through high-resolution MSOC",
+     .kind = BENCH_GEOMETRY, .tier = 2u, .width = 1280u, .height = 720u,
+     .triangle_count = 4096u, .instance_count = 1u},
+    {.name = "geometry.msoc.1280x720.8192",
+     .description = "Build 8192 triangles through high-resolution MSOC",
+     .kind = BENCH_GEOMETRY, .tier = 2u, .width = 1280u, .height = 720u,
+     .triangle_count = 8192u, .instance_count = 1u},
+    {.name = "geometry.msoc.1280x720.16384",
+     .description = "Build 16384 triangles through high-resolution MSOC",
+     .kind = BENCH_GEOMETRY, .tier = 2u, .width = 1280u, .height = 720u,
+     .triangle_count = 16384u, .instance_count = 1u},
+    {.name = "geometry.msoc.1280x720.32768",
+     .description = "Build 32768 triangles through high-resolution MSOC",
+     .kind = BENCH_GEOMETRY, .tier = 2u, .width = 1280u, .height = 720u,
+     .triangle_count = 32768u, .instance_count = 1u},
 
     {.name = "raster.fill.fullscreen", .description = "Rasterize one full-screen triangle",
      .kind = BENCH_FILL, .tier = 1u, .width = 640u, .height = 360u,
@@ -607,6 +625,7 @@ static float case_occluded_depth(const bench_case* definition)
 static soc_result create_context(
     uint32_t width,
     uint32_t height,
+    uint32_t worker_count,
     soc_context** out_context
 )
 {
@@ -614,7 +633,7 @@ static soc_result create_context(
         .struct_size = sizeof(soc_config),
         .width = width,
         .height = height,
-        .worker_count = 1u,
+        .worker_count = worker_count,
         .flags = SOC_CONFIG_FLAG_NONE
     };
     return soc_context_create(&config, out_context);
@@ -1243,12 +1262,14 @@ static soc_result workload_build_snapshot(workload* work)
 static int workload_initialize(
     workload* work,
     const bench_case* definition,
-    uint64_t seed
+    uint64_t seed,
+    uint32_t worker_count
 )
 {
     memset(work, 0, sizeof(*work));
     work->definition = definition;
     work->seed = seed;
+    work->worker_count = worker_count;
     work->frame_desc = default_frame_desc();
     work->frame_desc.clip_depth_range = definition->clip_depth_range;
     if (uses_perspective_queries(definition) == SOC_TRUE) {
@@ -1263,6 +1284,7 @@ static int workload_initialize(
     if (create_context(
         definition->kind == BENCH_CONTEXT_RESIZE ? 320u : definition->width,
         definition->kind == BENCH_CONTEXT_RESIZE ? 180u : definition->height,
+        worker_count,
         &work->context
     ) != SOC_RESULT_OK) {
         fprintf(stderr, "%s: context creation failed\n", definition->name);
@@ -1462,6 +1484,7 @@ static int workload_run_timed(workload* work)
         result = create_context(
             definition->width,
             definition->height,
+            work->worker_count,
             &temporary
         );
         if (result == SOC_RESULT_OK) {
@@ -2022,7 +2045,12 @@ static int benchmark_case_run(
     result->build_stats.struct_size = sizeof(result->build_stats);
     result->query_stats.struct_size = sizeof(result->query_stats);
 
-    if (workload_initialize(&work, definition, opts->seed) != 0) {
+    if (workload_initialize(
+            &work,
+            definition,
+            opts->seed,
+            opts->worker_count
+        ) != 0) {
         workload_destroy(&work);
         return 1;
     }
@@ -2177,6 +2205,7 @@ static void print_usage(FILE* stream, const char* program)
         "  --samples N              Samples per case (default: %u)\n"
         "  --sample-ms N            Timed milliseconds per sample target "
         "(default: %u)\n"
+        "  --workers N              Context workers (default: 1)\n"
         "  --seed N                 Synthetic workload seed (default: "
         "0x534F4301)\n"
         "  --output PATH            Write JSON to PATH instead of stdout\n"
@@ -2195,6 +2224,7 @@ static int parse_options(int argc, char** argv, options* opts)
     opts->suite_tier = 1u;
     opts->samples = DEFAULT_SAMPLES;
     opts->sample_ms = DEFAULT_SAMPLE_MS;
+    opts->worker_count = 1u;
     opts->seed = DEFAULT_SEED;
 
     for (index = 1; index < argc; ++index) {
@@ -2253,6 +2283,12 @@ static int parse_options(int argc, char** argv, options* opts)
             if (parse_u32(value, 1u, &opts->sample_ms) != 0 ||
                 opts->sample_ms > 600000u) {
                 fprintf(stderr, "invalid sample duration: %s\n", value);
+                return 1;
+            }
+        } else if (strncmp(argument, "--workers", 9u) == 0 &&
+            (argument[9] == '\0' || argument[9] == '=')) {
+            if (parse_u32(value, 1u, &opts->worker_count) != 0) {
+                fprintf(stderr, "invalid worker count: %s\n", value);
                 return 1;
             }
         } else if (strncmp(argument, "--seed", 6u) == 0 &&
@@ -2547,7 +2583,11 @@ static int write_json(
         json_string(output, SOC_BENCH_LINKAGE) != 0) {
         return 1;
     }
-    if (fprintf(output, ",\n    \"worker_count\":1,\n    \"timer\":") < 0 ||
+    if (fprintf(
+            output,
+            ",\n    \"worker_count\":%u,\n    \"timer\":",
+            opts->worker_count
+        ) < 0 ||
         json_string(output, timer_name()) != 0 ||
         fputs("\n  },\n  \"suite\":", output) == EOF ||
         json_string(output, opts->suite) != 0 ||

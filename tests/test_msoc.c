@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define ARRAY_COUNT(values) (sizeof(values) / sizeof((values)[0]))
@@ -13,6 +14,9 @@
 #define TEST_WIDTH 101u
 #define TEST_HEIGHT 53u
 #define TEST_PIXEL_COUNT (TEST_WIDTH * TEST_HEIGHT)
+#define PARALLEL_TRIANGLE_COUNT 4098u
+#define PARALLEL_INDEX_COUNT (PARALLEL_TRIANGLE_COUNT * 3u)
+#define PARALLEL_REPEAT_COUNT 8u
 
 #define CHECK(condition) \
     do { \
@@ -58,6 +62,7 @@ typedef struct test_scene {
 static soc_aabb query_bounds[QUERY_COUNT];
 static soc_visibility masked_visibility[QUERY_COUNT];
 static soc_visibility reference_visibility[QUERY_COUNT];
+static soc_visibility parallel_visibility[QUERY_COUNT];
 static float masked_depth_pixels[TEST_PIXEL_COUNT];
 static float reference_depth_pixels[TEST_PIXEL_COUNT];
 
@@ -207,6 +212,129 @@ static soc_result create_mesh(
         .index_type = SOC_INDEX_UINT16,
     };
     return soc_mesh_create(context, &desc, out_mesh);
+}
+
+typedef struct reverse_z_screen_vertex {
+    float x;
+    float y;
+    float world_z;
+} reverse_z_screen_vertex;
+
+static void write_reverse_z_screen_vertex(
+    float* destination,
+    const reverse_z_screen_vertex* source
+)
+{
+    const float ndc_x = 2.0f * source->x / (float)TEST_WIDTH - 1.0f;
+    const float ndc_y = 1.0f -
+        2.0f * source->y / (float)TEST_HEIGHT;
+
+    destination[0] = ndc_x * source->world_z;
+    destination[1] = ndc_y * source->world_z;
+    destination[2] = source->world_z;
+}
+
+static soc_result create_parallel_order_mesh(
+    soc_context* context,
+    soc_bool reverse_order,
+    soc_mesh** out_mesh
+)
+{
+    static const reverse_z_screen_vertex patterns[6][3] = {
+        {
+            {0.10f, 0.10f, 2.80f},
+            {100.90f, 0.10f, 2.80f},
+            {0.10f, 52.90f, 2.80f},
+        },
+        {
+            {100.90f, 52.90f, 1.25f},
+            {0.10f, 52.90f, 1.25f},
+            {100.90f, 0.10f, 1.25f},
+        },
+        {
+            {0.25f, 0.25f, 1.35f},
+            {100.75f, 52.75f, 2.60f},
+            {0.25f, 52.75f, 1.70f},
+        },
+        {
+            {100.75f, 0.25f, 2.20f},
+            {0.25f, 0.25f, 1.15f},
+            {100.75f, 52.75f, 1.60f},
+        },
+        {
+            {31.10f, 0.25f, 1.30f},
+            {33.40f, 52.75f, 2.40f},
+            {28.70f, 52.75f, 1.80f},
+        },
+        {
+            {94.20f, 28.10f, 2.70f},
+            {100.90f, 52.90f, 1.25f},
+            {94.10f, 52.90f, 1.90f},
+        },
+    };
+    float positions[6u * 9u];
+    uint16_t* indices = malloc(
+        (size_t)PARALLEL_INDEX_COUNT * sizeof(*indices)
+    );
+    soc_result result;
+    uint32_t pattern;
+    uint32_t triangle;
+
+    if (indices == NULL) {
+        return SOC_RESULT_OUT_OF_MEMORY;
+    }
+    for (pattern = 0u; pattern < 6u; ++pattern) {
+        uint32_t vertex;
+
+        for (vertex = 0u; vertex < 3u; ++vertex) {
+            write_reverse_z_screen_vertex(
+                positions + (size_t)(pattern * 3u + vertex) * 3u,
+                &patterns[pattern][vertex]
+            );
+        }
+    }
+    for (triangle = 0u;
+         triangle < PARALLEL_TRIANGLE_COUNT;
+         ++triangle) {
+        const uint32_t ordered_triangle = reverse_order == SOC_TRUE
+            ? PARALLEL_TRIANGLE_COUNT - 1u - triangle
+            : triangle;
+        const uint32_t ordered_pattern = ordered_triangle < 4096u
+            ? ordered_triangle / 1024u
+            : 4u + ordered_triangle - 4096u;
+        const uint16_t first_vertex =
+            (uint16_t)(ordered_pattern * 3u);
+        const size_t first_index = (size_t)triangle * 3u;
+
+        indices[first_index] = first_vertex;
+        indices[first_index + 1u] = (uint16_t)(first_vertex + 1u);
+        indices[first_index + 2u] = (uint16_t)(first_vertex + 2u);
+    }
+    result = create_mesh(
+        context,
+        positions,
+        18u,
+        indices,
+        PARALLEL_INDEX_COUNT,
+        out_mesh
+    );
+    free(indices);
+    return result;
+}
+
+static soc_result create_test_context(
+    uint32_t worker_count,
+    soc_context** out_context
+)
+{
+    const soc_config config = {
+        .struct_size = sizeof(soc_config),
+        .width = TEST_WIDTH,
+        .height = TEST_HEIGHT,
+        .worker_count = worker_count,
+        .flags = SOC_CONFIG_FLAG_NONE,
+    };
+    return soc_context_create(&config, out_context);
 }
 
 static soc_bool dense_level_zero_proves_occluded(
@@ -625,6 +753,313 @@ static int compare_workload(
     return 0;
 }
 
+static soc_bool masked_snapshots_are_raw_equal(
+    const soc_snapshot* left,
+    const soc_snapshot* right
+)
+{
+    const soc_hiz* left_hiz = &left->depth_pyramid;
+    const soc_hiz* right_hiz = &right->depth_pyramid;
+    uint32_t level;
+
+    if (left_hiz->masked != SOC_TRUE ||
+        right_hiz->masked != SOC_TRUE ||
+        left_hiz->pixel_width != right_hiz->pixel_width ||
+        left_hiz->pixel_height != right_hiz->pixel_height ||
+        left_hiz->level_count != right_hiz->level_count ||
+        left_hiz->element_count != right_hiz->element_count) {
+        return SOC_FALSE;
+    }
+    for (level = 0u; level < left_hiz->level_count; ++level) {
+        const soc_hiz_level* left_level = &left_hiz->levels[level];
+        const soc_hiz_level* right_level = &right_hiz->levels[level];
+
+        if (left_level->width != right_level->width ||
+            left_level->height != right_level->height ||
+            left_level->offset != right_level->offset ||
+            left_level->element_count != right_level->element_count) {
+            return SOC_FALSE;
+        }
+    }
+    if (memcmp(
+            left_hiz->data,
+            right_hiz->data,
+            left_hiz->element_count * sizeof(*left_hiz->data)
+        ) != 0 ||
+        memcmp(
+            left_hiz->working_depth,
+            right_hiz->working_depth,
+            left_hiz->levels[0].element_count *
+                sizeof(*left_hiz->working_depth)
+        ) != 0 ||
+        memcmp(
+            left_hiz->layer_masks,
+            right_hiz->layer_masks,
+            left_hiz->levels[0].element_count *
+                sizeof(*left_hiz->layer_masks)
+        ) != 0) {
+        return SOC_FALSE;
+    }
+    return SOC_TRUE;
+}
+
+static int compare_masked_snapshots_exact(
+    const soc_snapshot* serial,
+    const soc_snapshot* parallel
+)
+{
+    CHECK(masked_snapshots_are_raw_equal(serial, parallel) == SOC_TRUE);
+    CHECK(serial->build_stats.hiz_level_count ==
+        parallel->build_stats.hiz_level_count);
+    CHECK(serial->build_stats.input_triangle_count ==
+        parallel->build_stats.input_triangle_count);
+    CHECK(serial->build_stats.clipped_triangle_count ==
+        parallel->build_stats.clipped_triangle_count);
+    CHECK(serial->build_stats.rasterized_triangle_count ==
+        parallel->build_stats.rasterized_triangle_count);
+    return 0;
+}
+
+static int check_query_stats_equal(
+    const soc_query_stats* left,
+    const soc_query_stats* right
+)
+{
+    CHECK(left->tested_aabb_count == right->tested_aabb_count);
+    CHECK(left->visible_aabb_count == right->visible_aabb_count);
+    CHECK(left->occluded_aabb_count == right->occluded_aabb_count);
+    CHECK(left->unknown_aabb_count == right->unknown_aabb_count);
+    return 0;
+}
+
+static int test_parallel_masked_matches_serial(void)
+{
+    static const uint32_t worker_counts[] = {2u, 4u};
+    const soc_frame_desc frame = make_reverse_z_frame();
+    soc_context* serial_context = NULL;
+    soc_mesh* serial_mesh = NULL;
+    soc_mesh* reversed_mesh = NULL;
+    soc_occluder_group serial_group;
+    soc_occluder_group reversed_group;
+    soc_occlusion_build_desc serial_build;
+    soc_occlusion_build_desc reversed_build;
+    soc_snapshot* serial_snapshot = NULL;
+    soc_snapshot* reversed_snapshot = NULL;
+    soc_snapshot* dense_snapshot = NULL;
+    soc_query_stats serial_query_stats = {
+        .struct_size = sizeof(soc_query_stats),
+    };
+    uint32_t worker_case;
+
+    CHECK_RESULT(create_test_context(1u, &serial_context), SOC_RESULT_OK);
+    CHECK_RESULT(
+        create_parallel_order_mesh(
+            serial_context,
+            SOC_FALSE,
+            &serial_mesh
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        create_parallel_order_mesh(
+            serial_context,
+            SOC_TRUE,
+            &reversed_mesh
+        ),
+        SOC_RESULT_OK
+    );
+
+    serial_group = (soc_occluder_group){
+        serial_mesh,
+        &identity_transform,
+        1u,
+        SOC_OCCLUDER_GROUP_FLAG_NONE,
+    };
+    reversed_group = serial_group;
+    reversed_group.mesh = reversed_mesh;
+    serial_build = (soc_occlusion_build_desc){
+        .struct_size = sizeof(soc_occlusion_build_desc),
+        .flags = SOC_OCCLUSION_BUILD_FLAG_NONE,
+        .frame = &frame,
+        .groups = &serial_group,
+        .group_count = 1u,
+        .group_stride = sizeof(soc_occluder_group),
+    };
+    reversed_build = serial_build;
+    reversed_build.groups = &reversed_group;
+
+    CHECK_RESULT(
+        soc_occlusion_build_masked_internal(
+            serial_context,
+            &serial_build,
+            &serial_snapshot
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK(serial_snapshot != NULL);
+    CHECK(serial_snapshot->depth_pyramid.masked == SOC_TRUE);
+    CHECK(serial_snapshot->masked_parallel == SOC_FALSE);
+    CHECK(serial_snapshot->build_stats.input_triangle_count ==
+        PARALLEL_TRIANGLE_COUNT);
+    CHECK_RESULT(
+        soc_occlusion_build_masked_internal(
+            serial_context,
+            &reversed_build,
+            &reversed_snapshot
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK(reversed_snapshot->masked_parallel == SOC_FALSE);
+    CHECK(masked_snapshots_are_raw_equal(
+        serial_snapshot,
+        reversed_snapshot
+    ) == SOC_FALSE);
+    CHECK_RESULT(
+        soc_occlusion_build_dense_internal(
+            serial_context,
+            &serial_build,
+            &dense_snapshot
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK(dense_snapshot->depth_pyramid.masked == SOC_FALSE);
+    CHECK_RESULT(
+        soc_snapshot_test_aabbs(
+            serial_snapshot,
+            query_bounds,
+            QUERY_COUNT,
+            masked_visibility,
+            &serial_query_stats
+        ),
+        SOC_RESULT_OK
+    );
+
+    for (worker_case = 0u;
+         worker_case < (uint32_t)ARRAY_COUNT(worker_counts);
+         ++worker_case) {
+        const uint32_t worker_count = worker_counts[worker_case];
+        soc_context* parallel_context = NULL;
+        soc_mesh* parallel_mesh = NULL;
+        soc_occluder_group parallel_group;
+        soc_occlusion_build_desc parallel_build;
+        uint32_t repeat;
+
+        CHECK_RESULT(
+            create_test_context(worker_count, &parallel_context),
+            SOC_RESULT_OK
+        );
+        CHECK_RESULT(
+            create_parallel_order_mesh(
+                parallel_context,
+                SOC_FALSE,
+                &parallel_mesh
+            ),
+            SOC_RESULT_OK
+        );
+        parallel_group = serial_group;
+        parallel_group.mesh = parallel_mesh;
+        parallel_build = serial_build;
+        parallel_build.groups = &parallel_group;
+
+        for (repeat = 0u;
+             repeat < PARALLEL_REPEAT_COUNT;
+             ++repeat) {
+            soc_snapshot* parallel_snapshot = NULL;
+            soc_query_stats parallel_query_stats = {
+                .struct_size = sizeof(soc_query_stats),
+            };
+
+            CHECK_RESULT(
+                soc_occlusion_build_masked_internal(
+                    parallel_context,
+                    &parallel_build,
+                    &parallel_snapshot
+                ),
+                SOC_RESULT_OK
+            );
+            CHECK(parallel_snapshot != NULL);
+            CHECK(parallel_snapshot->masked_parallel == SOC_TRUE);
+            CHECK(compare_masked_snapshots_exact(
+                serial_snapshot,
+                parallel_snapshot
+            ) == 0);
+            CHECK_RESULT(
+                soc_snapshot_test_aabbs(
+                    parallel_snapshot,
+                    query_bounds,
+                    QUERY_COUNT,
+                    parallel_visibility,
+                    &parallel_query_stats
+                ),
+                SOC_RESULT_OK
+            );
+            CHECK(memcmp(
+                masked_visibility,
+                parallel_visibility,
+                sizeof(masked_visibility)
+            ) == 0);
+            CHECK(check_query_stats_equal(
+                &serial_query_stats,
+                &parallel_query_stats
+            ) == 0);
+
+            if (repeat == 0u) {
+                uint64_t guard_ulp_depth_pixel_count = 0u;
+                uint64_t unsafe_depth_pixel_count = 0u;
+                uint64_t unsafe_occlusion_count = 0u;
+                uint32_t maximum_depth_ulp_difference = 0u;
+                uint32_t query;
+
+                CHECK(compare_expanded_level_zero(
+                    worker_count == 2u
+                        ? "parallel-msoc-2w"
+                        : "parallel-msoc-4w",
+                    parallel_snapshot,
+                    dense_snapshot,
+                    &guard_ulp_depth_pixel_count,
+                    &maximum_depth_ulp_difference,
+                    &unsafe_depth_pixel_count
+                ) == 0);
+                for (query = 0u; query < QUERY_COUNT; ++query) {
+                    if (parallel_visibility[query] ==
+                            SOC_VISIBILITY_OCCLUDED &&
+                        dense_level_zero_proves_occluded(
+                            dense_snapshot,
+                            &query_bounds[query]
+                        ) != SOC_TRUE) {
+                        ++unsafe_occlusion_count;
+                    }
+                }
+                printf(
+                    "parallel msoc workers=%u repeats=%u unsafe=%llu "
+                    "guard-ulp-pixels=%llu max-ulp=%u "
+                    "unsafe-pixels=%llu\n",
+                    worker_count,
+                    PARALLEL_REPEAT_COUNT,
+                    (unsigned long long)unsafe_occlusion_count,
+                    (unsigned long long)guard_ulp_depth_pixel_count,
+                    maximum_depth_ulp_difference,
+                    (unsigned long long)unsafe_depth_pixel_count
+                );
+                CHECK(unsafe_occlusion_count == 0u);
+                CHECK(unsafe_depth_pixel_count == 0u);
+            }
+            soc_snapshot_destroy(parallel_snapshot);
+        }
+
+        CHECK_RESULT(soc_mesh_destroy(parallel_mesh), SOC_RESULT_OK);
+        soc_context_destroy(parallel_context);
+    }
+
+    soc_snapshot_destroy(dense_snapshot);
+    soc_snapshot_destroy(reversed_snapshot);
+    soc_snapshot_destroy(serial_snapshot);
+    CHECK_RESULT(soc_mesh_destroy(reversed_mesh), SOC_RESULT_OK);
+    CHECK_RESULT(soc_mesh_destroy(serial_mesh), SOC_RESULT_OK);
+    soc_context_destroy(serial_context);
+    return 0;
+}
+
 int main(void)
 {
     const soc_frame_desc frame = make_reverse_z_frame();
@@ -711,5 +1146,6 @@ int main(void)
     );
 
     shutdown_scene(&scene);
+    failed |= test_parallel_masked_matches_serial();
     return failed == 0 ? 0 : 1;
 }

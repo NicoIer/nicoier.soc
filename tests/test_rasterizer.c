@@ -2,6 +2,7 @@
 #include "platform/soc_thread_pool.h"
 #include "raster/soc_rasterizer.h"
 
+#include <float.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -2502,6 +2503,321 @@ static int test_prepared_region_replay(void)
     return 0;
 }
 
+static int test_masked_prepared_region_replay(void)
+{
+    enum {
+        WIDTH = 67,
+        HEIGHT = 65,
+        SUBTILE_COLUMN_COUNT = (WIDTH + 7) / 8,
+        SUBTILE_ROW_COUNT = (HEIGHT + 3) / 4,
+        SUBTILE_COUNT = SUBTILE_COLUMN_COUNT * SUBTILE_ROW_COUNT,
+    };
+    static const screen_vertex triangles[3][3] = {
+        {
+            {1.0, 1.0, 0.34f},
+            {66.8, 64.9, 0.34f},
+            {1.0, 64.9, 0.34f},
+        },
+        {
+            {66.8, 1.0, 0.79f},
+            {66.8, 64.9, 0.79f},
+            {1.0, 1.0, 0.79f},
+        },
+        {
+            {0.5, 33.2, 0.23f},
+            {66.6, 30.8, 0.88f},
+            {33.1, 64.9, 0.51f},
+        },
+    };
+    const soc_mat4 identity = identity_matrix();
+    const soc_frame_desc frame = make_frame_desc(
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
+    );
+    uint32_t indices[] = {
+        0u, 1u, 2u,
+        3u, 4u, 5u,
+        6u, 7u, 8u,
+    };
+    float positions[27];
+    float full_z0[SUBTILE_COUNT];
+    float full_z1[SUBTILE_COUNT];
+    uint32_t full_masks[SUBTILE_COUNT];
+    float region_z0[SUBTILE_COUNT];
+    float region_z1[SUBTILE_COUNT];
+    uint32_t region_masks[SUBTILE_COUNT];
+    soc_mesh mesh;
+    soc_raster_prepared_list prepared = {0};
+    soc_rasterizer full_rasterizer;
+    soc_rasterizer region_rasterizer;
+    uint32_t triangle;
+    uint32_t tile_y;
+
+    for (triangle = 0u; triangle < 3u; ++triangle) {
+        write_triangle(
+            positions + (size_t)triangle * 9u,
+            WIDTH,
+            HEIGHT,
+            triangles[triangle],
+            SOC_CLIP_DEPTH_ZERO_TO_ONE
+        );
+    }
+    mesh = make_mesh(
+        positions,
+        9u,
+        indices,
+        (uint32_t)ARRAY_COUNT(indices)
+    );
+
+    CHECK(soc_rasterizer_initialize_masked(
+        &full_rasterizer,
+        WIDTH,
+        HEIGHT,
+        full_z0,
+        full_z1,
+        full_masks,
+        SUBTILE_COLUMN_COUNT,
+        SUBTILE_ROW_COUNT,
+        soc_kernel_table_scalar()
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_begin_frame(
+        &full_rasterizer,
+        &frame
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_prepare_occluder_triangles(
+        &full_rasterizer,
+        &mesh,
+        &identity,
+        0u,
+        3u,
+        &prepared
+    ) == SOC_RESULT_OK);
+    CHECK(prepared.count == 3u);
+    CHECK(soc_rasterizer_rasterize_prepared_triangles(
+        &full_rasterizer,
+        prepared.data,
+        prepared.count
+    ) == SOC_RESULT_OK);
+
+    CHECK(soc_rasterizer_initialize_masked(
+        &region_rasterizer,
+        WIDTH,
+        HEIGHT,
+        region_z0,
+        region_z1,
+        region_masks,
+        SUBTILE_COLUMN_COUNT,
+        SUBTILE_ROW_COUNT,
+        soc_kernel_table_scalar()
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_begin_frame(
+        &region_rasterizer,
+        &frame
+    ) == SOC_RESULT_OK);
+    region_rasterizer.masked_reference_count = SIZE_MAX;
+
+    for (tile_y = 0u; tile_y < HEIGHT; tile_y += 32u) {
+        uint32_t tile_x;
+
+        for (tile_x = 0u; tile_x < WIDTH; tile_x += 32u) {
+            const soc_raster_prepared_region region = {
+                .minimum_x = tile_x,
+                .minimum_y = tile_y,
+                .end_x = tile_x + 32u < WIDTH
+                    ? tile_x + 32u
+                    : WIDTH,
+                .end_y = tile_y + 32u < HEIGHT
+                    ? tile_y + 32u
+                    : HEIGHT,
+            };
+            size_t prepared_index;
+
+            for (prepared_index = 0u;
+                 prepared_index < prepared.count;
+                 ++prepared_index) {
+                soc_rasterizer_rasterize_prepared_region_unchecked(
+                    &region_rasterizer,
+                    &prepared.data[prepared_index],
+                    &region
+                );
+            }
+        }
+    }
+
+    CHECK(memcmp(full_z0, region_z0, sizeof(full_z0)) == 0);
+    CHECK(memcmp(full_z1, region_z1, sizeof(full_z1)) == 0);
+    CHECK(memcmp(full_masks, region_masks, sizeof(full_masks)) == 0);
+    CHECK(full_z0[SUBTILE_COUNT - 1u] >= 0.0f ||
+        full_masks[SUBTILE_COUNT - 1u] != 0u);
+
+    CHECK(soc_rasterizer_end_frame(&region_rasterizer) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_end_frame(&full_rasterizer) == SOC_RESULT_OK);
+    soc_rasterizer_shutdown(&region_rasterizer);
+    soc_rasterizer_shutdown(&full_rasterizer);
+    soc_raster_prepared_list_shutdown(&prepared);
+    return 0;
+}
+
+static int test_masked_equal_depth_does_not_create_working_layer(void)
+{
+    enum {
+        WIDTH = 8,
+        HEIGHT = 4,
+    };
+    static const screen_vertex triangles[3][3] = {
+        {
+            {0.0, 0.0, 0.625f},
+            {8.0, 0.0, 0.625f},
+            {8.0, 4.0, 0.625f},
+        },
+        {
+            {0.0, 0.0, 0.625f},
+            {8.0, 4.0, 0.625f},
+            {0.0, 4.0, 0.625f},
+        },
+        {
+            {0.0, 0.0, 0.625f},
+            {4.0, 0.0, 0.625f},
+            {0.0, 2.0, 0.625f},
+        },
+    };
+    const soc_mat4 identity = identity_matrix();
+    const soc_frame_desc frame = make_frame_desc(
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
+    );
+    uint32_t indices[] = {
+        0u, 1u, 2u,
+        3u, 4u, 5u,
+        6u, 7u, 8u,
+    };
+    float positions[27];
+    float summary_z0[1];
+    float summary_z1[1];
+    uint32_t summary_mask[1];
+    float no_summary_z0[1];
+    float no_summary_z1[1];
+    uint32_t no_summary_mask[1];
+    float established_z0;
+    soc_mesh mesh;
+    soc_raster_prepared_list prepared = {0};
+    soc_rasterizer summary_rasterizer;
+    soc_rasterizer no_summary_rasterizer;
+    uint32_t triangle;
+
+    for (triangle = 0u; triangle < 3u; ++triangle) {
+        write_triangle(
+            positions + (size_t)triangle * 9u,
+            WIDTH,
+            HEIGHT,
+            triangles[triangle],
+            SOC_CLIP_DEPTH_ZERO_TO_ONE
+        );
+    }
+    mesh = make_mesh(
+        positions,
+        9u,
+        indices,
+        (uint32_t)ARRAY_COUNT(indices)
+    );
+
+    CHECK(soc_rasterizer_initialize_masked(
+        &summary_rasterizer,
+        WIDTH,
+        HEIGHT,
+        summary_z0,
+        summary_z1,
+        summary_mask,
+        1u,
+        1u,
+        soc_kernel_table_scalar()
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_initialize_masked(
+        &no_summary_rasterizer,
+        WIDTH,
+        HEIGHT,
+        no_summary_z0,
+        no_summary_z1,
+        no_summary_mask,
+        1u,
+        1u,
+        soc_kernel_table_scalar()
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_begin_frame(
+        &summary_rasterizer,
+        &frame
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_begin_frame(
+        &no_summary_rasterizer,
+        &frame
+    ) == SOC_RESULT_OK);
+    no_summary_rasterizer.masked_reference_count = SIZE_MAX;
+    CHECK(soc_rasterizer_prepare_occluder_triangles(
+        &summary_rasterizer,
+        &mesh,
+        &identity,
+        0u,
+        3u,
+        &prepared
+    ) == SOC_RESULT_OK);
+    CHECK(prepared.count == 3u);
+    CHECK(prepared.data[0].depth_step_x == 0.0);
+    CHECK(prepared.data[0].depth_step_y == 0.0);
+    CHECK(prepared.data[1].depth_sample_origin ==
+        prepared.data[0].depth_sample_origin);
+    CHECK(prepared.data[1].depth_error_bound ==
+        prepared.data[0].depth_error_bound);
+    CHECK(prepared.data[2].depth_sample_origin ==
+        prepared.data[0].depth_sample_origin);
+    CHECK(prepared.data[2].depth_error_bound ==
+        prepared.data[0].depth_error_bound);
+
+    CHECK(soc_rasterizer_rasterize_prepared_triangles(
+        &summary_rasterizer,
+        prepared.data,
+        2u
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_rasterize_prepared_triangles(
+        &no_summary_rasterizer,
+        prepared.data,
+        2u
+    ) == SOC_RESULT_OK);
+    CHECK(summary_z0[0] >= 0.0f);
+    CHECK(float_bits(summary_z1[0]) == float_bits(FLT_MAX));
+    CHECK(summary_mask[0] == 0u);
+    CHECK(memcmp(summary_z0, no_summary_z0, sizeof(summary_z0)) == 0);
+    CHECK(memcmp(summary_z1, no_summary_z1, sizeof(summary_z1)) == 0);
+    CHECK(memcmp(summary_mask, no_summary_mask, sizeof(summary_mask)) == 0);
+    established_z0 = summary_z0[0];
+
+    CHECK(soc_rasterizer_rasterize_prepared_triangles(
+        &summary_rasterizer,
+        &prepared.data[2],
+        1u
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_rasterize_prepared_triangles(
+        &no_summary_rasterizer,
+        &prepared.data[2],
+        1u
+    ) == SOC_RESULT_OK);
+    CHECK(float_bits(summary_z0[0]) == float_bits(established_z0));
+    CHECK(float_bits(no_summary_z0[0]) == float_bits(established_z0));
+    CHECK(float_bits(summary_z1[0]) == float_bits(FLT_MAX));
+    CHECK(float_bits(no_summary_z1[0]) == float_bits(FLT_MAX));
+    CHECK(summary_mask[0] == 0u);
+    CHECK(no_summary_mask[0] == 0u);
+    CHECK(memcmp(summary_z0, no_summary_z0, sizeof(summary_z0)) == 0);
+    CHECK(memcmp(summary_z1, no_summary_z1, sizeof(summary_z1)) == 0);
+    CHECK(memcmp(summary_mask, no_summary_mask, sizeof(summary_mask)) == 0);
+
+    CHECK(soc_rasterizer_end_frame(
+        &no_summary_rasterizer
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_end_frame(&summary_rasterizer) == SOC_RESULT_OK);
+    soc_rasterizer_shutdown(&no_summary_rasterizer);
+    soc_rasterizer_shutdown(&summary_rasterizer);
+    soc_raster_prepared_list_shutdown(&prepared);
+    return 0;
+}
+
 static int check_prepared_target_replay(void)
 {
     enum {
@@ -4110,6 +4426,12 @@ int main(void)
         return 1;
     }
     if (test_prepared_region_replay() != 0) {
+        return 1;
+    }
+    if (test_masked_prepared_region_replay() != 0) {
+        return 1;
+    }
+    if (test_masked_equal_depth_does_not_create_working_layer() != 0) {
         return 1;
     }
     if (test_prepared_target_replay() != 0) {

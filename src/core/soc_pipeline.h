@@ -16,4 +16,11 @@ soc_result soc_occlusion_build_dense_internal(
     soc_snapshot** out_snapshot
 );
 
+/* Forced masked backend used by differential and parallel tests. */
+soc_result soc_occlusion_build_masked_internal(
+    soc_context* context,
+    const soc_occlusion_build_desc* desc,
+    soc_snapshot** out_snapshot
+);
+
 #endif

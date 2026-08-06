@@ -1667,7 +1667,7 @@ static void update_masked_quick_subtile(
     }
 
     z0 = rasterizer->masked_z0[subtile_index];
-    if (triangle_depth < z0) {
+    if (triangle_depth <= z0) {
         return;
     }
 
@@ -1695,7 +1695,8 @@ static void update_masked_quick_subtile(
         rasterizer->masked_z1[subtile_index] = FLT_MAX;
         rasterizer->masked_masks[subtile_index] = 0u;
         if (establishes_reference == SOC_TRUE &&
-            rasterizer->tile_locks == NULL) {
+            rasterizer->tile_locks == NULL &&
+            rasterizer->masked_reference_count != SIZE_MAX) {
             ++rasterizer->masked_reference_count;
             if (rasterizer->masked_reference_count ==
                 rasterizer->masked_subtile_count) {
@@ -3413,34 +3414,33 @@ static soc_result begin_frame(
     if (rasterizer->frame_active == SOC_TRUE) {
         return SOC_RESULT_INVALID_STATE;
     }
-    if (rasterizer->mode == SOC_RASTERIZER_MODE_MASKED &&
-        clear_depth != SOC_TRUE) {
-        return SOC_RESULT_INVALID_STATE;
-    }
-
     initial_depth = 0.0f;
     untouched_depth = -1.0f;
     rasterizer->frame = *desc;
     if (rasterizer->mode == SOC_RASTERIZER_MODE_MASKED) {
-        rasterizer->kernels->clear_f32(
-            rasterizer->masked_z0,
-            rasterizer->masked_subtile_count,
-            untouched_depth
-        );
-        rasterizer->kernels->clear_f32(
-            rasterizer->masked_z1,
-            rasterizer->masked_subtile_count,
-            FLT_MAX
-        );
-        memset(
-            rasterizer->masked_masks,
-            0,
-            rasterizer->masked_subtile_count *
-                sizeof(*rasterizer->masked_masks)
-        );
+        if (clear_depth == SOC_TRUE) {
+            rasterizer->kernels->clear_f32(
+                rasterizer->masked_z0,
+                rasterizer->masked_subtile_count,
+                untouched_depth
+            );
+            rasterizer->kernels->clear_f32(
+                rasterizer->masked_z1,
+                rasterizer->masked_subtile_count,
+                FLT_MAX
+            );
+            memset(
+                rasterizer->masked_masks,
+                0,
+                rasterizer->masked_subtile_count *
+                    sizeof(*rasterizer->masked_masks)
+            );
+        }
         rasterizer->clipped_triangle_count = 0u;
         rasterizer->rasterized_triangle_count = 0u;
-        rasterizer->masked_reference_count = 0u;
+        rasterizer->masked_reference_count = clear_depth == SOC_TRUE
+            ? 0u
+            : SIZE_MAX;
         rasterizer->masked_frame_farthest_depth = -1.0f;
         rasterizer->frame_active = SOC_TRUE;
         return SOC_RESULT_OK;

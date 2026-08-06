@@ -12,6 +12,7 @@ struct soc_snapshot {
     soc_frame_desc frame;
     soc_aabb_query_context query_context;
     soc_build_stats build_stats;
+    soc_bool masked_parallel;
 };
 
 void soc_snapshot_destroy_internal(soc_snapshot* snapshot);

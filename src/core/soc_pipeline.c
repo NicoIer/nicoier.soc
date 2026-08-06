@@ -13,6 +13,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__GNUC__) || defined(__clang__)
+    #define SOC_PIPELINE_FORCE_INLINE \
+        static inline __attribute__((always_inline))
+    #define SOC_PIPELINE_CACHE_ALIGNED __attribute__((aligned(64)))
+#else
+    #define SOC_PIPELINE_FORCE_INLINE static inline
+    #define SOC_PIPELINE_CACHE_ALIGNED
+#endif
+
 #define SOC_PARALLEL_TILED_TRIANGLES_PER_WORK_ITEM UINT32_C(1024)
 #define SOC_PARALLEL_PRIVATE_TRIANGLES_PER_WORK_ITEM UINT32_C(256)
 #define SOC_PARALLEL_DIRECT_REFERENCE_LIMIT ((size_t)256u)
@@ -46,6 +55,8 @@
 #define SOC_PARALLEL_FUSED_HIZ_MAX_LANE_COUNT UINT32_C(8)
 /* Measured crossover: 2048-triangle core cases win; 2068-triangle OBJ loses. */
 #define SOC_MASKED_DIRECT_TRIANGLE_LIMIT UINT64_C(2049)
+#define SOC_MASKED_PARALLEL_MIN_TRIANGLE_COUNT UINT64_C(4096)
+#define SOC_MASKED_PARALLEL_MAX_LANE_COUNT UINT32_C(8)
 #define SOC_MASKED_HIGH_RESOLUTION_PIXEL_THRESHOLD ((size_t)512u * 1024u)
 
 #if !defined(SOC_EXPERIMENT_FORCE_PARALLEL_BACKEND)
@@ -510,6 +521,16 @@ _Static_assert(
     "raster tiles must contain complete early-Z blocks"
 );
 
+_Static_assert(
+    SOC_RASTER_LOCK_TILE_SIZE % SOC_HIZ_MASK_BLOCK_WIDTH == 0u,
+    "raster tiles must contain complete masked block columns"
+);
+
+_Static_assert(
+    SOC_RASTER_LOCK_TILE_SIZE % SOC_HIZ_MASK_BLOCK_HEIGHT == 0u,
+    "raster tiles must contain complete masked block rows"
+);
+
 static void build_parallel_tile_row_hiz(
     soc_parallel_tile_state* state,
     size_t tile_row
@@ -690,7 +711,7 @@ static soc_result allocate_parallel_tile_reference_chunk(
     return SOC_RESULT_OK;
 }
 
-static soc_result append_parallel_tile_reference(
+SOC_PIPELINE_FORCE_INLINE soc_result append_parallel_tile_reference(
     soc_parallel_tile_bin* bin,
     soc_parallel_tile_reference_arena* arena,
     uint32_t prepared_index
@@ -858,6 +879,121 @@ static uint32_t next_parallel_tile_bin_reference(
     return prepared_index;
 }
 
+static soc_bool prepare_parallel_work_item_range(
+    soc_parallel_prepare_state* state,
+    uint32_t worker_index,
+    size_t work_item_begin,
+    size_t work_item_end
+)
+{
+    soc_rasterizer* rasterizer = &state->rasterizers[worker_index];
+    soc_raster_prepared_list* prepared_list =
+        &state->prepared_lists[worker_index];
+    soc_parallel_tile_reference_arena* tile_reference_arena =
+        &state->tile_reference_arenas[worker_index];
+    const size_t lane_index = (size_t)worker_index;
+    const size_t lane_tile_offset = lane_index * state->tile_count;
+    size_t work_item_index;
+
+    for (work_item_index = work_item_begin;
+         work_item_index < work_item_end;
+         ++work_item_index) {
+        const soc_parallel_work_item* work_item =
+            &state->work_items[work_item_index];
+        const size_t prepared_begin = prepared_list->count;
+        size_t prepared_index;
+        soc_result result;
+
+        result = soc_rasterizer_prepare_occluder_triangles(
+            rasterizer,
+            work_item->mesh,
+            work_item->object_to_world,
+            work_item->triangle_begin,
+            work_item->triangle_count,
+            prepared_list
+        );
+        if (result != SOC_RESULT_OK) {
+            state->lane_results[worker_index] = result;
+            return SOC_FALSE;
+        }
+
+        for (prepared_index = prepared_begin;
+             prepared_index < prepared_list->count;
+             ++prepared_index) {
+            const soc_raster_prepared_triangle* prepared =
+                &prepared_list->data[prepared_index];
+            soc_prepared_tile_range range;
+            size_t tile_row;
+
+            if (prepared_index > (size_t)UINT32_MAX) {
+                state->lane_results[worker_index] =
+                    SOC_RESULT_OUT_OF_MEMORY;
+                return SOC_FALSE;
+            }
+            calculate_prepared_tile_range(prepared, &range);
+            for (tile_row = range.first_row;
+                 tile_row < range.end_row;
+                 ++tile_row) {
+                size_t tile_column;
+
+                for (tile_column = range.first_column;
+                     tile_column < range.end_column;
+                     ++tile_column) {
+                    const size_t tile_index =
+                        tile_row * state->tile_column_count +
+                        tile_column;
+                    soc_parallel_tile_bin* bin =
+                        &state->tile_bins[
+                            lane_tile_offset + tile_index
+                        ];
+                    const soc_result append_result =
+                        append_parallel_tile_reference(
+                            bin,
+                            tile_reference_arena,
+                            (uint32_t)prepared_index
+                        );
+
+                    if (append_result != SOC_RESULT_OK) {
+                        state->lane_results[worker_index] =
+                            append_result;
+                        return SOC_FALSE;
+                    }
+                }
+            }
+        }
+    }
+    return SOC_TRUE;
+}
+
+SOC_PIPELINE_CACHE_ALIGNED
+static void parallel_prepare_ordered_work_items(
+    void* user,
+    uint32_t worker_index,
+    uint32_t worker_count
+)
+{
+    soc_parallel_prepare_state* state = user;
+    const size_t lanes = (size_t)worker_count;
+    const size_t lane = (size_t)worker_index;
+    const size_t items_per_lane = state->work_item_count / lanes;
+    const size_t extra_items = state->work_item_count % lanes;
+    const size_t extra_before_lane = lane < extra_items
+        ? lane
+        : extra_items;
+    const size_t work_item_begin =
+        lane * items_per_lane + extra_before_lane;
+    const size_t work_item_end = work_item_begin + items_per_lane +
+        (lane < extra_items ? 1u : 0u);
+
+    (void)prepare_parallel_work_item_range(
+        state,
+        worker_index,
+        work_item_begin,
+        work_item_end
+    );
+}
+
+SOC_PIPELINE_CACHE_ALIGNED
 static void parallel_prepare_work_items(
     void* user,
     uint32_t worker_index,
@@ -1077,7 +1213,8 @@ static void rasterize_parallel_hot_tile_range(
     }
 }
 
-static void parallel_rasterize_tiles(
+SOC_PIPELINE_CACHE_ALIGNED
+static void parallel_rasterize_dense_tiles(
     void* user,
     uint32_t worker_index,
     uint32_t worker_count
@@ -1222,6 +1359,50 @@ static void parallel_rasterize_tiles(
         build_parallel_tile_row_hiz(
             state,
             state->empty_tile_rows[job_index]
+        );
+    }
+}
+
+SOC_PIPELINE_CACHE_ALIGNED
+static void parallel_rasterize_masked_tiles(
+    void* user,
+    uint32_t worker_index,
+    uint32_t worker_count
+)
+{
+    soc_parallel_tile_state* state = user;
+    soc_rasterizer* rasterizer = &state->rasterizers[worker_index];
+
+    (void)worker_count;
+    for (;;) {
+        const size_t job_index = atomic_fetch_add_explicit(
+            &state->next_job,
+            1u,
+            memory_order_relaxed
+        );
+        const soc_parallel_tile_job* tile_job;
+        size_t tile_index;
+        soc_raster_prepared_region region;
+
+        if (job_index >= state->normal_tile_count) {
+            return;
+        }
+
+        tile_job = &state->normal_tiles[job_index];
+        tile_index = tile_job->tile_index;
+        calculate_parallel_tile_region(
+            tile_index,
+            state->tile_column_count,
+            state->width,
+            state->height,
+            &region
+        );
+        rasterize_parallel_normal_tile(
+            state,
+            rasterizer,
+            tile_index,
+            tile_job->lane_mask,
+            &region
         );
     }
 }
@@ -1483,7 +1664,8 @@ static void cleanup_parallel_tile_reference_arenas(
  * Returns SOC_FALSE when the parallel path is ineligible or cannot allocate
  * its optional working storage. The caller must then use the serial path.
  */
-static soc_bool try_rasterize_occluders_tiled(
+SOC_PIPELINE_CACHE_ALIGNED
+static soc_bool try_rasterize_occluders_tiled_dense(
     soc_context* context,
     const soc_occlusion_build_desc* desc,
     const soc_frame_desc* frame,
@@ -2072,7 +2254,7 @@ static soc_bool try_rasterize_occluders_tiled(
         soc_thread_pool_run_active(
             &context->thread_pool,
             raster_lane_count,
-            parallel_rasterize_tiles,
+            parallel_rasterize_dense_tiles,
             &tile_state
         );
         merge_parallel_hot_tiles(
@@ -2101,6 +2283,712 @@ static soc_bool try_rasterize_occluders_tiled(
             }
         }
         *out_lower_hiz_built = SOC_TRUE;
+    }
+
+    for (lane = 0u; lane < configured_lane_count; ++lane) {
+        result = soc_rasterizer_finish_occluders(&rasterizers[lane]);
+        if (result != SOC_RESULT_OK) {
+            goto attempted_cleanup;
+        }
+    }
+
+    *out_clipped_triangle_count = 0u;
+    *out_rasterized_triangle_count = 0u;
+    for (lane = 0u; lane < prepare_lane_count; ++lane) {
+        *out_clipped_triangle_count +=
+            rasterizers[lane].clipped_triangle_count;
+        *out_rasterized_triangle_count +=
+            rasterizers[lane].rasterized_triangle_count;
+    }
+    for (lane = 0u; lane < configured_lane_count; ++lane) {
+        result = soc_rasterizer_end_frame(&rasterizers[lane]);
+        if (result != SOC_RESULT_OK) {
+            goto attempted_cleanup;
+        }
+    }
+    return_parallel_result = SOC_TRUE;
+
+attempted_cleanup:
+    cleanup_parallel_rasterizers(rasterizers, initialized_count);
+    cleanup_parallel_prepared_lists(
+        prepared_lists,
+        prepare_lane_count
+    );
+    free(hot_tile_scratch);
+    free(hot_tiles);
+    free(empty_tile_rows);
+    free(tile_rows);
+    free(nonempty_tiles);
+    cleanup_parallel_tile_reference_arenas(
+        tile_reference_arenas,
+        prepare_lane_count
+    );
+    free(tile_reference_arenas);
+    free(tile_bins);
+    free(prepared_lists);
+    free(lane_results);
+    free(rasterizers);
+    free(work_items);
+    if (return_parallel_result == SOC_TRUE) {
+        *out_result = result;
+        return SOC_TRUE;
+    }
+    return SOC_FALSE;
+}
+
+/*
+ * Masked Quick-Mask variant. Its state transitions are order-sensitive, so
+ * preparation and tile replay deliberately use their specialized callbacks.
+ */
+SOC_PIPELINE_CACHE_ALIGNED
+static soc_bool try_rasterize_occluders_tiled_masked(
+    soc_context* context,
+    const soc_occlusion_build_desc* desc,
+    const soc_frame_desc* frame,
+    soc_hiz* depth_pyramid,
+    float* level_zero,
+    size_t depth_element_count,
+    uint64_t* out_clipped_triangle_count,
+    uint64_t* out_rasterized_triangle_count,
+    soc_bool* out_lower_hiz_built,
+    soc_result* out_result
+)
+{
+    uint64_t work_item_count_u64;
+    size_t work_item_count;
+    size_t work_item_bytes;
+    size_t rasterizer_bytes;
+    size_t lane_result_bytes;
+    size_t prepared_list_bytes;
+    size_t tile_bin_entry_count;
+    size_t tile_bin_bytes;
+    size_t tile_reference_arena_bytes;
+    size_t nonempty_tile_bytes;
+    size_t tile_row_state_bytes;
+    size_t empty_tile_row_bytes;
+    size_t hot_tile_bytes;
+    size_t scratch_slice_count;
+    size_t scratch_element_count;
+    size_t scratch_bytes;
+    size_t tile_column_count;
+    size_t tile_row_count;
+    size_t tile_count;
+    size_t total_reference_count = 0u;
+    size_t nonempty_tile_count = 0u;
+    size_t normal_tile_count = 0u;
+    size_t hot_tile_count = 0u;
+    size_t empty_tile_row_count = 0u;
+    size_t source_triangle_count = 0u;
+    const soc_bool masked_backend = SOC_TRUE;
+    uint32_t configured_lane_count;
+    uint32_t prepare_lane_count;
+    uint32_t raster_lane_count = 0u;
+    uint32_t lane;
+    uint32_t initialized_count = 0u;
+    soc_parallel_work_item* work_items = NULL;
+    soc_rasterizer* rasterizers = NULL;
+    soc_result* lane_results = NULL;
+    soc_raster_prepared_list* prepared_lists = NULL;
+    soc_parallel_tile_bin* tile_bins = NULL;
+    soc_parallel_tile_reference_arena* tile_reference_arenas = NULL;
+    soc_parallel_tile_job* nonempty_tiles = NULL;
+    soc_parallel_tile_row_state* tile_rows = NULL;
+    size_t* empty_tile_rows = NULL;
+    soc_parallel_tile_job* hot_tiles = NULL;
+    float* hot_tile_scratch = NULL;
+    soc_parallel_prepare_state prepare_state;
+    soc_parallel_tile_state tile_state;
+    soc_result result = SOC_RESULT_OK;
+    soc_bool return_parallel_result = SOC_FALSE;
+    size_t work_item_index = 0u;
+    uint32_t group_index;
+
+    *out_lower_hiz_built = SOC_FALSE;
+    if (context->worker_count <= 1u) {
+        return SOC_FALSE;
+    }
+    if (!calculate_parallel_work_item_count(
+            desc,
+            SOC_PARALLEL_TILED_TRIANGLES_PER_WORK_ITEM,
+            &work_item_count_u64
+        ) ||
+        work_item_count_u64 == 0u ||
+        work_item_count_u64 > (uint64_t)SIZE_MAX) {
+        return SOC_FALSE;
+    }
+    configured_lane_count = context->worker_count <
+            SOC_MASKED_PARALLEL_MAX_LANE_COUNT
+        ? context->worker_count
+        : SOC_MASKED_PARALLEL_MAX_LANE_COUNT;
+
+    prepare_lane_count = configured_lane_count;
+    if (work_item_count_u64 < (uint64_t)prepare_lane_count) {
+        prepare_lane_count = (uint32_t)work_item_count_u64;
+    }
+
+    work_item_count = (size_t)work_item_count_u64;
+    tile_column_count = (size_t)(
+        context->width / SOC_RASTER_LOCK_TILE_SIZE
+    );
+    if (context->width % SOC_RASTER_LOCK_TILE_SIZE != 0u) {
+        ++tile_column_count;
+    }
+    tile_row_count = (size_t)(
+        context->height / SOC_RASTER_LOCK_TILE_SIZE
+    );
+    if (context->height % SOC_RASTER_LOCK_TILE_SIZE != 0u) {
+        ++tile_row_count;
+    }
+
+    if (!checked_size_multiply(
+            work_item_count,
+            sizeof(*work_items),
+            &work_item_bytes
+        ) ||
+        !checked_size_multiply(
+            (size_t)configured_lane_count,
+            sizeof(*rasterizers),
+            &rasterizer_bytes
+        ) ||
+        !checked_size_multiply(
+            (size_t)prepare_lane_count,
+            sizeof(*lane_results),
+            &lane_result_bytes
+        ) ||
+        !checked_size_multiply(
+            (size_t)prepare_lane_count,
+            sizeof(*prepared_lists),
+            &prepared_list_bytes
+        ) ||
+        !checked_size_multiply(
+            tile_column_count,
+            tile_row_count,
+            &tile_count
+        )) {
+        return SOC_FALSE;
+    }
+    if (tile_count == 0u) {
+        *out_result = SOC_RESULT_INTERNAL_ERROR;
+        return SOC_TRUE;
+    }
+    if (!checked_size_multiply(
+            (size_t)prepare_lane_count,
+            tile_count,
+            &tile_bin_entry_count
+        ) ||
+        !checked_size_multiply(
+            tile_bin_entry_count,
+            sizeof(*tile_bins),
+            &tile_bin_bytes
+        ) ||
+        !checked_size_multiply(
+            (size_t)prepare_lane_count,
+            sizeof(*tile_reference_arenas),
+            &tile_reference_arena_bytes
+        ) ||
+        !checked_size_multiply(
+            tile_count,
+            sizeof(*nonempty_tiles),
+            &nonempty_tile_bytes
+        ) ||
+        !checked_size_multiply(
+            tile_row_count,
+            sizeof(*tile_rows),
+            &tile_row_state_bytes
+        ) ||
+        !checked_size_multiply(
+            tile_row_count,
+            sizeof(*empty_tile_rows),
+            &empty_tile_row_bytes
+        )) {
+        return SOC_FALSE;
+    }
+
+    work_items = malloc(work_item_bytes);
+    rasterizers = calloc(1u, rasterizer_bytes);
+    lane_results = malloc(lane_result_bytes);
+    prepared_lists = calloc(1u, prepared_list_bytes);
+    tile_bins = calloc(1u, tile_bin_bytes);
+    tile_reference_arenas = calloc(1u, tile_reference_arena_bytes);
+    nonempty_tiles = malloc(nonempty_tile_bytes);
+    tile_rows = calloc(1u, tile_row_state_bytes);
+    empty_tile_rows = malloc(empty_tile_row_bytes);
+    if (work_items == NULL ||
+        rasterizers == NULL ||
+        lane_results == NULL ||
+        prepared_lists == NULL ||
+        tile_bins == NULL ||
+        tile_reference_arenas == NULL ||
+        nonempty_tiles == NULL ||
+        tile_rows == NULL ||
+        empty_tile_rows == NULL) {
+        result = SOC_RESULT_OUT_OF_MEMORY;
+        goto attempted_cleanup;
+    }
+    {
+        size_t tile_row;
+
+        for (tile_row = 0u; tile_row < tile_row_count; ++tile_row) {
+            atomic_init(
+                &tile_rows[tile_row].remaining_normal_tiles,
+                0u
+            );
+        }
+    }
+
+    for (group_index = 0u;
+         group_index < desc->group_count;
+         ++group_index) {
+        soc_occluder_group group;
+        uint32_t instance;
+        uint32_t triangle_count;
+
+        read_group(desc, group_index, &group);
+        if (group.instance_count == 0u) {
+            continue;
+        }
+        triangle_count = group.mesh->index_count / 3u;
+
+        for (instance = 0u; instance < group.instance_count; ++instance) {
+            uint32_t triangle_begin = 0u;
+
+            while (triangle_begin < triangle_count) {
+                const uint32_t remaining =
+                    triangle_count - triangle_begin;
+                const uint32_t item_triangle_count =
+                    remaining <
+                        SOC_PARALLEL_TILED_TRIANGLES_PER_WORK_ITEM
+                        ? remaining
+                        : SOC_PARALLEL_TILED_TRIANGLES_PER_WORK_ITEM;
+                soc_parallel_work_item* work_item;
+
+                if (work_item_index >= work_item_count) {
+                    result = SOC_RESULT_INTERNAL_ERROR;
+                    return_parallel_result = SOC_TRUE;
+                    goto attempted_cleanup;
+                }
+                work_item = &work_items[work_item_index++];
+                work_item->mesh = group.mesh;
+                work_item->object_to_world =
+                    &group.object_to_world[instance];
+                work_item->triangle_begin = triangle_begin;
+                work_item->triangle_count = item_triangle_count;
+                if (!checked_size_add(
+                        source_triangle_count,
+                        (size_t)item_triangle_count,
+                        &source_triangle_count
+                    )) {
+                    result = SOC_RESULT_OUT_OF_MEMORY;
+                    goto attempted_cleanup;
+                }
+                triangle_begin += item_triangle_count;
+            }
+        }
+    }
+    if (work_item_index != work_item_count) {
+        result = SOC_RESULT_INTERNAL_ERROR;
+        return_parallel_result = SOC_TRUE;
+        goto attempted_cleanup;
+    }
+
+    for (lane = 0u; lane < configured_lane_count; ++lane) {
+        result = masked_backend == SOC_TRUE
+            ? soc_rasterizer_initialize_masked(
+                &rasterizers[lane],
+                context->width,
+                context->height,
+                level_zero,
+                depth_pyramid->working_depth,
+                depth_pyramid->layer_masks,
+                depth_pyramid->levels[0].width,
+                depth_pyramid->levels[0].height,
+                context->kernels
+            )
+            : soc_rasterizer_initialize(
+                &rasterizers[lane],
+                context->width,
+                context->height,
+                level_zero,
+                depth_element_count,
+                context->kernels
+            );
+        if (result != SOC_RESULT_OK) {
+            if (result != SOC_RESULT_OUT_OF_MEMORY) {
+                return_parallel_result = SOC_TRUE;
+            }
+            goto attempted_cleanup;
+        }
+        ++initialized_count;
+    }
+
+    for (lane = 0u; lane < configured_lane_count; ++lane) {
+        result = lane == 0u
+            ? soc_rasterizer_begin_frame(&rasterizers[lane], frame)
+            : soc_rasterizer_begin_frame_no_clear(
+                &rasterizers[lane],
+                frame
+            );
+        if (result != SOC_RESULT_OK) {
+            if (result != SOC_RESULT_OUT_OF_MEMORY) {
+                return_parallel_result = SOC_TRUE;
+            }
+            goto attempted_cleanup;
+        }
+    }
+    if (masked_backend == SOC_TRUE) {
+        for (lane = 0u; lane < configured_lane_count; ++lane) {
+            rasterizers[lane].masked_reference_count = SIZE_MAX;
+        }
+    }
+
+    {
+        size_t prepared_reserve_count =
+            source_triangle_count / (size_t)prepare_lane_count;
+
+        if (source_triangle_count % (size_t)prepare_lane_count != 0u) {
+            ++prepared_reserve_count;
+        }
+        if (!checked_size_add(
+                prepared_reserve_count,
+                (size_t)SOC_PARALLEL_TILED_TRIANGLES_PER_WORK_ITEM,
+                &prepared_reserve_count
+            )) {
+            result = SOC_RESULT_OUT_OF_MEMORY;
+            goto attempted_cleanup;
+        }
+        for (lane = 0u; lane < prepare_lane_count; ++lane) {
+            result = soc_raster_prepared_list_reserve(
+                &prepared_lists[lane],
+                prepared_reserve_count
+            );
+            if (result != SOC_RESULT_OK) {
+                goto attempted_cleanup;
+            }
+        }
+    }
+
+    for (lane = 0u; lane < prepare_lane_count; ++lane) {
+        lane_results[lane] = SOC_RESULT_OK;
+    }
+
+    prepare_state.rasterizers = rasterizers;
+    prepare_state.lane_results = lane_results;
+    prepare_state.prepared_lists = prepared_lists;
+    prepare_state.work_items = work_items;
+    prepare_state.work_item_count = work_item_count;
+    prepare_state.tile_column_count = tile_column_count;
+    prepare_state.tile_count = tile_count;
+    prepare_state.tile_bins = tile_bins;
+    prepare_state.tile_reference_arenas = tile_reference_arenas;
+    atomic_init(&prepare_state.next_work_item, 0u);
+
+    soc_thread_pool_run_active(
+        &context->thread_pool,
+        prepare_lane_count,
+        masked_backend == SOC_TRUE
+            ? parallel_prepare_ordered_work_items
+            : parallel_prepare_work_items,
+        &prepare_state
+    );
+    {
+        soc_result prepare_result = SOC_RESULT_OK;
+
+        for (lane = 0u; lane < prepare_lane_count; ++lane) {
+            if (lane_results[lane] == SOC_RESULT_OK) {
+                continue;
+            }
+            if (lane_results[lane] != SOC_RESULT_OUT_OF_MEMORY) {
+                result = lane_results[lane];
+                return_parallel_result = SOC_TRUE;
+                goto attempted_cleanup;
+            }
+            prepare_result = SOC_RESULT_OUT_OF_MEMORY;
+        }
+        if (prepare_result != SOC_RESULT_OK) {
+            result = prepare_result;
+            goto attempted_cleanup;
+        }
+    }
+
+    {
+        size_t tile_index;
+
+        for (tile_index = 0u; tile_index < tile_count; ++tile_index) {
+            size_t tile_reference_count = 0u;
+            uint32_t lane_mask = 0u;
+
+            for (lane = 0u; lane < prepare_lane_count; ++lane) {
+                const size_t bin_index =
+                    (size_t)lane * tile_count + tile_index;
+                const size_t lane_reference_count =
+                    (size_t)tile_bins[bin_index].count;
+
+                if (lane_reference_count != 0u) {
+                    lane_mask |= UINT32_C(1) << lane;
+                }
+                if (!checked_size_add(
+                        tile_reference_count,
+                        lane_reference_count,
+                        &tile_reference_count
+                    )) {
+                    result = SOC_RESULT_OUT_OF_MEMORY;
+                    goto attempted_cleanup;
+                }
+            }
+            if (tile_reference_count != 0u) {
+                soc_parallel_tile_job* tile_job =
+                    &nonempty_tiles[nonempty_tile_count++];
+
+                tile_job->tile_index = tile_index;
+                tile_job->reference_count = tile_reference_count;
+                tile_job->lane_mask = lane_mask;
+                if (!checked_size_add(
+                        total_reference_count,
+                        tile_reference_count,
+                        &total_reference_count
+                    )) {
+                    result = SOC_RESULT_OUT_OF_MEMORY;
+                    goto attempted_cleanup;
+                }
+            }
+        }
+    }
+
+    if (total_reference_count <=
+            SOC_PARALLEL_DIRECT_REFERENCE_LIMIT &&
+        nonempty_tile_count <= 1u) {
+        return_parallel_result = SOC_TRUE;
+        for (lane = 0u; lane < prepare_lane_count; ++lane) {
+            result = soc_rasterizer_rasterize_prepared_triangles(
+                &rasterizers[lane],
+                prepared_lists[lane].data,
+                prepared_lists[lane].count
+            );
+            if (result != SOC_RESULT_OK) {
+                goto attempted_cleanup;
+            }
+        }
+    } else {
+        size_t hot_reference_threshold =
+            total_reference_count /
+                (size_t)configured_lane_count;
+        size_t nonempty_index;
+
+        if (total_reference_count %
+                (size_t)configured_lane_count != 0u) {
+            ++hot_reference_threshold;
+        }
+        if (hot_reference_threshold <
+            SOC_PARALLEL_HOT_TILE_MINIMUM_REFERENCES) {
+            hot_reference_threshold =
+                SOC_PARALLEL_HOT_TILE_MINIMUM_REFERENCES;
+        }
+        if (masked_backend != SOC_TRUE) {
+            for (nonempty_index = 0u;
+                 nonempty_index < nonempty_tile_count;
+                 ++nonempty_index) {
+                const size_t tile_reference_count =
+                    nonempty_tiles[nonempty_index].reference_count;
+
+                if (tile_reference_count > hot_reference_threshold) {
+                    ++hot_tile_count;
+                }
+            }
+        }
+
+        if (hot_tile_count != 0u) {
+            if (!checked_size_multiply(
+                    hot_tile_count,
+                    sizeof(*hot_tiles),
+                    &hot_tile_bytes
+                ) ||
+                !checked_size_multiply(
+                    hot_tile_count,
+                    (size_t)configured_lane_count,
+                    &scratch_slice_count
+                ) ||
+                !checked_size_multiply(
+                    scratch_slice_count,
+                    SOC_PARALLEL_TILE_ELEMENT_COUNT,
+                    &scratch_element_count
+                ) ||
+                !checked_size_multiply(
+                    scratch_element_count,
+                    sizeof(*hot_tile_scratch),
+                    &scratch_bytes
+                )) {
+                result = SOC_RESULT_OUT_OF_MEMORY;
+                goto attempted_cleanup;
+            }
+            hot_tiles = malloc(hot_tile_bytes);
+            hot_tile_scratch = malloc(scratch_bytes);
+            if (hot_tiles == NULL || hot_tile_scratch == NULL) {
+                result = SOC_RESULT_OUT_OF_MEMORY;
+                goto attempted_cleanup;
+            }
+            context->kernels->clear_f32(
+                hot_tile_scratch,
+                scratch_element_count,
+                0.0f
+            );
+        }
+
+        {
+            size_t hot_index = 0u;
+
+            for (nonempty_index = 0u;
+                 nonempty_index < nonempty_tile_count;
+                 ++nonempty_index) {
+                const soc_parallel_tile_job tile_job =
+                    nonempty_tiles[nonempty_index];
+                const size_t tile_index = tile_job.tile_index;
+                const size_t tile_reference_count =
+                    tile_job.reference_count;
+                const size_t tile_row =
+                    tile_index / tile_column_count;
+
+                if (masked_backend != SOC_TRUE &&
+                    tile_reference_count > hot_reference_threshold) {
+                    hot_tiles[hot_index++] = tile_job;
+                    tile_rows[tile_row].has_hot_tile = SOC_TRUE;
+                } else {
+                    nonempty_tiles[normal_tile_count++] = tile_job;
+                    ++tile_rows[tile_row].normal_tile_count;
+                }
+            }
+        }
+
+        {
+            size_t tile_row;
+
+            for (tile_row = 0u;
+                 tile_row < tile_row_count;
+                 ++tile_row) {
+                atomic_store_explicit(
+                    &tile_rows[tile_row].remaining_normal_tiles,
+                    tile_rows[tile_row].normal_tile_count,
+                    memory_order_relaxed
+                );
+                if (tile_rows[tile_row].normal_tile_count == 0u &&
+                    tile_rows[tile_row].has_hot_tile != SOC_TRUE) {
+                    empty_tile_rows[empty_tile_row_count++] = tile_row;
+                }
+            }
+        }
+
+        tile_state.rasterizers = rasterizers;
+        tile_state.prepared_lists = prepared_lists;
+        tile_state.tile_bins = tile_bins;
+        tile_state.tile_reference_arenas = tile_reference_arenas;
+        tile_state.tile_count = tile_count;
+        tile_state.prepare_lane_count = prepare_lane_count;
+        tile_state.normal_tiles = nonempty_tiles;
+        tile_state.normal_tile_count = normal_tile_count;
+        tile_state.hot_tiles = hot_tiles;
+        tile_state.hot_tile_count = hot_tile_count;
+        tile_state.hot_tile_scratch = hot_tile_scratch;
+        tile_state.tile_rows = tile_rows;
+        tile_state.empty_tile_rows = empty_tile_rows;
+        tile_state.empty_tile_row_count = empty_tile_row_count;
+        tile_state.tile_column_count = tile_column_count;
+        tile_state.width = context->width;
+        tile_state.height = context->height;
+        tile_state.depth_pyramid = depth_pyramid;
+        tile_state.kernels = context->kernels;
+        tile_state.hiz_band_count = 0u;
+        if (masked_backend != SOC_TRUE) {
+            result = soc_hiz_lower_band_count(
+                depth_pyramid,
+                &tile_state.hiz_band_count
+            );
+            if (result != SOC_RESULT_OK) {
+                return_parallel_result = SOC_TRUE;
+                goto attempted_cleanup;
+            }
+        }
+        atomic_init(&tile_state.next_job, 0u);
+        atomic_init(&tile_state.next_empty_tile_row, 0u);
+
+        return_parallel_result = SOC_TRUE;
+        if (hot_tile_count != 0u) {
+            raster_lane_count = configured_lane_count;
+        } else if (normal_tile_count <
+            (size_t)configured_lane_count) {
+            raster_lane_count = (uint32_t)normal_tile_count;
+        } else {
+            raster_lane_count = configured_lane_count;
+        }
+        {
+            size_t reference_lane_count =
+                total_reference_count /
+                    SOC_PARALLEL_TILE_REFERENCES_PER_LANE;
+
+            if (total_reference_count %
+                    SOC_PARALLEL_TILE_REFERENCES_PER_LANE != 0u) {
+                ++reference_lane_count;
+            }
+            if (reference_lane_count < (size_t)raster_lane_count) {
+                raster_lane_count = (uint32_t)reference_lane_count;
+            }
+        }
+        if (masked_backend != SOC_TRUE) {
+            size_t hiz_lane_count = depth_element_count /
+                SOC_PARALLEL_FUSED_HIZ_TARGET_ELEMENTS_PER_LANE;
+
+            if (depth_element_count %
+                    SOC_PARALLEL_FUSED_HIZ_TARGET_ELEMENTS_PER_LANE !=
+                0u) {
+                ++hiz_lane_count;
+            }
+            if (hiz_lane_count >
+                (size_t)SOC_PARALLEL_FUSED_HIZ_MAX_LANE_COUNT) {
+                hiz_lane_count =
+                    (size_t)SOC_PARALLEL_FUSED_HIZ_MAX_LANE_COUNT;
+            }
+            if (hiz_lane_count > (size_t)configured_lane_count) {
+                hiz_lane_count = (size_t)configured_lane_count;
+            }
+            if (hiz_lane_count > tile_row_count) {
+                hiz_lane_count = tile_row_count;
+            }
+            if (hiz_lane_count > (size_t)raster_lane_count) {
+                raster_lane_count = (uint32_t)hiz_lane_count;
+            }
+        }
+        soc_thread_pool_run_active(
+            &context->thread_pool,
+            raster_lane_count,
+            masked_backend == SOC_TRUE
+                ? parallel_rasterize_masked_tiles
+                : parallel_rasterize_dense_tiles,
+            &tile_state
+        );
+        if (masked_backend != SOC_TRUE) {
+            size_t tile_row;
+
+            merge_parallel_hot_tiles(
+                level_zero,
+                hot_tile_scratch,
+                hot_tiles,
+                hot_tile_count,
+                raster_lane_count,
+                tile_column_count,
+                context->width,
+                context->height,
+                context->kernels
+            );
+            for (tile_row = 0u;
+                 tile_row < tile_row_count;
+                 ++tile_row) {
+                if (tile_rows[tile_row].has_hot_tile == SOC_TRUE) {
+                    build_parallel_tile_row_hiz(
+                        &tile_state,
+                        tile_row
+                    );
+                }
+            }
+            *out_lower_hiz_built = SOC_TRUE;
+        }
     }
 
     for (lane = 0u; lane < configured_lane_count; ++lane) {
@@ -2725,7 +3613,7 @@ static soc_bool try_rasterize_occluders_parallel(
             )) {
             return SOC_TRUE;
         }
-        return try_rasterize_occluders_tiled(
+        return try_rasterize_occluders_tiled_dense(
             context,
             desc,
             frame,
@@ -2739,7 +3627,7 @@ static soc_bool try_rasterize_occluders_parallel(
         );
     }
 
-    if (try_rasterize_occluders_tiled(
+    if (try_rasterize_occluders_tiled_dense(
             context,
             desc,
             frame,
@@ -2895,43 +3783,20 @@ soc_result soc_occlusion_build_dense_internal(
     );
 }
 
-soc_result soc_occlusion_build_internal(
+static soc_result build_masked_validated(
     soc_context* context,
     const soc_occlusion_build_desc* desc,
+    const soc_frame_desc* frame,
+    uint64_t input_triangle_count,
     soc_snapshot** out_snapshot
 )
 {
     soc_snapshot* snapshot;
-    soc_frame_desc frame;
-    uint64_t input_triangle_count;
     uint64_t clipped_triangle_count = 0u;
     uint64_t rasterized_triangle_count = 0u;
+    soc_bool lower_hiz_built = SOC_FALSE;
+    soc_bool rasterized_parallel = SOC_FALSE;
     soc_result result;
-
-    if (out_snapshot == NULL) {
-        return SOC_RESULT_INVALID_ARGUMENT;
-    }
-    *out_snapshot = NULL;
-
-    result = validate_build_desc(
-        context,
-        desc,
-        &frame,
-        &input_triangle_count
-    );
-    if (result != SOC_RESULT_OK) {
-        return result;
-    }
-    if (should_use_masked_backend(context, input_triangle_count) !=
-        SOC_TRUE) {
-        return build_dense_validated(
-            context,
-            desc,
-            &frame,
-            input_triangle_count,
-            out_snapshot
-        );
-    }
 
     snapshot = calloc(1u, sizeof(*snapshot));
     if (snapshot == NULL) {
@@ -2948,26 +3813,49 @@ soc_result soc_occlusion_build_internal(
         goto fail;
     }
 
-    result = rasterize_occluders_serial_masked(
-        context,
-        desc,
-        &frame,
-        &snapshot->depth_pyramid,
-        &clipped_triangle_count,
-        &rasterized_triangle_count
-    );
+    if (input_triangle_count >=
+        SOC_MASKED_PARALLEL_MIN_TRIANGLE_COUNT) {
+        rasterized_parallel = try_rasterize_occluders_tiled_masked(
+            context,
+            desc,
+            frame,
+            &snapshot->depth_pyramid,
+            soc_hiz_level_data(&snapshot->depth_pyramid, 0u),
+            snapshot->depth_pyramid.levels[0].element_count,
+            &clipped_triangle_count,
+            &rasterized_triangle_count,
+            &lower_hiz_built,
+            &result
+        );
+    }
+    if (rasterized_parallel != SOC_TRUE) {
+        result = rasterize_occluders_serial_masked(
+            context,
+            desc,
+            frame,
+            &snapshot->depth_pyramid,
+            &clipped_triangle_count,
+            &rasterized_triangle_count
+        );
+    }
     if (result != SOC_RESULT_OK) {
         goto fail;
     }
-    result = soc_hiz_build_with_kernels(
-        &snapshot->depth_pyramid,
-        snapshot->kernels
-    );
+    result = lower_hiz_built == SOC_TRUE
+        ? soc_hiz_build_upper_levels_with_kernels(
+            &snapshot->depth_pyramid,
+            snapshot->kernels
+        )
+        : soc_hiz_build_with_kernels(
+            &snapshot->depth_pyramid,
+            snapshot->kernels
+        );
     if (result != SOC_RESULT_OK) {
         goto fail;
     }
 
-    snapshot->frame = frame;
+    snapshot->masked_parallel = rasterized_parallel;
+    snapshot->frame = *frame;
     soc_aabb_query_context_initialize(
         &snapshot->frame,
         &snapshot->query_context
@@ -2987,4 +3875,79 @@ soc_result soc_occlusion_build_internal(
 fail:
     soc_snapshot_destroy_internal(snapshot);
     return result;
+}
+
+soc_result soc_occlusion_build_masked_internal(
+    soc_context* context,
+    const soc_occlusion_build_desc* desc,
+    soc_snapshot** out_snapshot
+)
+{
+    soc_frame_desc frame;
+    uint64_t input_triangle_count;
+    soc_result result;
+
+    if (out_snapshot == NULL) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+    *out_snapshot = NULL;
+
+    result = validate_build_desc(
+        context,
+        desc,
+        &frame,
+        &input_triangle_count
+    );
+    if (result != SOC_RESULT_OK) {
+        return result;
+    }
+    return build_masked_validated(
+        context,
+        desc,
+        &frame,
+        input_triangle_count,
+        out_snapshot
+    );
+}
+
+soc_result soc_occlusion_build_internal(
+    soc_context* context,
+    const soc_occlusion_build_desc* desc,
+    soc_snapshot** out_snapshot
+)
+{
+    soc_frame_desc frame;
+    uint64_t input_triangle_count;
+    soc_result result;
+
+    if (out_snapshot == NULL) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+    *out_snapshot = NULL;
+
+    result = validate_build_desc(
+        context,
+        desc,
+        &frame,
+        &input_triangle_count
+    );
+    if (result != SOC_RESULT_OK) {
+        return result;
+    }
+    return should_use_masked_backend(context, input_triangle_count) ==
+        SOC_TRUE
+        ? build_masked_validated(
+            context,
+            desc,
+            &frame,
+            input_triangle_count,
+            out_snapshot
+        )
+        : build_dense_validated(
+            context,
+            desc,
+            &frame,
+            input_triangle_count,
+            out_snapshot
+        );
 }
