@@ -2575,7 +2575,7 @@ void soc_raster_tile_locks_shutdown(
         return;
     }
 
-    free(tile_locks->locks);
+    free((void*)tile_locks->locks);
     memset(tile_locks, 0, sizeof(*tile_locks));
 }
 

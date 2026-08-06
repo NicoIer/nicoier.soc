@@ -2309,6 +2309,7 @@ private_cleanup:
     return SOC_FALSE;
 }
 
+#if SOC_EXPERIMENT_FORCE_PARALLEL_BACKEND == 0
 /*
  * Samples setup density without clearing or rasterizing Level 0.  Global
  * triangle space is split by quotient/remainder instead of multiplying the
@@ -2463,6 +2464,7 @@ sample_cleanup:
     soc_raster_prepared_list_shutdown(&prepared);
     return hint_available;
 }
+#endif
 
 static soc_bool try_rasterize_occluders_parallel(
     soc_context* context,
@@ -2565,15 +2567,14 @@ static soc_bool try_rasterize_occluders_parallel(
         prefer_private = SOC_FALSE;
     }
 
-    if (SOC_EXPERIMENT_FORCE_PARALLEL_BACKEND == 1) {
-        prefer_private = SOC_FALSE;
-    } else if (SOC_EXPERIMENT_FORCE_PARALLEL_BACKEND == 2 &&
-        private_eligible == SOC_TRUE) {
+#if SOC_EXPERIMENT_FORCE_PARALLEL_BACKEND == 1
+    prefer_private = SOC_FALSE;
+#elif SOC_EXPERIMENT_FORCE_PARALLEL_BACKEND == 2
+    if (private_eligible == SOC_TRUE) {
         prefer_private = SOC_TRUE;
     }
-
-    if (prefer_private == SOC_TRUE &&
-        SOC_EXPERIMENT_FORCE_PARALLEL_BACKEND == 0) {
+#elif SOC_EXPERIMENT_FORCE_PARALLEL_BACKEND == 0
+    if (prefer_private == SOC_TRUE) {
         size_t sampled_source_count;
         size_t sampled_prepared_count;
 
@@ -2609,6 +2610,7 @@ static soc_bool try_rasterize_occluders_parallel(
             }
         }
     }
+#endif
 
     if (prefer_private == SOC_TRUE) {
         if (try_rasterize_occluders_private(

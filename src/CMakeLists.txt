@@ -26,6 +26,9 @@ target_include_directories(
 
 target_compile_features(soc_core PRIVATE c_std_17)
 target_link_libraries(soc_core PRIVATE Threads::Threads)
+if(UNIX)
+    target_link_libraries(soc_core PUBLIC m)
+endif()
 set_target_properties(
     soc_core
     PROPERTIES
@@ -80,6 +83,9 @@ target_include_directories(
 
 target_compile_features(soc PUBLIC c_std_17)
 target_link_libraries(soc PUBLIC Threads::Threads)
+if(UNIX)
+    target_link_libraries(soc PUBLIC m)
+endif()
 soc_enable_warnings(soc)
 
 set_target_properties(
