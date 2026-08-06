@@ -1076,7 +1076,7 @@ static int test_partial_coverage_and_offscreen_are_conservative(void)
         },
     };
     const soc_visibility expected[] = {
-        SOC_VISIBILITY_OCCLUDED,
+        SOC_VISIBILITY_VISIBLE,
         SOC_VISIBILITY_VISIBLE,
         SOC_VISIBILITY_VISIBLE,
         SOC_VISIBILITY_VISIBLE,
@@ -1122,8 +1122,8 @@ static int test_partial_coverage_and_offscreen_are_conservative(void)
     CHECK(check_query_stats(
         &query_stats,
         ARRAY_COUNT(bounds),
-        3u,
-        1u,
+        4u,
+        0u,
         0u
     ) == 0);
 

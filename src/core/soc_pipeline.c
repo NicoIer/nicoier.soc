@@ -44,6 +44,9 @@
 #define SOC_PARALLEL_PRIVATE_MIN_WORK_ITEMS_PER_LANE UINT64_C(4)
 #define SOC_PARALLEL_FUSED_HIZ_TARGET_ELEMENTS_PER_LANE ((size_t)393216u)
 #define SOC_PARALLEL_FUSED_HIZ_MAX_LANE_COUNT UINT32_C(8)
+/* Measured crossover: 2048-triangle core cases win; 2068-triangle OBJ loses. */
+#define SOC_MASKED_DIRECT_TRIANGLE_LIMIT UINT64_C(2049)
+#define SOC_MASKED_HIGH_RESOLUTION_PIXEL_THRESHOLD ((size_t)512u * 1024u)
 
 #if !defined(SOC_EXPERIMENT_FORCE_PARALLEL_BACKEND)
     #define SOC_EXPERIMENT_FORCE_PARALLEL_BACKEND 0
@@ -84,6 +87,20 @@ static size_t saturating_size_multiply(size_t left, size_t right)
     return checked_size_multiply(left, right, &result) == SOC_TRUE
         ? result
         : SIZE_MAX;
+}
+
+static soc_bool should_use_masked_backend(
+    const soc_context* context,
+    uint64_t input_triangle_count
+)
+{
+    const size_t pixel_count =
+        (size_t)context->width * (size_t)context->height;
+
+    return input_triangle_count < SOC_MASKED_DIRECT_TRIANGLE_LIMIT ||
+        pixel_count >= SOC_MASKED_HIGH_RESOLUTION_PIXEL_THRESHOLD
+        ? SOC_TRUE
+        : SOC_FALSE;
 }
 
 static soc_result validate_frame_desc(const soc_frame_desc* desc)
@@ -245,6 +262,87 @@ static soc_result rasterize_occluders_serial(
         context->height,
         depth,
         depth_element_count,
+        context->kernels
+    );
+    if (result != SOC_RESULT_OK) {
+        return result;
+    }
+    rasterizer_initialized = SOC_TRUE;
+
+    result = soc_rasterizer_begin_frame(&rasterizer, frame);
+    if (result != SOC_RESULT_OK) {
+        goto cleanup;
+    }
+    frame_active = SOC_TRUE;
+
+    for (index = 0u; index < desc->group_count; ++index) {
+        soc_occluder_group group;
+
+        read_group(desc, index, &group);
+        if (group.instance_count == 0u) {
+            continue;
+        }
+
+        result = soc_rasterizer_submit_occluders(
+            &rasterizer,
+            group.mesh,
+            group.object_to_world,
+            group.instance_count
+        );
+        if (result != SOC_RESULT_OK) {
+            goto cleanup;
+        }
+    }
+
+    result = soc_rasterizer_finish_occluders(&rasterizer);
+    if (result != SOC_RESULT_OK) {
+        goto cleanup;
+    }
+
+    *out_clipped_triangle_count = rasterizer.clipped_triangle_count;
+    *out_rasterized_triangle_count = rasterizer.rasterized_triangle_count;
+
+    result = soc_rasterizer_end_frame(&rasterizer);
+    if (result != SOC_RESULT_OK) {
+        goto cleanup;
+    }
+    frame_active = SOC_FALSE;
+
+cleanup:
+    if (frame_active == SOC_TRUE) {
+        (void)soc_rasterizer_end_frame(&rasterizer);
+    }
+    if (rasterizer_initialized == SOC_TRUE) {
+        soc_rasterizer_shutdown(&rasterizer);
+    }
+    return result;
+}
+
+static soc_result rasterize_occluders_serial_masked(
+    const soc_context* context,
+    const soc_occlusion_build_desc* desc,
+    const soc_frame_desc* frame,
+    soc_hiz* depth_pyramid,
+    uint64_t* out_clipped_triangle_count,
+    uint64_t* out_rasterized_triangle_count
+)
+{
+    soc_rasterizer rasterizer;
+    const soc_hiz_level* level_zero = &depth_pyramid->levels[0];
+    uint32_t index;
+    soc_result result;
+    soc_bool rasterizer_initialized = SOC_FALSE;
+    soc_bool frame_active = SOC_FALSE;
+
+    result = soc_rasterizer_initialize_masked(
+        &rasterizer,
+        context->width,
+        context->height,
+        soc_hiz_level_data(depth_pyramid, 0u),
+        depth_pyramid->working_depth,
+        depth_pyramid->layer_masks,
+        level_zero->width,
+        level_zero->height,
         context->kernels
     );
     if (result != SOC_RESULT_OK) {
@@ -2672,34 +2770,19 @@ static soc_bool try_rasterize_occluders_parallel(
     return SOC_FALSE;
 }
 
-soc_result soc_occlusion_build_internal(
+static soc_result build_dense_validated(
     soc_context* context,
     const soc_occlusion_build_desc* desc,
+    const soc_frame_desc* frame,
+    uint64_t input_triangle_count,
     soc_snapshot** out_snapshot
 )
 {
     soc_snapshot* snapshot;
-    soc_frame_desc frame;
-    uint64_t input_triangle_count;
     uint64_t clipped_triangle_count = 0u;
     uint64_t rasterized_triangle_count = 0u;
     soc_bool lower_hiz_built = SOC_FALSE;
     soc_result result;
-
-    if (out_snapshot == NULL) {
-        return SOC_RESULT_INVALID_ARGUMENT;
-    }
-    *out_snapshot = NULL;
-
-    result = validate_build_desc(
-        context,
-        desc,
-        &frame,
-        &input_triangle_count
-    );
-    if (result != SOC_RESULT_OK) {
-        return result;
-    }
 
     snapshot = calloc(1u, sizeof(*snapshot));
     if (snapshot == NULL) {
@@ -2720,7 +2803,7 @@ soc_result soc_occlusion_build_internal(
     if (!try_rasterize_occluders_parallel(
             context,
             desc,
-            &frame,
+            frame,
             input_triangle_count,
             &snapshot->depth_pyramid,
             soc_hiz_level_data(&snapshot->depth_pyramid, 0u),
@@ -2733,7 +2816,7 @@ soc_result soc_occlusion_build_internal(
         result = rasterize_occluders_serial(
             context,
             desc,
-            &frame,
+            frame,
             soc_hiz_level_data(&snapshot->depth_pyramid, 0u),
             snapshot->depth_pyramid.levels[0].element_count,
             &clipped_triangle_count,
@@ -2753,6 +2836,133 @@ soc_result soc_occlusion_build_internal(
             snapshot->kernels,
             &context->thread_pool
         );
+    if (result != SOC_RESULT_OK) {
+        goto fail;
+    }
+
+    snapshot->frame = *frame;
+    soc_aabb_query_context_initialize(
+        &snapshot->frame,
+        &snapshot->query_context
+    );
+    snapshot->build_stats.struct_size = sizeof(snapshot->build_stats);
+    snapshot->build_stats.hiz_level_count =
+        snapshot->depth_pyramid.level_count;
+    snapshot->build_stats.input_triangle_count = input_triangle_count;
+    snapshot->build_stats.clipped_triangle_count =
+        clipped_triangle_count;
+    snapshot->build_stats.rasterized_triangle_count =
+        rasterized_triangle_count;
+
+    *out_snapshot = snapshot;
+    return SOC_RESULT_OK;
+
+fail:
+    soc_snapshot_destroy_internal(snapshot);
+    return result;
+}
+
+soc_result soc_occlusion_build_dense_internal(
+    soc_context* context,
+    const soc_occlusion_build_desc* desc,
+    soc_snapshot** out_snapshot
+)
+{
+    soc_frame_desc frame;
+    uint64_t input_triangle_count;
+    soc_result result;
+
+    if (out_snapshot == NULL) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+    *out_snapshot = NULL;
+
+    result = validate_build_desc(
+        context,
+        desc,
+        &frame,
+        &input_triangle_count
+    );
+    if (result != SOC_RESULT_OK) {
+        return result;
+    }
+    return build_dense_validated(
+        context,
+        desc,
+        &frame,
+        input_triangle_count,
+        out_snapshot
+    );
+}
+
+soc_result soc_occlusion_build_internal(
+    soc_context* context,
+    const soc_occlusion_build_desc* desc,
+    soc_snapshot** out_snapshot
+)
+{
+    soc_snapshot* snapshot;
+    soc_frame_desc frame;
+    uint64_t input_triangle_count;
+    uint64_t clipped_triangle_count = 0u;
+    uint64_t rasterized_triangle_count = 0u;
+    soc_result result;
+
+    if (out_snapshot == NULL) {
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+    *out_snapshot = NULL;
+
+    result = validate_build_desc(
+        context,
+        desc,
+        &frame,
+        &input_triangle_count
+    );
+    if (result != SOC_RESULT_OK) {
+        return result;
+    }
+    if (should_use_masked_backend(context, input_triangle_count) !=
+        SOC_TRUE) {
+        return build_dense_validated(
+            context,
+            desc,
+            &frame,
+            input_triangle_count,
+            out_snapshot
+        );
+    }
+
+    snapshot = calloc(1u, sizeof(*snapshot));
+    if (snapshot == NULL) {
+        return SOC_RESULT_OUT_OF_MEMORY;
+    }
+    snapshot->kernels = context->kernels;
+
+    result = soc_hiz_initialize_masked(
+        &snapshot->depth_pyramid,
+        context->width,
+        context->height
+    );
+    if (result != SOC_RESULT_OK) {
+        goto fail;
+    }
+
+    result = rasterize_occluders_serial_masked(
+        context,
+        desc,
+        &frame,
+        &snapshot->depth_pyramid,
+        &clipped_triangle_count,
+        &rasterized_triangle_count
+    );
+    if (result != SOC_RESULT_OK) {
+        goto fail;
+    }
+    result = soc_hiz_build_with_kernels(
+        &snapshot->depth_pyramid,
+        snapshot->kernels
+    );
     if (result != SOC_RESULT_OK) {
         goto fail;
     }

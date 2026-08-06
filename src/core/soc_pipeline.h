@@ -9,4 +9,11 @@ soc_result soc_occlusion_build_internal(
     soc_snapshot** out_snapshot
 );
 
+/* Dense backend retained as the high-triangle-count path and test oracle. */
+soc_result soc_occlusion_build_dense_internal(
+    soc_context* context,
+    const soc_occlusion_build_desc* desc,
+    soc_snapshot** out_snapshot
+);
+
 #endif

@@ -188,7 +188,7 @@ static int test_build_query_and_snapshot_lifetime(void)
         soc_snapshot_get_build_stats(snapshot, &build_stats),
         SOC_RESULT_OK
     );
-    CHECK(build_stats.hiz_level_count == 10u);
+    CHECK(build_stats.hiz_level_count == 7u);
     CHECK(build_stats.input_triangle_count == 2u);
     CHECK(build_stats.clipped_triangle_count == 0u);
     CHECK(build_stats.rasterized_triangle_count == 2u);
@@ -223,7 +223,7 @@ static int test_build_query_and_snapshot_lifetime(void)
     CHECK_RESULT(
         soc_snapshot_hiz_level_query(
             snapshot,
-            9u,
+            6u,
             &level_info,
             &top_depth,
             1u
@@ -237,7 +237,7 @@ static int test_build_query_and_snapshot_lifetime(void)
     CHECK_RESULT(
         soc_snapshot_hiz_level_query(
             snapshot,
-            10u,
+            7u,
             &level_info,
             NULL,
             0u
@@ -357,7 +357,7 @@ static int test_empty_build(void)
         soc_snapshot_get_build_stats(snapshot, &build_stats),
         SOC_RESULT_OK
     );
-    CHECK(build_stats.hiz_level_count == 4u);
+    CHECK(build_stats.hiz_level_count == 2u);
     CHECK(build_stats.input_triangle_count == 0u);
     CHECK(build_stats.clipped_triangle_count == 0u);
     CHECK(build_stats.rasterized_triangle_count == 0u);

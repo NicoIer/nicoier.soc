@@ -11,6 +11,8 @@ struct soc_thread_pool;
 #define SOC_HIZ_MAX_LEVEL_COUNT 33u
 #define SOC_HIZ_LOWER_BAND_HEIGHT 16u
 #define SOC_HIZ_LOWER_LEVEL_COUNT 4u
+#define SOC_HIZ_MASK_BLOCK_WIDTH 8u
+#define SOC_HIZ_MASK_BLOCK_HEIGHT 4u
 
 typedef struct soc_hiz_level {
     uint32_t width;
@@ -21,9 +23,14 @@ typedef struct soc_hiz_level {
 
 typedef struct soc_hiz {
     uint32_t level_count;
+    uint32_t pixel_width;
+    uint32_t pixel_height;
     size_t element_count;
     float* data;
+    float* working_depth;
+    uint32_t* layer_masks;
     soc_bool initialized;
+    soc_bool masked;
     soc_hiz_level levels[SOC_HIZ_MAX_LEVEL_COUNT];
 } soc_hiz;
 
@@ -31,6 +38,12 @@ soc_result soc_hiz_initialize(
     soc_hiz* hiz,
     uint32_t width,
     uint32_t height
+);
+
+soc_result soc_hiz_initialize_masked(
+    soc_hiz* hiz,
+    uint32_t pixel_width,
+    uint32_t pixel_height
 );
 
 void soc_hiz_shutdown(soc_hiz* hiz);

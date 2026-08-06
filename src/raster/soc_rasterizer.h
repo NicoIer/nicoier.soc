@@ -81,6 +81,11 @@ typedef struct soc_raster_prepared_list {
     size_t capacity;
 } soc_raster_prepared_list;
 
+typedef enum soc_rasterizer_mode {
+    SOC_RASTERIZER_MODE_DENSE = 0,
+    SOC_RASTERIZER_MODE_MASKED,
+} soc_rasterizer_mode;
+
 typedef struct soc_rasterizer {
     uint32_t width;
     uint32_t height;
@@ -107,6 +112,16 @@ typedef struct soc_rasterizer {
     size_t early_z_ready_tile_count;
     float early_z_frame_farthest_depth;
     soc_bool early_z_coarse_dirty;
+    /* Borrowed 8x4 Quick-Mask streams used instead of dense Level 0. */
+    float* masked_z0;
+    float* masked_z1;
+    uint32_t* masked_masks;
+    uint32_t masked_subtile_column_count;
+    uint32_t masked_subtile_row_count;
+    size_t masked_subtile_count;
+    size_t masked_reference_count;
+    float masked_frame_farthest_depth;
+    soc_rasterizer_mode mode;
     const soc_kernel_table* kernels;
     /* Optional borrowed grid; NULL keeps the original lock-free path. */
     soc_raster_tile_locks* tile_locks;
@@ -136,6 +151,23 @@ soc_result soc_rasterizer_initialize(
     const soc_kernel_table* kernels
 );
 
+/*
+ * Initializes direct 8x4 MSOC Quick-Mask output. The borrowed arrays contain
+ * one reference depth, one working depth and one 32-bit coverage mask per
+ * subtile; their dimensions must be ceil(width / 8) x ceil(height / 4).
+ */
+soc_result soc_rasterizer_initialize_masked(
+    soc_rasterizer* rasterizer,
+    uint32_t width,
+    uint32_t height,
+    float* z0,
+    float* z1,
+    uint32_t* masks,
+    uint32_t subtile_column_count,
+    uint32_t subtile_row_count,
+    const soc_kernel_table* kernels
+);
+
 void soc_rasterizer_shutdown(soc_rasterizer* rasterizer);
 
 soc_result soc_rasterizer_resize(
@@ -156,7 +188,7 @@ soc_result soc_rasterizer_begin_frame(
     const soc_frame_desc* desc
 );
 
-/* Begins a frame without touching the caller-initialized depth image. */
+/* Dense-only: begins a frame without touching caller-initialized depth. */
 soc_result soc_rasterizer_begin_frame_no_clear(
     soc_rasterizer* rasterizer,
     const soc_frame_desc* desc
@@ -222,9 +254,9 @@ soc_result soc_rasterizer_rasterize_prepared_region(
 );
 
 /*
- * Hot-path variant for an already validated active raster phase.  The caller
- * guarantees non-NULL arguments, valid prepared bounds and a well-formed
- * region; empty intersections remain no-ops.
+ * Dense-only hot-path variant for an already validated active raster phase.
+ * The caller guarantees non-NULL arguments, valid prepared bounds and a
+ * well-formed region; empty intersections remain no-ops.
  */
 void soc_rasterizer_rasterize_prepared_region_unchecked(
     soc_rasterizer* rasterizer,
@@ -244,10 +276,10 @@ soc_result soc_rasterizer_rasterize_prepared_region_to_target(
 );
 
 /*
- * Hot-path target replay for an already validated active raster phase.  The
- * caller guarantees non-NULL arguments, valid prepared bounds, a well-formed
- * region inside the framebuffer and a valid target covering that region.
- * Empty prepared/region intersections remain no-ops.
+ * Dense-only hot-path target replay for an already validated active raster
+ * phase. The caller guarantees non-NULL arguments, valid prepared bounds, a
+ * well-formed region inside the framebuffer and a valid target covering that
+ * region. Empty prepared/region intersections remain no-ops.
  */
 void soc_rasterizer_rasterize_prepared_region_to_target_unchecked(
     soc_rasterizer* rasterizer,

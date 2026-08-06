@@ -20,10 +20,14 @@
 
 #if defined(_MSC_VER)
 #define SOC_NOINLINE __declspec(noinline)
+#define SOC_FORCE_INLINE_NEON static __forceinline
 #elif defined(__clang__) || defined(__GNUC__)
 #define SOC_NOINLINE __attribute__((noinline))
+#define SOC_FORCE_INLINE_NEON \
+    static inline __attribute__((always_inline))
 #else
 #define SOC_NOINLINE
+#define SOC_FORCE_INLINE_NEON static inline
 #endif
 
 static soc_bool valid_aabb_neon(const soc_aabb* bounds)
@@ -645,6 +649,48 @@ static void accumulate_visibility(
     }
 }
 
+SOC_FORCE_INLINE_NEON void test_aabb_pair_layout_neon(
+    const soc_hiz* hiz,
+    const soc_aabb_query_context* query,
+    const soc_aabb bounds[2],
+    soc_visibility out_visibility[2],
+    soc_occlusion_query_counts* counts,
+    soc_bool masked_layout
+)
+{
+    soc_projected_aabb projected[2];
+    soc_aabb_projection projection[2];
+    uint32_t lane;
+
+    project_aabb_pair_f64_neon(
+        query,
+        bounds,
+        projected,
+        projection
+    );
+    for (lane = 0u; lane < 2u; ++lane) {
+        soc_visibility visibility;
+
+        if (projection[lane] == SOC_AABB_PROJECTION_UNKNOWN) {
+            visibility = SOC_VISIBILITY_UNKNOWN;
+        } else if (projection[lane] == SOC_AABB_PROJECTION_OUTSIDE) {
+            visibility = SOC_VISIBILITY_VISIBLE;
+        } else if (masked_layout == SOC_TRUE) {
+            visibility = soc_test_projected_aabb_masked_scalar(
+                hiz,
+                &projected[lane]
+            );
+        } else {
+            visibility = soc_test_projected_aabb_dense_scalar(
+                hiz,
+                &projected[lane]
+            );
+        }
+        out_visibility[lane] = visibility;
+        accumulate_visibility(visibility, counts);
+    }
+}
+
 static SOC_NOINLINE soc_result soc_occlusion_test_aabbs_pair_neon(
     const soc_hiz* hiz,
     const soc_aabb_query_context* query,
@@ -691,32 +737,27 @@ static SOC_NOINLINE soc_result soc_occlusion_test_aabbs_pair_neon(
         return SOC_RESULT_OK;
     }
 
-    for (; index + 1u < bounds_count; index += 2u) {
-        soc_projected_aabb projected[2];
-        soc_aabb_projection projection[2];
-        uint32_t lane;
-
-        project_aabb_pair_f64_neon(
-            query,
-            &world_bounds[index],
-            projected,
-            projection
-        );
-        for (lane = 0u; lane < 2u; ++lane) {
-            soc_visibility visibility;
-
-            if (projection[lane] == SOC_AABB_PROJECTION_UNKNOWN) {
-                visibility = SOC_VISIBILITY_UNKNOWN;
-            } else if (projection[lane] == SOC_AABB_PROJECTION_OUTSIDE) {
-                visibility = SOC_VISIBILITY_VISIBLE;
-            } else {
-                visibility = soc_test_projected_aabb_scalar(
-                    hiz,
-                    &projected[lane]
-                );
-            }
-            out_visibility[index + lane] = visibility;
-            accumulate_visibility(visibility, &counts);
+    if (hiz->masked == SOC_TRUE) {
+        for (; index + 1u < bounds_count; index += 2u) {
+            test_aabb_pair_layout_neon(
+                hiz,
+                query,
+                &world_bounds[index],
+                &out_visibility[index],
+                &counts,
+                SOC_TRUE
+            );
+        }
+    } else {
+        for (; index + 1u < bounds_count; index += 2u) {
+            test_aabb_pair_layout_neon(
+                hiz,
+                query,
+                &world_bounds[index],
+                &out_visibility[index],
+                &counts,
+                SOC_FALSE
+            );
         }
     }
 

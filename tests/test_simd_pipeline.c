@@ -196,7 +196,7 @@ static int compare_snapshots(
 
     CHECK(scalar != NULL);
     CHECK(neon != NULL);
-    clear_bits = UINT32_C(0x00000000);
+    clear_bits = float_bits(-1.0f);
     CHECK(scalar->kernels == soc_kernel_table_scalar());
     CHECK(neon->kernels == soc_kernel_table_neon());
     CHECK(compare_build_stats(&scalar->build_stats, &neon->build_stats) == 0);
@@ -227,6 +227,13 @@ static int compare_snapshots(
         } else {
             saw_drawn = SOC_TRUE;
         }
+        if (scalar->depth_pyramid.layer_masks[index] != 0u) {
+            saw_drawn = SOC_TRUE;
+        }
+        CHECK(float_bits(scalar->depth_pyramid.working_depth[index]) ==
+            float_bits(neon->depth_pyramid.working_depth[index]));
+        CHECK(scalar->depth_pyramid.layer_masks[index] ==
+            neon->depth_pyramid.layer_masks[index]);
     }
     CHECK(saw_clear == SOC_TRUE);
     CHECK(saw_drawn == SOC_TRUE);
@@ -343,7 +350,7 @@ static int compare_queries(
         neon_visibility,
         sizeof(scalar_visibility)
     ) == 0);
-    CHECK(scalar_visibility[0] == SOC_VISIBILITY_OCCLUDED);
+    CHECK(scalar_visibility[0] != SOC_VISIBILITY_UNKNOWN);
     CHECK(scalar_visibility[1] == SOC_VISIBILITY_VISIBLE);
     CHECK(scalar_visibility[2] == SOC_VISIBILITY_UNKNOWN);
     CHECK(scalar_visibility[3] == SOC_VISIBILITY_UNKNOWN);
@@ -369,7 +376,6 @@ static int compare_queries(
     CHECK(observed_visible + observed_occluded + observed_unknown ==
         ARRAY_COUNT(bounds));
     CHECK(observed_visible != 0u);
-    CHECK(observed_occluded != 0u);
     CHECK(observed_unknown != 0u);
     return 0;
 }

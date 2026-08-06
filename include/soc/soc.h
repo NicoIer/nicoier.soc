@@ -120,9 +120,10 @@ SOC_API soc_result SOC_CALL soc_snapshot_get_build_stats(
 );
 
 /*
- * Copies a depth Level into caller storage. Level 0 contains rasterized depth.
- * Each higher Level has ceil(previous / 2) dimensions and stores the minimum
- * of its valid Reverse-Z children.
+ * Copies a diagnostic depth Level into caller storage. Level 0 is always
+ * expanded to the context's pixel dimensions, including when the snapshot
+ * uses a masked two-layer representation internally. Each higher Level stores
+ * conservative Reverse-Z depth in the snapshot's native Hi-Z layout.
  */
 SOC_API soc_result SOC_CALL soc_snapshot_hiz_level_query(
     const soc_snapshot* snapshot,

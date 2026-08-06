@@ -1,5 +1,7 @@
 #include <soc/soc.h>
 
+#include "core/soc_pipeline.h"
+
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -212,7 +214,11 @@ static soc_result capture_frame_with_desc(
         ? 0u
         : sizeof(*groups);
 
-    result = soc_occlusion_build(context, &build_desc, &snapshot);
+    result = soc_occlusion_build_dense_internal(
+        context,
+        &build_desc,
+        &snapshot
+    );
     free(groups);
     if (result != SOC_RESULT_OK) {
         return result;
@@ -1464,7 +1470,11 @@ static int test_fullscreen_hiz_levels(float expected_depth)
     build_desc.group_count = 1u;
     build_desc.group_stride = sizeof(group);
     CHECK_RESULT(
-        soc_occlusion_build(context, &build_desc, &snapshot),
+        soc_occlusion_build_dense_internal(
+            context,
+            &build_desc,
+            &snapshot
+        ),
         SOC_RESULT_OK
     );
 
@@ -1641,7 +1651,11 @@ static int test_resize_and_empty_frame_clear(void)
             .group_stride = 0u,
         };
         CHECK_RESULT(
-            soc_occlusion_build(context, &build_desc, &snapshot),
+            soc_occlusion_build_dense_internal(
+                context,
+                &build_desc,
+                &snapshot
+            ),
             SOC_RESULT_OK
         );
     }

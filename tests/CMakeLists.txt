@@ -117,6 +117,11 @@ add_test(NAME soc.mesh COMMAND soc_test_mesh)
 
 add_executable(soc_test_depth test_depth.c)
 target_link_libraries(soc_test_depth PRIVATE soc::soc)
+target_include_directories(
+    soc_test_depth
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+)
 target_compile_features(soc_test_depth PRIVATE c_std_17)
 soc_enable_warnings(soc_test_depth)
 
@@ -128,6 +133,22 @@ target_compile_features(soc_test_visibility PRIVATE c_std_17)
 soc_enable_warnings(soc_test_visibility)
 
 add_test(NAME soc.visibility COMMAND soc_test_visibility)
+
+add_executable(soc_test_msoc test_msoc.c)
+target_link_libraries(soc_test_msoc PRIVATE soc::soc)
+if(SOC_BUILD_SHARED)
+    # The dense oracle is intentionally internal and hidden from the DSO.
+    target_sources(soc_test_msoc PRIVATE $<TARGET_OBJECTS:soc_core>)
+endif()
+target_include_directories(
+    soc_test_msoc
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+)
+target_compile_features(soc_test_msoc PRIVATE c_std_17)
+soc_enable_warnings(soc_test_msoc)
+
+add_test(NAME soc.msoc COMMAND soc_test_msoc)
 
 add_executable(soc_test_hiz test_hiz.c)
 target_link_libraries(soc_test_hiz PRIVATE soc_core)

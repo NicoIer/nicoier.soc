@@ -704,7 +704,8 @@ static uint32_t select_hiz_level(
 
 SOC_FORCE_INLINE soc_visibility test_projected_aabb_scalar_impl(
     const soc_hiz* hiz,
-    const soc_projected_aabb* projected
+    const soc_projected_aabb* projected,
+    soc_bool masked_layout
 )
 {
     const float nearest_depth = (float)projected->nearest_depth;
@@ -719,13 +720,19 @@ SOC_FORCE_INLINE soc_visibility test_projected_aabb_scalar_impl(
 
     projected_pixel_bounds(
         projected,
-        hiz->levels[0].width,
-        hiz->levels[0].height,
+        hiz->pixel_width,
+        hiz->pixel_height,
         &minimum_x,
         &maximum_x,
         &minimum_y,
         &maximum_y
     );
+    if (masked_layout == SOC_TRUE) {
+        minimum_x /= SOC_HIZ_MASK_BLOCK_WIDTH;
+        maximum_x /= SOC_HIZ_MASK_BLOCK_WIDTH;
+        minimum_y /= SOC_HIZ_MASK_BLOCK_HEIGHT;
+        maximum_y /= SOC_HIZ_MASK_BLOCK_HEIGHT;
+    }
     level = select_hiz_level(
         hiz,
         &minimum_x,
@@ -757,7 +764,35 @@ soc_visibility soc_test_projected_aabb_scalar(
     const soc_projected_aabb* projected
 )
 {
-    return test_projected_aabb_scalar_impl(hiz, projected);
+    return test_projected_aabb_scalar_impl(
+        hiz,
+        projected,
+        hiz->masked
+    );
+}
+
+soc_visibility soc_test_projected_aabb_dense_scalar(
+    const soc_hiz* hiz,
+    const soc_projected_aabb* projected
+)
+{
+    return test_projected_aabb_scalar_impl(
+        hiz,
+        projected,
+        SOC_FALSE
+    );
+}
+
+soc_visibility soc_test_projected_aabb_masked_scalar(
+    const soc_hiz* hiz,
+    const soc_projected_aabb* projected
+)
+{
+    return test_projected_aabb_scalar_impl(
+        hiz,
+        projected,
+        SOC_TRUE
+    );
 }
 
 soc_result soc_occlusion_validate_aabb_test(
@@ -777,6 +812,8 @@ soc_result soc_occlusion_validate_aabb_test(
         hiz->level_count == 0u ||
         hiz->levels[0].width == 0u ||
         hiz->levels[0].height == 0u ||
+        hiz->pixel_width == 0u ||
+        hiz->pixel_height == 0u ||
         query == NULL ||
         out_counts == NULL ||
         (query->clip_depth_range != SOC_CLIP_DEPTH_ZERO_TO_ONE &&
@@ -814,7 +851,11 @@ SOC_FORCE_INLINE soc_visibility occlusion_test_aabb_scalar_impl(
     if (projection == SOC_AABB_PROJECTION_OUTSIDE) {
         return SOC_VISIBILITY_VISIBLE;
     }
-    return test_projected_aabb_scalar_impl(hiz, &projected);
+    return test_projected_aabb_scalar_impl(
+        hiz,
+        &projected,
+        hiz->masked
+    );
 }
 
 soc_visibility soc_occlusion_test_aabb_scalar(

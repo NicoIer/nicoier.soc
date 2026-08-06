@@ -3,6 +3,7 @@
 #include "core/soc_kernels.h"
 #include "platform/soc_thread_pool.h"
 
+#include <float.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,6 +52,9 @@ static uint32_t halve_ceil(uint32_t value)
 static soc_result create_hiz(
     uint32_t width,
     uint32_t height,
+    uint32_t pixel_width,
+    uint32_t pixel_height,
+    soc_bool masked,
     soc_hiz* out_hiz
 )
 {
@@ -110,7 +114,44 @@ static soc_result create_hiz(
         return SOC_RESULT_OUT_OF_MEMORY;
     }
 
+    if (masked == SOC_TRUE) {
+        size_t level_zero_byte_count;
+
+        if (!checked_size_multiply(
+                hiz.levels[0].element_count,
+                sizeof(*hiz.working_depth),
+                &level_zero_byte_count
+            )) {
+            free(hiz.data);
+            return SOC_RESULT_OUT_OF_MEMORY;
+        }
+        hiz.working_depth = malloc(level_zero_byte_count);
+        if (hiz.working_depth == NULL) {
+            free(hiz.data);
+            return SOC_RESULT_OUT_OF_MEMORY;
+        }
+
+        if (!checked_size_multiply(
+                hiz.levels[0].element_count,
+                sizeof(*hiz.layer_masks),
+                &level_zero_byte_count
+            )) {
+            free(hiz.working_depth);
+            free(hiz.data);
+            return SOC_RESULT_OUT_OF_MEMORY;
+        }
+        hiz.layer_masks = malloc(level_zero_byte_count);
+        if (hiz.layer_masks == NULL) {
+            free(hiz.working_depth);
+            free(hiz.data);
+            return SOC_RESULT_OUT_OF_MEMORY;
+        }
+    }
+
     hiz.level_count = level;
+    hiz.pixel_width = pixel_width;
+    hiz.pixel_height = pixel_height;
+    hiz.masked = masked;
     hiz.initialized = SOC_TRUE;
     *out_hiz = hiz;
     return SOC_RESULT_OK;
@@ -129,7 +170,53 @@ soc_result soc_hiz_initialize(
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 
-    result = create_hiz(width, height, &initialized);
+    result = create_hiz(
+        width,
+        height,
+        width,
+        height,
+        SOC_FALSE,
+        &initialized
+    );
+    if (result != SOC_RESULT_OK) {
+        memset(hiz, 0, sizeof(*hiz));
+        return result;
+    }
+
+    *hiz = initialized;
+    return SOC_RESULT_OK;
+}
+
+soc_result soc_hiz_initialize_masked(
+    soc_hiz* hiz,
+    uint32_t pixel_width,
+    uint32_t pixel_height
+)
+{
+    soc_hiz initialized;
+    soc_result result;
+    uint32_t block_width;
+    uint32_t block_height;
+
+    if (hiz == NULL || pixel_width == 0u || pixel_height == 0u) {
+        if (hiz != NULL) {
+            memset(hiz, 0, sizeof(*hiz));
+        }
+        return SOC_RESULT_INVALID_ARGUMENT;
+    }
+
+    block_width = pixel_width / SOC_HIZ_MASK_BLOCK_WIDTH +
+        (pixel_width % SOC_HIZ_MASK_BLOCK_WIDTH != 0u ? 1u : 0u);
+    block_height = pixel_height / SOC_HIZ_MASK_BLOCK_HEIGHT +
+        (pixel_height % SOC_HIZ_MASK_BLOCK_HEIGHT != 0u ? 1u : 0u);
+    result = create_hiz(
+        block_width,
+        block_height,
+        pixel_width,
+        pixel_height,
+        SOC_TRUE,
+        &initialized
+    );
     if (result != SOC_RESULT_OK) {
         memset(hiz, 0, sizeof(*hiz));
         return result;
@@ -146,6 +233,8 @@ void soc_hiz_shutdown(soc_hiz* hiz)
     }
 
     free(hiz->data);
+    free(hiz->working_depth);
+    free(hiz->layer_masks);
     memset(hiz, 0, sizeof(*hiz));
 }
 
@@ -173,8 +262,19 @@ soc_result soc_hiz_clear_level_zero(soc_hiz* hiz)
     }
 
     level_zero = hiz->data + hiz->levels[0].offset;
-    for (index = 0u; index < hiz->levels[0].element_count; ++index) {
-        level_zero[index] = 0.0f;
+    if (hiz->masked == SOC_TRUE) {
+        if (hiz->working_depth == NULL || hiz->layer_masks == NULL) {
+            return SOC_RESULT_INVALID_ARGUMENT;
+        }
+        for (index = 0u; index < hiz->levels[0].element_count; ++index) {
+            level_zero[index] = -1.0f;
+            hiz->working_depth[index] = FLT_MAX;
+            hiz->layer_masks[index] = 0u;
+        }
+    } else {
+        for (index = 0u; index < hiz->levels[0].element_count; ++index) {
+            level_zero[index] = 0.0f;
+        }
     }
     return SOC_RESULT_OK;
 }

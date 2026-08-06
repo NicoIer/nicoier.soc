@@ -2,6 +2,7 @@
 
 #include "occlusion/soc_visibility.h"
 
+#include <float.h>
 #include <stddef.h>
 #include <stdlib.h>
 
@@ -90,15 +91,98 @@ soc_result soc_snapshot_hiz_level_query_internal(
     uint64_t out_depth_count
 )
 {
+    const soc_hiz* hiz;
+    soc_result result;
+
     if (snapshot == NULL) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 
-    return soc_hiz_query(
-        &snapshot->depth_pyramid,
+    hiz = &snapshot->depth_pyramid;
+    if (hiz->masked == SOC_TRUE && level == 0u) {
+        const soc_hiz_level* level_zero;
+        const float* z0;
+        uint64_t required_element_count;
+        uint32_t block_column_count;
+        uint32_t y;
+
+        if (hiz->initialized != SOC_TRUE ||
+            hiz->data == NULL ||
+            out_info == NULL ||
+            out_info->struct_size < SOC_HIZ_LEVEL_INFO_SIZE_V1 ||
+            level >= hiz->level_count) {
+            return SOC_RESULT_INVALID_ARGUMENT;
+        }
+
+        required_element_count =
+            (uint64_t)hiz->pixel_width * (uint64_t)hiz->pixel_height;
+        out_info->level = level;
+        out_info->width = hiz->pixel_width;
+        out_info->height = hiz->pixel_height;
+        out_info->required_element_count = required_element_count;
+
+        if (out_depth == NULL) {
+            return out_depth_count == 0u
+                ? SOC_RESULT_OK
+                : SOC_RESULT_INVALID_ARGUMENT;
+        }
+        if (out_depth_count < required_element_count) {
+            return SOC_RESULT_BUFFER_TOO_SMALL;
+        }
+
+        level_zero = &hiz->levels[0];
+        z0 = hiz->data + level_zero->offset;
+        block_column_count = level_zero->width;
+        for (y = 0u; y < hiz->pixel_height; ++y) {
+            const size_t block_row_offset =
+                (size_t)(y / SOC_HIZ_MASK_BLOCK_HEIGHT) *
+                block_column_count;
+            const uint32_t mask_row_offset =
+                (y % SOC_HIZ_MASK_BLOCK_HEIGHT) *
+                SOC_HIZ_MASK_BLOCK_WIDTH;
+            const size_t output_row_offset =
+                (size_t)y * hiz->pixel_width;
+            uint32_t x;
+
+            for (x = 0u; x < hiz->pixel_width; ++x) {
+                const size_t block_index = block_row_offset +
+                    x / SOC_HIZ_MASK_BLOCK_WIDTH;
+                const uint32_t mask_bit = mask_row_offset +
+                    x % SOC_HIZ_MASK_BLOCK_WIDTH;
+                float depth =
+                    (hiz->layer_masks[block_index] &
+                        (UINT32_C(1) << mask_bit)) != 0u
+                        ? hiz->working_depth[block_index]
+                        : z0[block_index];
+
+                if (depth == -1.0f || depth == FLT_MAX) {
+                    depth = 0.0f;
+                }
+                out_depth[output_row_offset + x] = depth;
+            }
+        }
+        return SOC_RESULT_OK;
+    }
+
+    result = soc_hiz_query(
+        hiz,
         level,
         out_info,
         out_depth,
         out_depth_count
     );
+    if (result == SOC_RESULT_OK &&
+        hiz->masked == SOC_TRUE &&
+        out_depth != NULL) {
+        uint64_t index;
+
+        for (index = 0u;
+             index < out_info->required_element_count;
+             ++index) {
+            if (out_depth[index] == -1.0f) {
+                out_depth[index] = 0.0f;
+            }
+        }
+    }
+    return result;
 }

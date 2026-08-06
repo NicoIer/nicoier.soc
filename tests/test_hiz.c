@@ -1,8 +1,10 @@
 #include "occlusion/soc_hiz.h"
+#include "occlusion/soc_visibility.h"
 
 #include "core/soc_kernels.h"
 #include "platform/soc_thread_pool.h"
 
+#include <float.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -457,6 +459,84 @@ static int test_layout_reinitialization(void)
     return 0;
 }
 
+static int test_masked_layout_clear_and_build(void)
+{
+    const float level_zero[] = {
+        0.90f, 0.80f, 0.70f,
+        0.60f, 0.50f, 0.40f,
+        0.30f, 0.20f, 0.10f,
+    };
+    const float level_one[] = {
+        0.50f, 0.40f,
+        0.20f, 0.10f,
+    };
+    const float level_two[] = {0.10f};
+    soc_projected_aabb projected = {
+        .minimum_ndc_x = 0.10,
+        .maximum_ndc_x = 0.40,
+        .minimum_ndc_y = -0.40,
+        .maximum_ndc_y = -0.20,
+        .nearest_depth = 0.50,
+    };
+    soc_hiz hiz = {0};
+    size_t index;
+
+    CHECK_RESULT(
+        soc_hiz_initialize_masked(&hiz, 17u, 9u),
+        SOC_RESULT_OK
+    );
+    CHECK(hiz.masked == SOC_TRUE);
+    CHECK(hiz.pixel_width == 17u);
+    CHECK(hiz.pixel_height == 9u);
+    CHECK(hiz.levels[0].width == 3u);
+    CHECK(hiz.levels[0].height == 3u);
+    CHECK(hiz.working_depth != NULL);
+    CHECK(hiz.layer_masks != NULL);
+    CHECK_RESULT(soc_hiz_clear_level_zero(&hiz), SOC_RESULT_OK);
+    for (index = 0u; index < hiz.levels[0].element_count; ++index) {
+        CHECK(hiz.data[index] == -1.0f);
+        CHECK(hiz.working_depth[index] == FLT_MAX);
+        CHECK(hiz.layer_masks[index] == 0u);
+    }
+
+    /* Pixels 9-11 by 5-6 map only to masked block (1, 1). */
+    hiz.data[4] = 0.80f;
+    CHECK(
+        soc_test_projected_aabb_scalar(&hiz, &projected) ==
+            SOC_VISIBILITY_OCCLUDED
+    );
+    projected.minimum_ndc_x = -0.20;
+    CHECK(
+        soc_test_projected_aabb_scalar(&hiz, &projected) ==
+            SOC_VISIBILITY_VISIBLE
+    );
+
+    CHECK(set_level_zero(&hiz, level_zero, ARRAY_COUNT(level_zero)) == 0);
+    CHECK_RESULT(soc_hiz_build(&hiz), SOC_RESULT_OK);
+    CHECK(check_level(
+        &hiz,
+        1u,
+        2u,
+        2u,
+        level_one,
+        ARRAY_COUNT(level_one)
+    ) == 0);
+    CHECK(check_level(
+        &hiz,
+        2u,
+        1u,
+        1u,
+        level_two,
+        ARRAY_COUNT(level_two)
+    ) == 0);
+
+    soc_hiz_shutdown(&hiz);
+    CHECK(hiz.data == NULL);
+    CHECK(hiz.working_depth == NULL);
+    CHECK(hiz.layer_masks == NULL);
+    return 0;
+}
+
 static int compare_split_band_pyramid(
     uint32_t width,
     uint32_t height
@@ -828,6 +908,9 @@ int main(void)
         return 1;
     }
     if (test_layout_reinitialization() != 0) {
+        return 1;
+    }
+    if (test_masked_layout_clear_and_build() != 0) {
         return 1;
     }
     if (test_split_band_build_matches_serial() != 0) {

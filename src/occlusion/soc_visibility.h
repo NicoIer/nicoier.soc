@@ -82,6 +82,16 @@ soc_visibility soc_test_projected_aabb_scalar(
     const soc_projected_aabb* projected
 );
 
+soc_visibility soc_test_projected_aabb_dense_scalar(
+    const soc_hiz* hiz,
+    const soc_projected_aabb* projected
+);
+
+soc_visibility soc_test_projected_aabb_masked_scalar(
+    const soc_hiz* hiz,
+    const soc_projected_aabb* projected
+);
+
 soc_visibility soc_occlusion_test_aabb_scalar(
     const soc_hiz* hiz,
     const soc_aabb_query_context* query,
