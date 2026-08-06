@@ -35,6 +35,7 @@ set_target_properties(
 soc_enable_warnings(soc_core)
 
 if(MSVC)
+    target_compile_options(soc_core PUBLIC /experimental:c11atomics)
     set_source_files_properties(
         core/soc_kernels_neon.c
         core/soc_kernels_transform.c
