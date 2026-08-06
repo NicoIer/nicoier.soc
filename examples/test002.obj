@@ -1,10 +1,9 @@
-# SOC benchmark OBJ v1
+# SOC benchmark OBJ v2
 # Geometry uses Unity world coordinates: +X right, +Y up, +Z forward, units in meters.
 # Mesh transforms are baked into vertices. Faces are triangles with 1-based indices.
 # Matrix values are column-major and map directly to soc_mat4 col0..col3.
 # camera_clip_from_world_col_major is ready for soc_frame_desc.clip_from_world.
 # soc_clip_depth_range negative_one_to_one
-# soc_depth_direction forward
 # soc_front_face clockwise
 # soc_mesh_two_sided 1
 # camera_position_world 13.7822 11.952486 -7.59265947
@@ -17,8 +16,8 @@
 # raster_width 312
 # raster_height 144
 # camera_world_to_camera_col_major 0.58963114 -0.5683751 0.573833466 0 1.1920929E-07 0.7104778 0.703719556 0 0.8076726 0.414934933 -0.418919921 0 -1.99403238 2.49194241 -19.5006027 1
-# camera_projection_col_major 0.8000919 0 0 0 0 1.73205078 0 0 0 0 -1.0006001 -1 0 0 -0.60018003 0
-# camera_clip_from_world_col_major 0.4717591 -0.9844546 -0.5741778 -0.573833466 9.537839E-08 1.23058367 -0.704141855 -0.703719556 0.646212339 0.718688369 0.4191713 0.418919921 -1.59540915 4.31617069 18.9121246 19.5006027
+# camera_projection_col_major 0.8000919 0 0 0 0 1.73205078 0 0 0 0 1.0006001 -1 0 0 0.60018003 0
+# camera_clip_from_world_col_major 0.4717591 -0.9844546 0.5741778 -0.573833466 9.537839E-08 1.23058367 0.704141855 -0.703719556 0.646212339 0.718688369 -0.4191713 0.418919921 -1.59540915 4.31617069 -18.9121246 19.5006027
 
 o 0000_Arch
 # source_mesh pb_Mesh55144

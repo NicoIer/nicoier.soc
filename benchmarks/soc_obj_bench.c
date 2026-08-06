@@ -29,17 +29,15 @@
 #define METADATA_WIDTH_SEEN (1u << 1u)
 #define METADATA_HEIGHT_SEEN (1u << 2u)
 #define METADATA_CLIP_RANGE_SEEN (1u << 3u)
-#define METADATA_DEPTH_DIRECTION_SEEN (1u << 4u)
-#define METADATA_FRONT_FACE_SEEN (1u << 5u)
-#define METADATA_TWO_SIDED_SEEN (1u << 6u)
-#define METADATA_MATRIX_SEEN (1u << 7u)
-#define METADATA_REQUIRED_MASK ((1u << 8u) - 1u)
+#define METADATA_FRONT_FACE_SEEN (1u << 4u)
+#define METADATA_TWO_SIDED_SEEN (1u << 5u)
+#define METADATA_MATRIX_SEEN (1u << 6u)
+#define METADATA_REQUIRED_MASK ((1u << 7u) - 1u)
 
 typedef struct obj_metadata {
     uint32_t width;
     uint32_t height;
     soc_clip_depth_range clip_depth_range;
-    soc_depth_direction depth_direction;
     soc_front_face front_face;
     uint32_t mesh_flags;
     soc_mat4 clip_from_world;
@@ -63,7 +61,9 @@ static void print_usage(FILE* stream, const char* executable)
         stream,
         "Usage: %s --input benchmark.obj [--samples N] [--sample-ms N]\n"
         "\n"
-        "The OBJ must contain the '# SOC benchmark OBJ v1' metadata header.\n"
+        "The OBJ must contain the '# SOC benchmark OBJ v2' metadata header.\n"
+        "Its camera matrix must use reversed Z (near = 1; far = 0 for ZO\n"
+        "or -1 for negative-one-to-one clip depth).\n"
         "Each timed operation builds a complete immutable snapshot, including\n"
         "Level 0 clear, rasterization, and Hi-Z construction. Parsing, mesh and\n"
         "context creation, readback, validation, and destruction are outside timing.\n",
@@ -247,7 +247,7 @@ static int load_metadata(
     while (fgets(line, sizeof(line), input) != NULL) {
         const char* value;
 
-        if (strncmp(line, "# SOC benchmark OBJ v1", 22u) == 0) {
+        if (strncmp(line, "# SOC benchmark OBJ v2", 22u) == 0) {
             seen |= METADATA_MAGIC_SEEN;
         } else if ((value = metadata_value(line, "# raster_width ")) != NULL) {
             if (!parse_uint32(value, &out_metadata->width)) {
@@ -275,19 +275,6 @@ static int load_metadata(
                 goto invalid_metadata;
             }
             seen |= METADATA_CLIP_RANGE_SEEN;
-        } else if ((value = metadata_value(
-                        line,
-                        "# soc_depth_direction "
-                    )) != NULL) {
-            if (token_equals(value, "forward")) {
-                out_metadata->depth_direction = SOC_DEPTH_FORWARD;
-            } else if (token_equals(value, "reversed")) {
-                out_metadata->depth_direction = SOC_DEPTH_REVERSED;
-            } else {
-                invalid_field = "soc_depth_direction";
-                goto invalid_metadata;
-            }
-            seen |= METADATA_DEPTH_DIRECTION_SEEN;
         } else if ((value = metadata_value(line, "# soc_front_face ")) != NULL) {
             if (token_equals(value, "counter_clockwise") ||
                 token_equals(value, "ccw")) {
@@ -541,8 +528,7 @@ static int capture_validation(
     soc_hiz_level_info info = {.struct_size = sizeof(info)};
     soc_snapshot* snapshot = NULL;
     float* depth = NULL;
-    const float clear_depth =
-        frame_desc->depth_direction == SOC_DEPTH_REVERSED ? 0.0f : 1.0f;
+    const float clear_depth = 0.0f;
     soc_result result;
     size_t pixel;
 
@@ -715,7 +701,6 @@ int main(int argc, char** argv)
         .struct_size = sizeof(frame_desc),
         .clip_from_world = metadata.clip_from_world,
         .clip_depth_range = metadata.clip_depth_range,
-        .depth_direction = metadata.depth_direction,
         .front_face = metadata.front_face,
         .flags = SOC_FRAME_FLAG_NONE,
     };

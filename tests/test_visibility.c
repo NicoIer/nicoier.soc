@@ -51,7 +51,7 @@ static soc_mat4 identity_matrix(void)
     return identity;
 }
 
-static soc_frame_desc make_frame_desc(soc_depth_direction depth_direction)
+static soc_frame_desc make_frame_desc(void)
 {
     const soc_frame_desc desc = {
         .struct_size = sizeof(soc_frame_desc),
@@ -62,7 +62,6 @@ static soc_frame_desc make_frame_desc(soc_depth_direction depth_direction)
             .col3 = {0.0f, 0.0f, 0.0f, 1.0f},
         },
         .clip_depth_range = SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        .depth_direction = depth_direction,
         .front_face = SOC_FRONT_FACE_CCW,
         .flags = SOC_FRAME_FLAG_NONE,
     };
@@ -70,30 +69,24 @@ static soc_frame_desc make_frame_desc(soc_depth_direction depth_direction)
 }
 
 static soc_frame_desc make_perspective_frame_desc(
-    soc_clip_depth_range clip_depth_range,
-    soc_depth_direction depth_direction
+    soc_clip_depth_range clip_depth_range
 )
 {
-    soc_frame_desc desc = make_frame_desc(depth_direction);
+    soc_frame_desc desc = make_frame_desc();
 
     /*
-     * All four conventions use w = world z and a world-space near plane at
-     * z = 1. Forward depth maps z = 1 to zero and infinity to one; reversed
-     * depth maps z = 1 to one and infinity to zero.
+     * Both clip ranges use w = world z and a world-space near plane at z = 1.
+     * Reverse-Z maps z = 1 to one and infinity to zero.
      */
     desc.clip_depth_range = clip_depth_range;
     desc.clip_from_world.col2.w = 1.0f;
     desc.clip_from_world.col3.w = 0.0f;
     if (clip_depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE) {
-        desc.clip_from_world.col2.z =
-            depth_direction == SOC_DEPTH_FORWARD ? 1.0f : 0.0f;
-        desc.clip_from_world.col3.z =
-            depth_direction == SOC_DEPTH_FORWARD ? -1.0f : 1.0f;
+        desc.clip_from_world.col2.z = 0.0f;
+        desc.clip_from_world.col3.z = 1.0f;
     } else {
-        desc.clip_from_world.col2.z =
-            depth_direction == SOC_DEPTH_FORWARD ? 1.0f : -1.0f;
-        desc.clip_from_world.col3.z =
-            depth_direction == SOC_DEPTH_FORWARD ? -2.0f : 2.0f;
+        desc.clip_from_world.col2.z = -1.0f;
+        desc.clip_from_world.col3.z = 2.0f;
     }
     return desc;
 }
@@ -251,7 +244,7 @@ static soc_result build_single_group_snapshot(
 
 static int test_empty_frame_and_fail_open_inputs(void)
 {
-    soc_frame_desc frame_desc = make_frame_desc(SOC_DEPTH_FORWARD);
+    soc_frame_desc frame_desc = make_frame_desc();
     soc_aabb bounds[] = {
         make_aabb(-0.25f, -0.25f, 0.20f, 0.25f, 0.25f, 0.30f),
         make_aabb(0.25f, -0.25f, 0.20f, -0.25f, 0.25f, 0.30f),
@@ -266,11 +259,11 @@ static int test_empty_frame_and_fail_open_inputs(void)
         SOC_VISIBILITY_VISIBLE,
         SOC_VISIBILITY_UNKNOWN,
         SOC_VISIBILITY_UNKNOWN,
-        SOC_VISIBILITY_UNKNOWN,
-        SOC_VISIBILITY_UNKNOWN,
         SOC_VISIBILITY_VISIBLE,
         SOC_VISIBILITY_VISIBLE,
-        SOC_VISIBILITY_UNKNOWN,
+        SOC_VISIBILITY_VISIBLE,
+        SOC_VISIBILITY_VISIBLE,
+        SOC_VISIBILITY_VISIBLE,
     };
     soc_visibility actual[ARRAY_COUNT(bounds)];
     const soc_aabb finite_bounds =
@@ -336,9 +329,9 @@ static int test_empty_frame_and_fail_open_inputs(void)
     CHECK(check_query_stats(
         &query_stats,
         ARRAY_COUNT(bounds),
-        3u,
+        6u,
         0u,
-        5u
+        2u
     ) == 0);
     soc_snapshot_destroy(snapshot);
     snapshot = NULL;
@@ -372,7 +365,7 @@ static int test_empty_frame_and_fail_open_inputs(void)
      * projection conservatively. A negative safety margin could otherwise
      * invert the pixel bounds and incorrectly report occlusion.
      */
-    frame_desc = make_frame_desc(SOC_DEPTH_FORWARD);
+    frame_desc = make_frame_desc();
     frame_desc.clip_from_world.col2.z = 0.0f;
     frame_desc.clip_from_world.col3.z = 5.0e-16f;
     frame_desc.clip_from_world.col2.w = 0.0f;
@@ -396,7 +389,7 @@ static int test_empty_frame_and_fail_open_inputs(void)
     soc_snapshot_destroy(snapshot);
     snapshot = NULL;
 
-    frame_desc = make_frame_desc(SOC_DEPTH_REVERSED);
+    frame_desc = make_frame_desc();
     CHECK_RESULT(
         build_empty_snapshot(context, &frame_desc, &snapshot),
         SOC_RESULT_OK
@@ -419,10 +412,7 @@ static int test_empty_frame_and_fail_open_inputs(void)
     return 0;
 }
 
-static int test_fullscreen_depth_direction(
-    soc_depth_direction depth_direction,
-    soc_clip_depth_range clip_depth_range
-)
+static int test_fullscreen_reverse_z(soc_clip_depth_range clip_depth_range)
 {
     const float occluder_depth =
         clip_depth_range == SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE
@@ -434,7 +424,7 @@ static int test_fullscreen_depth_direction(
         -1.0f,  3.0f, occluder_depth,
     };
     const soc_mat4 identity = identity_matrix();
-    soc_frame_desc frame_desc = make_frame_desc(depth_direction);
+    soc_frame_desc frame_desc = make_frame_desc();
     soc_aabb first_batch[3];
     soc_aabb second_batch[2];
     const soc_visibility first_expected[] = {
@@ -459,30 +449,13 @@ static int test_fullscreen_depth_direction(
     soc_snapshot* snapshot = NULL;
 
     frame_desc.clip_depth_range = clip_depth_range;
-    if (clip_depth_range == SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE &&
-        depth_direction == SOC_DEPTH_FORWARD) {
-        first_batch[0] =
-            make_aabb(-0.20f, -0.20f, -0.60f, 0.20f, 0.20f, -0.40f);
-        first_batch[1] =
-            make_aabb(-0.55f, -0.55f, 0.00f, 0.55f, 0.55f, 0.30f);
-        first_batch[2] =
-            make_aabb(-0.85f, -0.85f, 0.40f, 0.85f, 0.85f, 0.60f);
-    } else if (
-        clip_depth_range == SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE
-    ) {
+    if (clip_depth_range == SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) {
         first_batch[0] =
             make_aabb(-0.20f, -0.20f, 0.40f, 0.20f, 0.20f, 0.60f);
         first_batch[1] =
             make_aabb(-0.55f, -0.55f, -0.30f, 0.55f, 0.55f, 0.00f);
         first_batch[2] =
             make_aabb(-0.85f, -0.85f, -0.60f, 0.85f, 0.85f, -0.40f);
-    } else if (depth_direction == SOC_DEPTH_FORWARD) {
-        first_batch[0] =
-            make_aabb(-0.20f, -0.20f, 0.20f, 0.20f, 0.20f, 0.30f);
-        first_batch[1] =
-            make_aabb(-0.55f, -0.55f, 0.50f, 0.55f, 0.55f, 0.65f);
-        first_batch[2] =
-            make_aabb(-0.85f, -0.85f, 0.70f, 0.85f, 0.85f, 0.80f);
     } else {
         first_batch[0] =
             make_aabb(-0.20f, -0.20f, 0.70f, 0.20f, 0.20f, 0.80f);
@@ -550,33 +523,17 @@ static int test_fullscreen_depth_direction(
     return 0;
 }
 
-static int test_forward_and_reversed_fullscreen_occlusion(void)
+static int test_zero_to_one_reverse_z_fullscreen_occlusion(void)
 {
-    if (test_fullscreen_depth_direction(
-            SOC_DEPTH_FORWARD,
-            SOC_CLIP_DEPTH_ZERO_TO_ONE
-        ) != 0) {
-        return 1;
-    }
-    if (test_fullscreen_depth_direction(
-            SOC_DEPTH_REVERSED,
-            SOC_CLIP_DEPTH_ZERO_TO_ONE
-        ) != 0) {
+    if (test_fullscreen_reverse_z(SOC_CLIP_DEPTH_ZERO_TO_ONE) != 0) {
         return 1;
     }
     return 0;
 }
 
-static int test_negative_one_to_one_depth_mapping(void)
+static int test_negative_one_to_one_reverse_z_depth_mapping(void)
 {
-    if (test_fullscreen_depth_direction(
-            SOC_DEPTH_FORWARD,
-            SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE
-        ) != 0) {
-        return 1;
-    }
-    if (test_fullscreen_depth_direction(
-            SOC_DEPTH_REVERSED,
+    if (test_fullscreen_reverse_z(
             SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE
         ) != 0) {
         return 1;
@@ -585,8 +542,7 @@ static int test_negative_one_to_one_depth_mapping(void)
 }
 
 static int test_perspective_convention_batch(
-    soc_clip_depth_range clip_depth_range,
-    soc_depth_direction depth_direction
+    soc_clip_depth_range clip_depth_range
 )
 {
     const float positions[] = {
@@ -595,10 +551,8 @@ static int test_perspective_convention_batch(
         -2.0f,  6.0f, 2.0f,
     };
     const soc_mat4 identity = identity_matrix();
-    const soc_frame_desc frame_desc = make_perspective_frame_desc(
-        clip_depth_range,
-        depth_direction
-    );
+    const soc_frame_desc frame_desc =
+        make_perspective_frame_desc(clip_depth_range);
     soc_aabb bounds[] = {
         make_aabb(-0.20f, -0.20f, 1.20f, 0.20f, 0.20f, 1.50f),
         make_aabb(-0.80f, -0.80f, 3.00f, 0.80f, 0.80f, 4.00f),
@@ -678,31 +632,21 @@ static int test_perspective_convention_batch(
     return 0;
 }
 
-static int test_perspective_projection_conventions(void)
+static int test_perspective_reverse_z_clip_ranges(void)
 {
     const soc_clip_depth_range clip_depth_ranges[] = {
         SOC_CLIP_DEPTH_ZERO_TO_ONE,
         SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE,
     };
-    const soc_depth_direction depth_directions[] = {
-        SOC_DEPTH_FORWARD,
-        SOC_DEPTH_REVERSED,
-    };
     size_t range_index;
-    size_t direction_index;
 
     for (range_index = 0u;
          range_index < ARRAY_COUNT(clip_depth_ranges);
          ++range_index) {
-        for (direction_index = 0u;
-             direction_index < ARRAY_COUNT(depth_directions);
-             ++direction_index) {
-            if (test_perspective_convention_batch(
-                    clip_depth_ranges[range_index],
-                    depth_directions[direction_index]
-                ) != 0) {
-                return 1;
-            }
+        if (test_perspective_convention_batch(
+                clip_depth_ranges[range_index]
+            ) != 0) {
+            return 1;
         }
     }
     return 0;
@@ -882,8 +826,7 @@ static soc_visibility expected_deterministic_visibility(
  * stats-free calls currently dispatch through the same library path.
  */
 static int test_bulk_query_consistency_for_convention(
-    soc_clip_depth_range clip_depth_range,
-    soc_depth_direction depth_direction
+    soc_clip_depth_range clip_depth_range
 )
 {
     const float positions[] = {
@@ -892,10 +835,8 @@ static int test_bulk_query_consistency_for_convention(
         -2.0f,  6.0f, 2.0f,
     };
     const soc_mat4 identity = identity_matrix();
-    const soc_frame_desc frame_desc = make_perspective_frame_desc(
-        clip_depth_range,
-        depth_direction
-    );
+    const soc_frame_desc frame_desc =
+        make_perspective_frame_desc(clip_depth_range);
     soc_aabb bounds[RANDOM_AABB_COUNT];
     soc_visibility bulk[RANDOM_AABB_COUNT] = {0};
     soc_visibility repeated[RANDOM_AABB_COUNT] = {0};
@@ -1003,12 +944,11 @@ static int test_bulk_query_consistency_for_convention(
             fprintf(
                 stderr,
                 "random visibility[%u] was %u, expected %u "
-                "(clip range %u, depth direction %u)\n",
+                "(clip range %u)\n",
                 index,
                 (unsigned int)bulk[index],
                 (unsigned int)expected,
-                (unsigned int)clip_depth_range,
-                (unsigned int)depth_direction
+                (unsigned int)clip_depth_range
             );
             return 1;
         }
@@ -1094,25 +1034,15 @@ static int test_deterministic_bulk_query_consistency_and_conservatism(void)
         SOC_CLIP_DEPTH_ZERO_TO_ONE,
         SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE,
     };
-    const soc_depth_direction depth_directions[] = {
-        SOC_DEPTH_FORWARD,
-        SOC_DEPTH_REVERSED,
-    };
     size_t range_index;
-    size_t direction_index;
 
     for (range_index = 0u;
          range_index < ARRAY_COUNT(clip_depth_ranges);
          ++range_index) {
-        for (direction_index = 0u;
-             direction_index < ARRAY_COUNT(depth_directions);
-             ++direction_index) {
-            if (test_bulk_query_consistency_for_convention(
-                    clip_depth_ranges[range_index],
-                    depth_directions[direction_index]
-                ) != 0) {
-                return 1;
-            }
+        if (test_bulk_query_consistency_for_convention(
+                clip_depth_ranges[range_index]
+            ) != 0) {
+            return 1;
         }
     }
     return 0;
@@ -1121,28 +1051,28 @@ static int test_deterministic_bulk_query_consistency_and_conservatism(void)
 static int test_partial_coverage_and_offscreen_are_conservative(void)
 {
     const float positions[] = {
-        -0.80f, -0.80f, 0.35f,
-         0.80f, -0.80f, 0.35f,
-         0.00f,  0.80f, 0.35f,
+        -0.80f, -0.80f, 0.65f,
+         0.80f, -0.80f, 0.65f,
+         0.00f,  0.80f, 0.65f,
     };
     const soc_mat4 identity = identity_matrix();
-    const soc_frame_desc frame_desc = make_frame_desc(SOC_DEPTH_FORWARD);
+    const soc_frame_desc frame_desc = make_frame_desc();
     const soc_aabb bounds[] = {
         {
-            .min = {-0.10f, -0.10f, 0.70f},
-            .max = {0.10f, 0.10f, 0.80f},
+            .min = {-0.10f, -0.10f, 0.20f},
+            .max = {0.10f, 0.10f, 0.30f},
         },
         {
-            .min = {-0.60f, -0.60f, 0.70f},
-            .max = {0.60f, 0.60f, 0.80f},
+            .min = {-0.60f, -0.60f, 0.20f},
+            .max = {0.60f, 0.60f, 0.30f},
         },
         {
-            .min = {0.90f, -0.20f, 0.70f},
-            .max = {1.20f, 0.20f, 0.80f},
+            .min = {0.90f, -0.20f, 0.20f},
+            .max = {1.20f, 0.20f, 0.30f},
         },
         {
-            .min = {1.20f, -0.20f, 0.70f},
-            .max = {1.50f, 0.20f, 0.80f},
+            .min = {1.20f, -0.20f, 0.20f},
+            .max = {1.50f, 0.20f, 0.30f},
         },
     };
     const soc_visibility expected[] = {
@@ -1208,13 +1138,13 @@ int main(void)
     if (test_empty_frame_and_fail_open_inputs() != 0) {
         return 1;
     }
-    if (test_forward_and_reversed_fullscreen_occlusion() != 0) {
+    if (test_zero_to_one_reverse_z_fullscreen_occlusion() != 0) {
         return 1;
     }
-    if (test_negative_one_to_one_depth_mapping() != 0) {
+    if (test_negative_one_to_one_reverse_z_depth_mapping() != 0) {
         return 1;
     }
-    if (test_perspective_projection_conventions() != 0) {
+    if (test_perspective_reverse_z_clip_ranges() != 0) {
         return 1;
     }
     if (test_deterministic_bulk_query_consistency_and_conservatism() != 0) {

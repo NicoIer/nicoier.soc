@@ -251,16 +251,7 @@ void soc_aabb_query_context_initialize(
         .clip_planes = {{0.0, 0.0, 0.0, 0.0}},
         .w_plane = {0.0, 0.0, 0.0, 0.0},
         .transform_error_scale = 0.0,
-        .near_clip_plane_index =
-            frame->depth_direction == SOC_DEPTH_REVERSED
-            ? 5u
-            : 4u,
-        .near_clip_plane_bit =
-            frame->depth_direction == SOC_DEPTH_REVERSED
-            ? SOC_CLIP_MAXIMUM_Z_BIT
-            : SOC_CLIP_MINIMUM_Z_BIT,
         .clip_depth_range = frame->clip_depth_range,
-        .depth_direction = frame->depth_direction,
     };
     double maximum_row_scale = clip_row_scale(
         query.col0.x,
@@ -441,7 +432,7 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
     }
     minimum_w = minimum_plane_distance(&query->w_plane, bounds);
     minimum_near_clip_distance = minimum_plane_distance(
-        &query->clip_planes[query->near_clip_plane_index],
+        &query->clip_planes[SOC_VISIBILITY_NEAR_CLIP_PLANE_INDEX],
         bounds
     );
     if (minimum_w < -clip_error_margin) {
@@ -479,7 +470,6 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
             soc_visibility_clip_vertex* clip = &clip_corners[corner];
             double minimum_z_distance;
             double maximum_z_distance;
-            double near_clip_distance;
 
             *clip = transform_point(query, x, y, z);
             minimum_z_distance =
@@ -487,10 +477,6 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
                     ? clip->z
                     : clip->z + clip->w;
             maximum_z_distance = clip->w - clip->z;
-            near_clip_distance =
-                query->near_clip_plane_bit == SOC_CLIP_MAXIMUM_Z_BIT
-                    ? maximum_z_distance
-                    : minimum_z_distance;
 
             if (clip->x + clip->w >= 0.0) {
                 all_outside_mask &= ~(UINT32_C(1) << 0u);
@@ -513,7 +499,7 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
             if (clip->w <= 0.0) {
                 has_nonpositive_w = SOC_TRUE;
             }
-            if (near_clip_distance < 0.0) {
+            if (maximum_z_distance < 0.0) {
                 has_corner_outside_near_clip_plane = SOC_TRUE;
             }
             minimum_w = clip->w < minimum_w ? clip->w : minimum_w;
@@ -524,7 +510,7 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
         return SOC_AABB_PROJECTION_UNKNOWN;
     }
     if (has_corner_outside_near_clip_plane == SOC_TRUE &&
-        (all_outside_mask & query->near_clip_plane_bit) == 0u) {
+        (all_outside_mask & SOC_CLIP_MAXIMUM_Z_BIT) == 0u) {
         return SOC_AABB_PROJECTION_UNKNOWN;
     }
     if (all_outside_mask != 0u) {
@@ -577,10 +563,7 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
     out_projected->maximum_ndc_x = -DBL_MAX;
     out_projected->minimum_ndc_y = DBL_MAX;
     out_projected->maximum_ndc_y = -DBL_MAX;
-    out_projected->nearest_depth =
-        query->depth_direction == SOC_DEPTH_REVERSED
-            ? -DBL_MAX
-            : DBL_MAX;
+    out_projected->nearest_depth = -DBL_MAX;
 
     for (corner = 0u; corner < SOC_AABB_CORNER_COUNT; ++corner) {
         const soc_visibility_clip_vertex* clip = &clip_corners[corner];
@@ -607,11 +590,7 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
         }
 
         depth = clamp_double(depth, 0.0, 1.0);
-        if (query->depth_direction == SOC_DEPTH_REVERSED) {
-            if (depth > out_projected->nearest_depth) {
-                out_projected->nearest_depth = depth;
-            }
-        } else if (depth < out_projected->nearest_depth) {
+        if (depth > out_projected->nearest_depth) {
             out_projected->nearest_depth = depth;
         }
     }
@@ -651,9 +630,7 @@ SOC_FORCE_INLINE soc_aabb_projection project_aabb_scalar_impl(
         1.0
     );
     out_projected->nearest_depth = clamp_double(
-        query->depth_direction == SOC_DEPTH_REVERSED
-            ? out_projected->nearest_depth + projection_margin
-            : out_projected->nearest_depth - projection_margin,
+        out_projected->nearest_depth + projection_margin,
         0.0,
         1.0
     );
@@ -727,7 +704,6 @@ static uint32_t select_hiz_level(
 
 SOC_FORCE_INLINE soc_visibility test_projected_aabb_scalar_impl(
     const soc_hiz* hiz,
-    const soc_aabb_query_context* query,
     const soc_projected_aabb* projected
 )
 {
@@ -766,16 +742,8 @@ SOC_FORCE_INLINE soc_visibility test_projected_aabb_scalar_impl(
         for (x = minimum_x; x <= maximum_x; ++x) {
             const float stored_depth =
                 depth[(size_t)y * metadata->width + x];
-            const soc_bool occluded =
-                query->depth_direction == SOC_DEPTH_REVERSED
-                    ? (nearest_depth < stored_depth
-                        ? SOC_TRUE
-                        : SOC_FALSE)
-                    : (nearest_depth > stored_depth
-                        ? SOC_TRUE
-                        : SOC_FALSE);
 
-            if (occluded != SOC_TRUE) {
+            if (!(nearest_depth < stored_depth)) {
                 return SOC_VISIBILITY_VISIBLE;
             }
         }
@@ -786,11 +754,10 @@ SOC_FORCE_INLINE soc_visibility test_projected_aabb_scalar_impl(
 
 soc_visibility soc_test_projected_aabb_scalar(
     const soc_hiz* hiz,
-    const soc_aabb_query_context* query,
     const soc_projected_aabb* projected
 )
 {
-    return test_projected_aabb_scalar_impl(hiz, query, projected);
+    return test_projected_aabb_scalar_impl(hiz, projected);
 }
 
 soc_result soc_occlusion_validate_aabb_test(
@@ -815,9 +782,7 @@ soc_result soc_occlusion_validate_aabb_test(
         (size_t)bounds_count > SIZE_MAX / sizeof(*world_bounds) ||
         (query->clip_depth_range != SOC_CLIP_DEPTH_ZERO_TO_ONE &&
             query->clip_depth_range !=
-                SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) ||
-        (query->depth_direction != SOC_DEPTH_FORWARD &&
-            query->depth_direction != SOC_DEPTH_REVERSED)) {
+                SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE)) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 
@@ -850,7 +815,7 @@ SOC_FORCE_INLINE soc_visibility occlusion_test_aabb_scalar_impl(
     if (projection == SOC_AABB_PROJECTION_OUTSIDE) {
         return SOC_VISIBILITY_VISIBLE;
     }
-    return test_projected_aabb_scalar_impl(hiz, query, &projected);
+    return test_projected_aabb_scalar_impl(hiz, &projected);
 }
 
 soc_visibility soc_occlusion_test_aabb_scalar(

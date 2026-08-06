@@ -200,7 +200,7 @@ static soc_result create_tiled_hot_mesh(
     return soc_mesh_create(context, &desc, out_mesh);
 }
 
-static soc_frame_desc make_frame(soc_depth_direction depth_direction)
+static soc_frame_desc make_frame(void)
 {
     const soc_frame_desc frame = {
         .struct_size = sizeof(soc_frame_desc),
@@ -211,7 +211,6 @@ static soc_frame_desc make_frame(soc_depth_direction depth_direction)
             .col3 = {0.0f, 0.0f, 0.0f, 1.0f},
         },
         .clip_depth_range = SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        .depth_direction = depth_direction,
         .front_face = SOC_FRONT_FACE_CCW,
         .flags = SOC_FRAME_FLAG_NONE,
     };
@@ -329,10 +328,10 @@ static int compare_snapshots(
     return 0;
 }
 
-static int test_worker_results_match(soc_depth_direction depth_direction)
+static int test_worker_results_match(void)
 {
     soc_mat4 transforms[16];
-    const soc_frame_desc frame = make_frame(depth_direction);
+    const soc_frame_desc frame = make_frame();
     soc_occluder_group single_group;
     soc_occluder_group parallel_group;
     soc_occlusion_build_desc single_desc;
@@ -403,12 +402,10 @@ static int test_worker_results_match(soc_depth_direction depth_direction)
     return 0;
 }
 
-static int test_chunked_mesh_results_match(
-    soc_depth_direction depth_direction
-)
+static int test_chunked_mesh_results_match(void)
 {
     const soc_mat4 transform = identity_matrix();
-    const soc_frame_desc frame = make_frame(depth_direction);
+    const soc_frame_desc frame = make_frame();
     soc_occluder_group single_group;
     soc_occluder_group parallel_group;
     soc_occlusion_build_desc single_desc;
@@ -484,16 +481,14 @@ static int test_chunked_mesh_results_match(
     return 0;
 }
 
-static int test_tiled_hot_merge_results_match(
-    soc_depth_direction depth_direction
-)
+static int test_tiled_hot_merge_results_match(void)
 {
     enum {
         HOT_TRIANGLE_COUNT = 1100,
         TRIANGLE_COUNT = HOT_TRIANGLE_COUNT + 2,
     };
     const soc_mat4 transform = identity_matrix();
-    const soc_frame_desc frame = make_frame(depth_direction);
+    const soc_frame_desc frame = make_frame();
     soc_occluder_group single_group;
     soc_occluder_group parallel_group;
     soc_occlusion_build_desc single_desc;
@@ -579,20 +574,11 @@ static int test_tiled_hot_merge_results_match(
 
 int main(void)
 {
-    if (test_worker_results_match(SOC_DEPTH_FORWARD) != 0) {
+    if (test_worker_results_match() != 0) {
         return 1;
     }
-    if (test_worker_results_match(SOC_DEPTH_REVERSED) != 0) {
+    if (test_chunked_mesh_results_match() != 0) {
         return 1;
     }
-    if (test_chunked_mesh_results_match(SOC_DEPTH_FORWARD) != 0) {
-        return 1;
-    }
-    if (test_chunked_mesh_results_match(SOC_DEPTH_REVERSED) != 0) {
-        return 1;
-    }
-    if (test_tiled_hot_merge_results_match(SOC_DEPTH_FORWARD) != 0) {
-        return 1;
-    }
-    return test_tiled_hot_merge_results_match(SOC_DEPTH_REVERSED);
+    return test_tiled_hot_merge_results_match();
 }

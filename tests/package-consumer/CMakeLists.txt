@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(soc_package_consumer LANGUAGES C)
 
-find_package(soc 0.2 CONFIG REQUIRED)
+find_package(soc 3.0 CONFIG REQUIRED)
 
 add_executable(soc_package_consumer main.c)
 target_link_libraries(soc_package_consumer PRIVATE soc::soc)

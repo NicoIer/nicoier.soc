@@ -132,7 +132,6 @@ typedef struct bench_case {
     uint32_t query_count;
     uint32_t query_batch_size;
     soc_clip_depth_range clip_depth_range;
-    soc_depth_direction depth_direction;
     geometry_pattern geometry_pattern;
     query_pattern query_pattern;
     soc_bool large_queries;
@@ -225,11 +224,6 @@ static const bench_case g_cases[] = {
      .kind = BENCH_CLEAR, .tier = 1u, .width = 1280u, .height = 720u},
     {.name = "frame.clear.npot.1279x719", .description = "Build an empty odd NPOT snapshot",
      .kind = BENCH_CLEAR, .tier = 1u, .width = 1279u, .height = 719u},
-    {.name = "frame.clear.reversed.640x360",
-     .description = "Build an empty reversed-Z 360p snapshot",
-     .kind = BENCH_CLEAR, .tier = 1u, .width = 640u, .height = 360u,
-     .depth_direction = SOC_DEPTH_REVERSED},
-
     {.name = "hiz.build.320x180", .description = "Build an empty 180p snapshot and Hi-Z",
      .kind = BENCH_HIZ, .tier = 1u, .width = 320u, .height = 180u},
     {.name = "hiz.build.640x360", .description = "Build an empty 360p snapshot and Hi-Z",
@@ -239,11 +233,6 @@ static const bench_case g_cases[] = {
     {.name = "hiz.build.npot.1279x719",
      .description = "Build an empty odd NPOT snapshot and Hi-Z",
      .kind = BENCH_HIZ, .tier = 1u, .width = 1279u, .height = 719u},
-    {.name = "hiz.build.reversed.640x360",
-     .description = "Build an empty reversed-Z 360p snapshot and Hi-Z",
-     .kind = BENCH_HIZ, .tier = 1u, .width = 640u, .height = 360u,
-     .depth_direction = SOC_DEPTH_REVERSED},
-
     {.name = "geometry.inside.16384",
      .description = "Build a snapshot from 16384 in-frustum triangles",
      .kind = BENCH_GEOMETRY, .tier = 1u, .width = 640u, .height = 360u,
@@ -371,21 +360,13 @@ static const bench_case g_cases[] = {
      .description = "Medium frame with zero-to-one reversed Z",
      .kind = BENCH_E2E, .tier = 2u, .width = 640u, .height = 360u,
      .triangle_count = 4096u, .instance_count = 1u, .query_count = 10000u,
-     .query_batch_size = 10000u, .query_pattern = QUERY_MIXED,
-     .depth_direction = SOC_DEPTH_REVERSED},
-    {.name = "pipeline.convention.no.forward",
-     .description = "Medium frame with negative-one-to-one forward Z",
-     .kind = BENCH_E2E, .tier = 2u, .width = 640u, .height = 360u,
-     .triangle_count = 4096u, .instance_count = 1u, .query_count = 10000u,
-     .query_batch_size = 10000u, .query_pattern = QUERY_MIXED,
-     .clip_depth_range = SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE},
+     .query_batch_size = 10000u, .query_pattern = QUERY_MIXED},
     {.name = "pipeline.convention.no.reversed",
      .description = "Medium frame with negative-one-to-one reversed Z",
      .kind = BENCH_E2E, .tier = 2u, .width = 640u, .height = 360u,
      .triangle_count = 4096u, .instance_count = 1u, .query_count = 10000u,
      .query_batch_size = 10000u, .query_pattern = QUERY_MIXED,
-     .clip_depth_range = SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE,
-     .depth_direction = SOC_DEPTH_REVERSED},
+     .clip_depth_range = SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE},
     {.name = "lifecycle.context.create.1920x1080",
      .description = "Create and destroy a 1080p context",
      .kind = BENCH_CONTEXT_CREATE, .tier = 2u,
@@ -529,7 +510,6 @@ static soc_frame_desc default_frame_desc(void)
             .col3 = {0.0f, 0.0f, 0.0f, 1.0f}
         },
         .clip_depth_range = SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        .depth_direction = SOC_DEPTH_FORWARD,
         .front_face = SOC_FRONT_FACE_CCW,
         .flags = SOC_FRAME_FLAG_NONE
     };
@@ -546,12 +526,12 @@ static soc_bool uses_perspective_queries(const bench_case* definition)
 static void configure_perspective_frame(soc_frame_desc* desc)
 {
     /*
-     * w = world z and clip z = world z - 1. The near plane is z = 1,
-     * and normalized depth increases toward one as world z increases.
+     * w = world z and clip z = 1. The near plane is z = 1, and normalized
+     * reversed depth decreases toward zero as world z increases.
      */
-    desc->clip_from_world.col2.z = 1.0f;
+    desc->clip_from_world.col2.z = 0.0f;
     desc->clip_from_world.col2.w = 1.0f;
-    desc->clip_from_world.col3.z = -1.0f;
+    desc->clip_from_world.col3.z = 1.0f;
     desc->clip_from_world.col3.w = 0.0f;
 }
 
@@ -595,11 +575,9 @@ static float case_occluder_depth(const bench_case* definition)
     }
     if (definition->clip_depth_range ==
         SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) {
-        return definition->depth_direction == SOC_DEPTH_FORWARD
-            ? -0.25f : 0.25f;
+        return 0.25f;
     }
-    return definition->depth_direction == SOC_DEPTH_FORWARD
-        ? 0.25f : 0.75f;
+    return 0.75f;
 }
 
 static float case_visible_depth(const bench_case* definition)
@@ -609,11 +587,9 @@ static float case_visible_depth(const bench_case* definition)
     }
     if (definition->clip_depth_range ==
         SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) {
-        return definition->depth_direction == SOC_DEPTH_FORWARD
-            ? -0.80f : 0.80f;
+        return 0.80f;
     }
-    return definition->depth_direction == SOC_DEPTH_FORWARD
-        ? 0.05f : 0.95f;
+    return 0.95f;
 }
 
 static float case_occluded_depth(const bench_case* definition)
@@ -623,11 +599,9 @@ static float case_occluded_depth(const bench_case* definition)
     }
     if (definition->clip_depth_range ==
         SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) {
-        return definition->depth_direction == SOC_DEPTH_FORWARD
-            ? 0.40f : -0.40f;
+        return -0.40f;
     }
-    return definition->depth_direction == SOC_DEPTH_FORWARD
-        ? 0.65f : 0.35f;
+    return 0.35f;
 }
 
 static soc_result create_context(
@@ -710,9 +684,8 @@ static int create_surface_mesh(
     for (triangle = 0u; triangle < triangle_count; ++triangle) {
         float* v = &vertices[(size_t)triangle * 9u];
         const float depth_delta = 0.02f * rng_unit(&rng);
-        const float depth = case_occluder_depth(work->definition) +
-            (work->definition->depth_direction == SOC_DEPTH_FORWARD
-                ? depth_delta : -depth_delta);
+        const float depth =
+            case_occluder_depth(work->definition) - depth_delta;
 
         if (oversized) {
             const float perspective_scale =
@@ -960,12 +933,8 @@ static int create_geometry_mesh(workload* work)
         const float x1 = x0 + 0.65f * step;
         const float y1 = y0 + 0.65f * step;
         const float depth = case_occluder_depth(definition);
-        const float near_outside =
-            definition->clip_depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE
-                ? -0.05f : -1.05f;
-        const float near_inside =
-            definition->clip_depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE
-                ? 0.05f : -0.95f;
+        const float near_outside = 1.05f;
+        const float near_inside = 0.95f;
 
         v[0] = x0; v[1] = y0; v[2] = depth;
         v[3] = x1; v[4] = y0; v[5] = depth;
@@ -1128,19 +1097,9 @@ static int allocate_queries(workload* work)
                 if (perspective == SOC_TRUE) {
                     center_z = 1.0f;
                     half_depth = 0.10f;
-                } else if (definition->depth_direction ==
-                           SOC_DEPTH_REVERSED) {
+                } else {
                     minimum_z = 0.95f;
                     maximum_z = 1.05f;
-                } else {
-                    minimum_z =
-                        definition->clip_depth_range ==
-                            SOC_CLIP_DEPTH_ZERO_TO_ONE
-                        ? -0.05f : -1.05f;
-                    maximum_z =
-                        definition->clip_depth_range ==
-                            SOC_CLIP_DEPTH_ZERO_TO_ONE
-                        ? 0.05f : -0.95f;
                 }
                 if (perspective != SOC_TRUE) {
                     work->bounds[index].min.x = x - radius;
@@ -1292,7 +1251,6 @@ static int workload_initialize(
     work->seed = seed;
     work->frame_desc = default_frame_desc();
     work->frame_desc.clip_depth_range = definition->clip_depth_range;
-    work->frame_desc.depth_direction = definition->depth_direction;
     if (uses_perspective_queries(definition) == SOC_TRUE) {
         configure_perspective_frame(&work->frame_desc);
     }
@@ -2559,7 +2517,7 @@ static int write_json(
 
     cpu_name(cpu, sizeof(cpu));
     os_version(os_release, sizeof(os_release));
-    if (fputs("{\n  \"schema\":\"soc-bench-v1\",\n"
+    if (fputs("{\n  \"schema\":\"soc-bench-v2\",\n"
         "  \"environment\":{\n    \"os\":", output) == EOF ||
         json_string(output, os_name()) != 0 ||
         fputs(",\n    \"os_version\":", output) == EOF ||
@@ -2618,8 +2576,8 @@ static int write_json(
                 ",\n      \"parameters\":{\"width\":%u,\"height\":%u,"
                 "\"triangles\":%u,\"instances\":%u,\"queries\":%u,"
                 "\"query_batch\":%u,\"clip_depth_range\":%u,"
-                "\"depth_direction\":%u,\"geometry_pattern\":%u,"
-                "\"query_pattern\":%u,\"large_queries\":%s,"
+                "\"geometry_pattern\":%u,\"query_pattern\":%u,"
+                "\"large_queries\":%s,"
                 "\"reverse_order\":%s,\"index_type\":%u,"
                 "\"vertex_stride\":%u,\"position_offset\":%u,"
                 "\"readback_level\":%u,\"repeat_count\":%u},"
@@ -2631,8 +2589,8 @@ static int write_json(
                 definition->width, definition->height,
                 definition->triangle_count, definition->instance_count,
                 definition->query_count, definition->query_batch_size,
-                definition->clip_depth_range, definition->depth_direction,
-                definition->geometry_pattern, definition->query_pattern,
+                definition->clip_depth_range, definition->geometry_pattern,
+                definition->query_pattern,
                 definition->large_queries ? "true" : "false",
                 definition->reverse_order ? "true" : "false",
                 definition->kind == BENCH_MESH_CREATE ||

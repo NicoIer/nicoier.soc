@@ -6,6 +6,9 @@
 #include "occlusion/soc_hiz.h"
 
 #define SOC_VISIBILITY_CLIP_PLANE_COUNT 6u
+#define SOC_VISIBILITY_NEAR_CLIP_PLANE_INDEX 5u
+#define SOC_VISIBILITY_NEAR_CLIP_PLANE_BIT \
+    (UINT32_C(1) << SOC_VISIBILITY_NEAR_CLIP_PLANE_INDEX)
 
 typedef struct soc_visibility_clip_vertex {
     double x;
@@ -31,10 +34,7 @@ typedef struct soc_aabb_query_context {
     ];
     soc_visibility_world_plane w_plane;
     double transform_error_scale;
-    uint32_t near_clip_plane_index;
-    uint32_t near_clip_plane_bit;
     soc_clip_depth_range clip_depth_range;
-    soc_depth_direction depth_direction;
 } soc_aabb_query_context;
 
 typedef struct soc_projected_aabb {
@@ -79,7 +79,6 @@ soc_aabb_projection soc_project_aabb_scalar(
 
 soc_visibility soc_test_projected_aabb_scalar(
     const soc_hiz* hiz,
-    const soc_aabb_query_context* query,
     const soc_projected_aabb* projected
 );
 

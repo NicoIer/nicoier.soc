@@ -44,8 +44,7 @@ typedef struct soc_kernel_table {
         const float* scratch_planes,
         size_t element_count,
         size_t scratch_plane_stride,
-        uint32_t lane_count,
-        soc_depth_direction depth_direction
+        uint32_t lane_count
     );
     /* Block dimensions are at most 8; mask bit = row * 8 + column. */
     void (*store_constant_depth_block_f32)(
@@ -54,8 +53,7 @@ typedef struct soc_kernel_table {
         uint32_t block_width,
         uint32_t block_height,
         uint64_t coverage_mask,
-        float candidate_depth,
-        soc_depth_direction depth_direction
+        float candidate_depth
     );
     void (*store_depth_plane_block_f32)(
         float* destination,
@@ -65,15 +63,13 @@ typedef struct soc_kernel_table {
         uint64_t coverage_mask,
         float depth_origin,
         float depth_step_x,
-        float depth_step_y,
-        soc_depth_direction depth_direction
+        float depth_step_y
     );
     void (*reduce_hiz_level_f32)(
         const float* source,
         uint32_t source_width,
         uint32_t source_height,
-        float* destination,
-        soc_depth_direction depth_direction
+        float* destination
     );
     void (*transform_triangle_f64)(
         const soc_kernel_mat4_f64* clip_from_object,
@@ -106,8 +102,7 @@ void soc_kernel_merge_depth_planes_f32_scalar(
     const float* scratch_planes,
     size_t element_count,
     size_t scratch_plane_stride,
-    uint32_t lane_count,
-    soc_depth_direction depth_direction
+    uint32_t lane_count
 );
 
 void soc_kernel_store_constant_depth_block_f32_scalar(
@@ -116,8 +111,7 @@ void soc_kernel_store_constant_depth_block_f32_scalar(
     uint32_t block_width,
     uint32_t block_height,
     uint64_t coverage_mask,
-    float candidate_depth,
-    soc_depth_direction depth_direction
+    float candidate_depth
 );
 
 void soc_kernel_store_depth_plane_block_f32_scalar(
@@ -128,8 +122,7 @@ void soc_kernel_store_depth_plane_block_f32_scalar(
     uint64_t coverage_mask,
     float depth_origin,
     float depth_step_x,
-    float depth_step_y,
-    soc_depth_direction depth_direction
+    float depth_step_y
 );
 
 void soc_kernel_mat4_f64_from_f32(

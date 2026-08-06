@@ -35,7 +35,6 @@ static uint32_t float_bits(float value)
 static soc_result build_snapshot(
     soc_kernel_backend backend,
     soc_clip_depth_range clip_depth_range,
-    soc_depth_direction depth_direction,
     soc_bool constant_depth,
     soc_snapshot** out_snapshot
 )
@@ -107,7 +106,6 @@ static soc_result build_snapshot(
             .col3 = {0.02f, -0.01f, 0.14f, 1.00f},
         },
         .clip_depth_range = clip_depth_range,
-        .depth_direction = depth_direction,
         .front_face = SOC_FRONT_FACE_CCW,
         .flags = SOC_FRAME_FLAG_NONE,
     };
@@ -198,9 +196,7 @@ static int compare_snapshots(
 
     CHECK(scalar != NULL);
     CHECK(neon != NULL);
-    clear_bits = scalar->frame.depth_direction == SOC_DEPTH_REVERSED
-        ? UINT32_C(0x00000000)
-        : UINT32_C(0x3f800000);
+    clear_bits = UINT32_C(0x00000000);
     CHECK(scalar->kernels == soc_kernel_table_scalar());
     CHECK(neon->kernels == soc_kernel_table_neon());
     CHECK(compare_build_stats(&scalar->build_stats, &neon->build_stats) == 0);
@@ -270,19 +266,17 @@ static int compare_queries(
     const soc_snapshot* neon
 )
 {
-    const soc_bool reversed = scalar->frame.depth_direction ==
-        SOC_DEPTH_REVERSED ? SOC_TRUE : SOC_FALSE;
     const soc_aabb bounds[] = {
         {
             .min = {
                 -0.03f,
                 -0.03f,
-                reversed == SOC_TRUE ? 0.05f : 0.82f,
+                0.05f,
             },
             .max = {
                 0.03f,
                 0.03f,
-                reversed == SOC_TRUE ? 0.10f : 0.87f,
+                0.10f,
             },
         },
         {
@@ -386,12 +380,7 @@ static int test_pipeline_differential(void)
         SOC_CLIP_DEPTH_ZERO_TO_ONE,
         SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE,
     };
-    static const soc_depth_direction depth_directions[] = {
-        SOC_DEPTH_FORWARD,
-        SOC_DEPTH_REVERSED,
-    };
     size_t range_index;
-    size_t direction_index;
 
     if (soc_kernel_table_neon() == NULL) {
         return 0;
@@ -400,32 +389,26 @@ static int test_pipeline_differential(void)
     for (range_index = 0u;
          range_index < ARRAY_COUNT(clip_depth_ranges);
          ++range_index) {
-        for (direction_index = 0u;
-             direction_index < ARRAY_COUNT(depth_directions);
-             ++direction_index) {
-            soc_snapshot* scalar = NULL;
-            soc_snapshot* neon = NULL;
+        soc_snapshot* scalar = NULL;
+        soc_snapshot* neon = NULL;
 
-            CHECK(build_snapshot(
-                SOC_KERNEL_BACKEND_SCALAR,
-                clip_depth_ranges[range_index],
-                depth_directions[direction_index],
-                SOC_FALSE,
-                &scalar
-            ) == SOC_RESULT_OK);
-            CHECK(build_snapshot(
-                SOC_KERNEL_BACKEND_NEON,
-                clip_depth_ranges[range_index],
-                depth_directions[direction_index],
-                SOC_FALSE,
-                &neon
-            ) == SOC_RESULT_OK);
-            CHECK(compare_snapshots(scalar, neon, 4u) == 0);
-            CHECK(compare_queries(scalar, neon) == 0);
+        CHECK(build_snapshot(
+            SOC_KERNEL_BACKEND_SCALAR,
+            clip_depth_ranges[range_index],
+            SOC_FALSE,
+            &scalar
+        ) == SOC_RESULT_OK);
+        CHECK(build_snapshot(
+            SOC_KERNEL_BACKEND_NEON,
+            clip_depth_ranges[range_index],
+            SOC_FALSE,
+            &neon
+        ) == SOC_RESULT_OK);
+        CHECK(compare_snapshots(scalar, neon, 4u) == 0);
+        CHECK(compare_queries(scalar, neon) == 0);
 
-            soc_snapshot_destroy_internal(neon);
-            soc_snapshot_destroy_internal(scalar);
-        }
+        soc_snapshot_destroy_internal(neon);
+        soc_snapshot_destroy_internal(scalar);
     }
     return 0;
 }
@@ -436,10 +419,6 @@ static int test_constant_depth_pipeline_differential(void)
         SOC_CLIP_DEPTH_ZERO_TO_ONE,
         SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE,
     };
-    static const soc_depth_direction depth_directions[] = {
-        SOC_DEPTH_FORWARD,
-        SOC_DEPTH_REVERSED,
-    };
     size_t range_index;
 
     if (soc_kernel_table_neon() == NULL) {
@@ -449,33 +428,25 @@ static int test_constant_depth_pipeline_differential(void)
     for (range_index = 0u;
          range_index < ARRAY_COUNT(clip_depth_ranges);
          ++range_index) {
-        size_t direction_index;
+        soc_snapshot* scalar = NULL;
+        soc_snapshot* neon = NULL;
 
-        for (direction_index = 0u;
-             direction_index < ARRAY_COUNT(depth_directions);
-             ++direction_index) {
-            soc_snapshot* scalar = NULL;
-            soc_snapshot* neon = NULL;
+        CHECK(build_snapshot(
+            SOC_KERNEL_BACKEND_SCALAR,
+            clip_depth_ranges[range_index],
+            SOC_TRUE,
+            &scalar
+        ) == SOC_RESULT_OK);
+        CHECK(build_snapshot(
+            SOC_KERNEL_BACKEND_NEON,
+            clip_depth_ranges[range_index],
+            SOC_TRUE,
+            &neon
+        ) == SOC_RESULT_OK);
+        CHECK(compare_snapshots(scalar, neon, 1u) == 0);
 
-            CHECK(build_snapshot(
-                SOC_KERNEL_BACKEND_SCALAR,
-                clip_depth_ranges[range_index],
-                depth_directions[direction_index],
-                SOC_TRUE,
-                &scalar
-            ) == SOC_RESULT_OK);
-            CHECK(build_snapshot(
-                SOC_KERNEL_BACKEND_NEON,
-                clip_depth_ranges[range_index],
-                depth_directions[direction_index],
-                SOC_TRUE,
-                &neon
-            ) == SOC_RESULT_OK);
-            CHECK(compare_snapshots(scalar, neon, 1u) == 0);
-
-            soc_snapshot_destroy_internal(neon);
-            soc_snapshot_destroy_internal(scalar);
-        }
+        soc_snapshot_destroy_internal(neon);
+        soc_snapshot_destroy_internal(scalar);
     }
     return 0;
 }

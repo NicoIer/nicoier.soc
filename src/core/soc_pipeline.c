@@ -95,10 +95,6 @@ static soc_result validate_frame_desc(const soc_frame_desc* desc)
         desc->clip_depth_range != SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
-    if (desc->depth_direction != SOC_DEPTH_FORWARD &&
-        desc->depth_direction != SOC_DEPTH_REVERSED) {
-        return SOC_RESULT_INVALID_ARGUMENT;
-    }
     if (desc->front_face != SOC_FRONT_FACE_CCW &&
         desc->front_face != SOC_FRONT_FACE_CW) {
         return SOC_RESULT_INVALID_ARGUMENT;
@@ -401,7 +397,6 @@ typedef struct soc_parallel_tile_state {
     uint32_t height;
     soc_hiz* depth_pyramid;
     const soc_kernel_table* kernels;
-    soc_depth_direction depth_direction;
     uint32_t hiz_band_count;
     atomic_size_t next_job;
     atomic_size_t next_empty_tile_row;
@@ -437,7 +432,6 @@ static void build_parallel_tile_row_hiz(
         }
         soc_hiz_build_lower_band_unchecked_with_kernels(
             state->depth_pyramid,
-            state->depth_direction,
             state->kernels,
             (uint32_t)band_index
         );
@@ -1053,10 +1047,7 @@ static void parallel_rasterize_tiles(
             (size_t)target.early_z_column_count *
             ((target.height + SOC_KERNEL_RASTER_BLOCK_SIZE - 1u) /
                 SOC_KERNEL_RASTER_BLOCK_SIZE);
-        soc_raster_target_reset_early_z_unchecked(
-            &target,
-            state->depth_direction
-        );
+        soc_raster_target_reset_early_z_unchecked(&target);
 
         rasterize_parallel_hot_tile_range(
             state,
@@ -1146,8 +1137,7 @@ static void merge_parallel_hot_tiles(
     size_t tile_column_count,
     uint32_t width,
     uint32_t height,
-    const soc_kernel_table* kernels,
-    soc_depth_direction depth_direction
+    const soc_kernel_table* kernels
 )
 {
     size_t hot_index;
@@ -1182,8 +1172,7 @@ static void merge_parallel_hot_tiles(
                     local_y * (size_t)SOC_RASTER_LOCK_TILE_SIZE,
                 (size_t)(region.end_x - region.minimum_x),
                 SOC_PARALLEL_TILE_ELEMENT_COUNT,
-                lane_count + 1u,
-                depth_direction
+                lane_count + 1u
             );
         }
     }
@@ -1203,7 +1192,6 @@ typedef struct soc_private_merge_state {
     const float* scratch_depth;
     size_t depth_element_count;
     uint32_t lane_count;
-    soc_depth_direction depth_direction;
     const soc_kernel_table* kernels;
     soc_hiz* depth_pyramid;
     uint32_t hiz_band_count;
@@ -1326,12 +1314,10 @@ static void private_merge_depth(
             state->scratch_depth + element_begin,
             element_end - element_begin,
             state->depth_element_count,
-            state->lane_count,
-            state->depth_direction
+            state->lane_count
         );
         soc_hiz_build_lower_band_unchecked_with_kernels(
             state->depth_pyramid,
-            state->depth_direction,
             state->kernels,
             band_index
         );
@@ -1863,9 +1849,7 @@ static soc_bool try_rasterize_occluders_tiled(
             context->kernels->clear_f32(
                 hot_tile_scratch,
                 scratch_element_count,
-                frame->depth_direction == SOC_DEPTH_REVERSED
-                    ? 0.0f
-                    : 1.0f
+                0.0f
             );
         }
 
@@ -1930,7 +1914,6 @@ static soc_bool try_rasterize_occluders_tiled(
         tile_state.height = context->height;
         tile_state.depth_pyramid = depth_pyramid;
         tile_state.kernels = context->kernels;
-        tile_state.depth_direction = frame->depth_direction;
         result = soc_hiz_lower_band_count(
             depth_pyramid,
             &tile_state.hiz_band_count
@@ -2003,8 +1986,7 @@ static soc_bool try_rasterize_occluders_tiled(
             tile_column_count,
             context->width,
             context->height,
-            context->kernels,
-            frame->depth_direction
+            context->kernels
         );
         {
             size_t tile_row;
@@ -2268,7 +2250,6 @@ static soc_bool try_rasterize_occluders_private(
     merge_state.scratch_depth = scratch_depth;
     merge_state.depth_element_count = depth_element_count;
     merge_state.lane_count = active_lane_count;
-    merge_state.depth_direction = frame->depth_direction;
     merge_state.kernels = context->kernels;
     merge_state.depth_pyramid = depth_pyramid;
     result = soc_hiz_lower_band_count(
@@ -2763,12 +2744,10 @@ soc_result soc_occlusion_build_internal(
     result = lower_hiz_built == SOC_TRUE
         ? soc_hiz_build_upper_levels_with_kernels(
             &snapshot->depth_pyramid,
-            frame.depth_direction,
             snapshot->kernels
         )
         : soc_hiz_build_parallel_with_kernels(
             &snapshot->depth_pyramid,
-            frame.depth_direction,
             snapshot->kernels,
             &context->thread_pool
         );

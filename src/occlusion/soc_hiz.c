@@ -161,49 +161,34 @@ float* soc_hiz_level_data(soc_hiz* hiz, uint32_t level)
     return hiz->data + hiz->levels[level].offset;
 }
 
-soc_result soc_hiz_clear_level_zero(
-    soc_hiz* hiz,
-    soc_depth_direction depth_direction
-)
+soc_result soc_hiz_clear_level_zero(soc_hiz* hiz)
 {
-    float clear_depth;
     float* level_zero;
     size_t index;
 
     if (hiz == NULL ||
         hiz->initialized != SOC_TRUE ||
-        hiz->data == NULL ||
-        (depth_direction != SOC_DEPTH_FORWARD &&
-            depth_direction != SOC_DEPTH_REVERSED)) {
+        hiz->data == NULL) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 
-    clear_depth = depth_direction == SOC_DEPTH_REVERSED ? 0.0f : 1.0f;
     level_zero = hiz->data + hiz->levels[0].offset;
     for (index = 0u; index < hiz->levels[0].element_count; ++index) {
-        level_zero[index] = clear_depth;
+        level_zero[index] = 0.0f;
     }
     return SOC_RESULT_OK;
 }
 
-static float reduce_depth(
-    float accumulated,
-    float candidate,
-    soc_depth_direction depth_direction
-)
+static float reduce_depth(float accumulated, float candidate)
 {
-    if (depth_direction == SOC_DEPTH_REVERSED) {
-        return candidate < accumulated ? candidate : accumulated;
-    }
-    return candidate > accumulated ? candidate : accumulated;
+    return candidate < accumulated ? candidate : accumulated;
 }
 
 void soc_hiz_reduce_level_scalar(
     const float* source,
     uint32_t source_width,
     uint32_t source_height,
-    float* destination,
-    soc_depth_direction depth_direction
+    float* destination
 )
 {
     const uint32_t destination_width = halve_ceil(source_width);
@@ -225,25 +210,19 @@ void soc_hiz_reduce_level_scalar(
             float reduced = source[source_index];
 
             if (source_x + 1u < source_width) {
-                reduced = reduce_depth(
-                    reduced,
-                    source[source_index + 1u],
-                    depth_direction
-                );
+                reduced = reduce_depth(reduced, source[source_index + 1u]);
             }
             if (source_y + 1u < source_height) {
                 const size_t next_row_index = source_index + source_width;
 
                 reduced = reduce_depth(
                     reduced,
-                    source[next_row_index],
-                    depth_direction
+                    source[next_row_index]
                 );
                 if (source_x + 1u < source_width) {
                     reduced = reduce_depth(
                         reduced,
-                        source[next_row_index + 1u],
-                        depth_direction
+                        source[next_row_index + 1u]
                     );
                 }
             }
@@ -257,7 +236,6 @@ void soc_hiz_reduce_level_scalar(
 
 soc_result soc_hiz_build_with_kernels(
     soc_hiz* hiz,
-    soc_depth_direction depth_direction,
     const struct soc_kernel_table* kernels
 )
 {
@@ -267,9 +245,7 @@ soc_result soc_hiz_build_with_kernels(
         hiz->initialized != SOC_TRUE ||
         hiz->data == NULL ||
         kernels == NULL ||
-        kernels->reduce_hiz_level_f32 == NULL ||
-        (depth_direction != SOC_DEPTH_FORWARD &&
-            depth_direction != SOC_DEPTH_REVERSED)) {
+        kernels->reduce_hiz_level_f32 == NULL) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 
@@ -281,8 +257,7 @@ soc_result soc_hiz_build_with_kernels(
             hiz->data + source_level->offset,
             source_level->width,
             source_level->height,
-            hiz->data + destination_level->offset,
-            depth_direction
+            hiz->data + destination_level->offset
         );
     }
 
@@ -292,13 +267,11 @@ soc_result soc_hiz_build_with_kernels(
 typedef struct soc_hiz_parallel_build_state {
     soc_hiz* hiz;
     const struct soc_kernel_table* kernels;
-    soc_depth_direction depth_direction;
     uint32_t band_count;
 } soc_hiz_parallel_build_state;
 
 static soc_bool validate_hiz_build_arguments(
     const soc_hiz* hiz,
-    soc_depth_direction depth_direction,
     const struct soc_kernel_table* kernels
 )
 {
@@ -310,9 +283,7 @@ static soc_bool validate_hiz_build_arguments(
         hiz->levels[0].width != 0u &&
         hiz->levels[0].height != 0u &&
         kernels != NULL &&
-        kernels->reduce_hiz_level_f32 != NULL &&
-        (depth_direction == SOC_DEPTH_FORWARD ||
-            depth_direction == SOC_DEPTH_REVERSED);
+        kernels->reduce_hiz_level_f32 != NULL;
 }
 
 static uint32_t lower_band_count_unchecked(const soc_hiz* hiz)
@@ -324,7 +295,6 @@ static uint32_t lower_band_count_unchecked(const soc_hiz* hiz)
 
 void soc_hiz_build_lower_band_unchecked_with_kernels(
     soc_hiz* hiz,
-    soc_depth_direction depth_direction,
     const struct soc_kernel_table* kernels,
     uint32_t band_index
 )
@@ -357,8 +327,7 @@ void soc_hiz_build_lower_band_unchecked_with_kernels(
             source_level->width,
             source_row_end - source_row_begin,
             hiz->data + destination_level->offset +
-                (size_t)destination_row_begin * destination_level->width,
-            depth_direction
+                (size_t)destination_row_begin * destination_level->width
         );
 
         source_row_begin = destination_row_begin;
@@ -388,20 +357,17 @@ soc_result soc_hiz_lower_band_count(
 
 soc_result soc_hiz_build_lower_band_with_kernels(
     soc_hiz* hiz,
-    soc_depth_direction depth_direction,
     const struct soc_kernel_table* kernels,
     uint32_t band_index
 )
 {
-    if (validate_hiz_build_arguments(hiz, depth_direction, kernels) !=
-            SOC_TRUE ||
+    if (validate_hiz_build_arguments(hiz, kernels) != SOC_TRUE ||
         band_index >= lower_band_count_unchecked(hiz)) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 
     soc_hiz_build_lower_band_unchecked_with_kernels(
         hiz,
-        depth_direction,
         kernels,
         band_index
     );
@@ -410,14 +376,12 @@ soc_result soc_hiz_build_lower_band_with_kernels(
 
 soc_result soc_hiz_build_upper_levels_with_kernels(
     soc_hiz* hiz,
-    soc_depth_direction depth_direction,
     const struct soc_kernel_table* kernels
 )
 {
     uint32_t level;
 
-    if (validate_hiz_build_arguments(hiz, depth_direction, kernels) !=
-        SOC_TRUE) {
+    if (validate_hiz_build_arguments(hiz, kernels) != SOC_TRUE) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 
@@ -431,8 +395,7 @@ soc_result soc_hiz_build_upper_levels_with_kernels(
             hiz->data + source_level->offset,
             source_level->width,
             source_level->height,
-            hiz->data + destination_level->offset,
-            depth_direction
+            hiz->data + destination_level->offset
         );
     }
 
@@ -461,7 +424,6 @@ static void build_hiz_bands(
          ++band_index) {
         soc_hiz_build_lower_band_unchecked_with_kernels(
             hiz,
-            state->depth_direction,
             state->kernels,
             band_index
         );
@@ -470,7 +432,6 @@ static void build_hiz_bands(
 
 soc_result soc_hiz_build_parallel_with_kernels(
     soc_hiz* hiz,
-    soc_depth_direction depth_direction,
     const struct soc_kernel_table* kernels,
     struct soc_thread_pool* thread_pool
 )
@@ -485,9 +446,7 @@ soc_result soc_hiz_build_parallel_with_kernels(
         hiz->data == NULL ||
         kernels == NULL ||
         kernels->reduce_hiz_level_f32 == NULL ||
-        thread_pool == NULL ||
-        (depth_direction != SOC_DEPTH_FORWARD &&
-            depth_direction != SOC_DEPTH_REVERSED)) {
+        thread_pool == NULL) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 
@@ -498,7 +457,6 @@ soc_result soc_hiz_build_parallel_with_kernels(
 
     state.hiz = hiz;
     state.kernels = kernels;
-    state.depth_direction = depth_direction;
     state.band_count = lower_band_count_unchecked(hiz);
 
     active_worker_count = configured_worker_count;
@@ -521,7 +479,6 @@ soc_result soc_hiz_build_parallel_with_kernels(
     if (active_worker_count <= 1u) {
         return soc_hiz_build_with_kernels(
             hiz,
-            depth_direction,
             kernels
         );
     }
@@ -535,19 +492,14 @@ soc_result soc_hiz_build_parallel_with_kernels(
 
     return soc_hiz_build_upper_levels_with_kernels(
         hiz,
-        depth_direction,
         kernels
     );
 }
 
-soc_result soc_hiz_build(
-    soc_hiz* hiz,
-    soc_depth_direction depth_direction
-)
+soc_result soc_hiz_build(soc_hiz* hiz)
 {
     return soc_hiz_build_with_kernels(
         hiz,
-        depth_direction,
         soc_kernel_table_scalar()
     );
 }

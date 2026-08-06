@@ -57,8 +57,7 @@ static void count_store_constant_depth_block_f32(
     uint32_t block_width,
     uint32_t block_height,
     uint64_t coverage_mask,
-    float candidate_depth,
-    soc_depth_direction depth_direction
+    float candidate_depth
 )
 {
     ++counted_depth_block_store_calls;
@@ -68,8 +67,7 @@ static void count_store_constant_depth_block_f32(
         block_width,
         block_height,
         coverage_mask,
-        candidate_depth,
-        depth_direction
+        candidate_depth
     );
 }
 
@@ -81,8 +79,7 @@ static void count_store_depth_plane_block_f32(
     uint64_t coverage_mask,
     float depth_origin,
     float depth_step_x,
-    float depth_step_y,
-    soc_depth_direction depth_direction
+    float depth_step_y
 )
 {
     ++counted_depth_block_store_calls;
@@ -94,8 +91,7 @@ static void count_store_depth_plane_block_f32(
         coverage_mask,
         depth_origin,
         depth_step_x,
-        depth_step_y,
-        depth_direction
+        depth_step_y
     );
 }
 
@@ -153,8 +149,7 @@ static soc_mat4 identity_matrix(void)
 }
 
 static soc_frame_desc make_frame_desc(
-    soc_clip_depth_range clip_depth_range,
-    soc_depth_direction depth_direction
+    soc_clip_depth_range clip_depth_range
 )
 {
     const soc_frame_desc frame = {
@@ -166,7 +161,6 @@ static soc_frame_desc make_frame_desc(
             .col3 = {0.0f, 0.0f, 0.0f, 1.0f},
         },
         .clip_depth_range = clip_depth_range,
-        .depth_direction = depth_direction,
         .front_face = SOC_FRONT_FACE_CCW,
         .flags = SOC_FRAME_FLAG_NONE,
     };
@@ -251,11 +245,6 @@ static float float_from_bits(uint32_t bits)
 
     memcpy(&value, &bits, sizeof(value));
     return value;
-}
-
-static float clear_depth_for(soc_depth_direction depth_direction)
-{
-    return depth_direction == SOC_DEPTH_REVERSED ? 0.0f : 1.0f;
 }
 
 static int run_mesh_sequence(
@@ -439,13 +428,10 @@ static void release_capture(raster_capture* capture)
 }
 
 static uint64_t capture_coverage_mask_8x8(
-    const raster_capture* capture,
-    soc_depth_direction depth_direction
+    const raster_capture* capture
 )
 {
-    const uint32_t clear_bits = float_bits(
-        clear_depth_for(depth_direction)
-    );
+    const uint32_t clear_bits = float_bits(0.0f);
     uint64_t mask = 0u;
     uint32_t pixel;
 
@@ -668,10 +654,9 @@ static int test_q8_snapped_coverage_and_depth_are_conservative(void)
         TRIANGLE_COUNT = 64,
     };
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        SOC_DEPTH_FORWARD
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
-    const uint32_t clear_bits = float_bits(1.0f);
+    const uint32_t clear_bits = float_bits(0.0f);
     uint32_t indices[] = {0u, 1u, 2u};
     uint32_t random_state = UINT32_C(0x7b1d5a39);
     uint32_t accepted_triangle_count = 0u;
@@ -813,7 +798,7 @@ static int test_q8_snapped_coverage_and_depth_are_conservative(void)
                         weight2 * reconstructed[2].depth
                     ) / area;
 
-                    CHECK((double)stored_depth >= exact_depth);
+                    CHECK((double)stored_depth <= exact_depth);
                 }
                 ++total_covered_count;
             }
@@ -846,8 +831,7 @@ static int test_fixed_top_left_coverage_mask(void)
     float positions[9];
     soc_mesh mesh;
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        SOC_DEPTH_FORWARD
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
     raster_capture capture;
     uint64_t mask;
@@ -864,7 +848,7 @@ static int test_fixed_top_left_coverage_mask(void)
     CHECK(capture.clipped_triangle_count == 0u);
     CHECK(capture.rasterized_triangle_count == 1u);
 
-    mask = capture_coverage_mask_8x8(&capture, SOC_DEPTH_FORWARD);
+    mask = capture_coverage_mask_8x8(&capture);
     release_capture(&capture);
     CHECK(mask == expected_mask);
     return 0;
@@ -890,8 +874,7 @@ static int test_shared_edge_masks_are_a_partition(void)
     soc_mesh first_mesh;
     soc_mesh second_mesh;
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        SOC_DEPTH_FORWARD
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
     raster_capture first_capture;
     raster_capture second_capture;
@@ -923,14 +906,8 @@ static int test_shared_edge_masks_are_a_partition(void)
         8u,
         &second_capture
     ) == 0);
-    first_mask = capture_coverage_mask_8x8(
-        &first_capture,
-        SOC_DEPTH_FORWARD
-    );
-    second_mask = capture_coverage_mask_8x8(
-        &second_capture,
-        SOC_DEPTH_FORWARD
-    );
+    first_mask = capture_coverage_mask_8x8(&first_capture);
+    second_mask = capture_coverage_mask_8x8(&second_capture);
     release_capture(&first_capture);
     release_capture(&second_capture);
 
@@ -941,12 +918,11 @@ static int test_shared_edge_masks_are_a_partition(void)
 
 static int capture_pixel_is_covered(
     const raster_capture* capture,
-    soc_depth_direction depth_direction,
     size_t pixel
 )
 {
     return float_bits(capture->depth[pixel]) !=
-        float_bits(clear_depth_for(depth_direction));
+        float_bits(0.0f);
 }
 
 static int check_non_lattice_shared_quad(
@@ -955,8 +931,7 @@ static int check_non_lattice_shared_quad(
     double minimum,
     double maximum,
     int opposite_diagonal,
-    int varying_depth,
-    soc_depth_direction depth_direction
+    int varying_depth
 )
 {
     screen_vertex vertices[4] = {
@@ -977,8 +952,7 @@ static int check_non_lattice_shared_quad(
     const soc_mesh* split_first_order[2];
     const soc_mesh* split_second_order[2];
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        depth_direction
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
     raster_capture first_capture;
     raster_capture second_capture;
@@ -1109,12 +1083,10 @@ static int check_non_lattice_shared_quad(
                 sample_y < maximum;
             const int first = capture_pixel_is_covered(
                 &first_capture,
-                depth_direction,
                 pixel
             );
             const int second = capture_pixel_is_covered(
                 &second_capture,
-                depth_direction,
                 pixel
             );
 
@@ -1122,22 +1094,18 @@ static int check_non_lattice_shared_quad(
             CHECK((first || second) == expected);
             CHECK(capture_pixel_is_covered(
                 &combined_first_capture,
-                depth_direction,
                 pixel
             ) == expected);
             CHECK(capture_pixel_is_covered(
                 &combined_second_capture,
-                depth_direction,
                 pixel
             ) == expected);
             CHECK(capture_pixel_is_covered(
                 &split_first_capture,
-                depth_direction,
                 pixel
             ) == expected);
             CHECK(capture_pixel_is_covered(
                 &split_second_capture,
-                depth_direction,
                 pixel
             ) == expected);
         }
@@ -1154,61 +1122,42 @@ static int check_non_lattice_shared_quad(
 
 static int test_non_lattice_shared_edges_have_no_cracks(void)
 {
-    static const soc_depth_direction depth_directions[] = {
-        SOC_DEPTH_FORWARD,
-        SOC_DEPTH_REVERSED,
-    };
-    size_t direction_index;
-
-    for (direction_index = 0u;
-         direction_index < ARRAY_COUNT(depth_directions);
-         ++direction_index) {
-        const soc_depth_direction direction =
-            depth_directions[direction_index];
-
-        CHECK(check_non_lattice_shared_quad(
-            32u,
-            32u,
-            2.1,
-            29.1,
-            0,
-            0,
-            direction
-        ) == 0);
-        CHECK(check_non_lattice_shared_quad(
-            32u,
-            32u,
-            2.1,
-            28.9,
-            1,
-            0,
-            direction
-        ) == 0);
-        CHECK(check_non_lattice_shared_quad(
-            8u,
-            8u,
-            1.1,
-            6.9,
-            0,
-            0,
-            direction
-        ) == 0);
-        CHECK(check_non_lattice_shared_quad(
-            8u,
-            8u,
-            1.1,
-            6.9,
-            0,
-            1,
-            direction
-        ) == 0);
-    }
+    CHECK(check_non_lattice_shared_quad(
+        32u,
+        32u,
+        2.1,
+        29.1,
+        0,
+        0
+    ) == 0);
+    CHECK(check_non_lattice_shared_quad(
+        32u,
+        32u,
+        2.1,
+        28.9,
+        1,
+        0
+    ) == 0);
+    CHECK(check_non_lattice_shared_quad(
+        8u,
+        8u,
+        1.1,
+        6.9,
+        0,
+        0
+    ) == 0);
+    CHECK(check_non_lattice_shared_quad(
+        8u,
+        8u,
+        1.1,
+        6.9,
+        0,
+        1
+    ) == 0);
     return 0;
 }
 
-static int check_q8_collapsed_triangle_is_discarded(
-    soc_depth_direction depth_direction
-)
+static int check_q8_collapsed_triangle_is_discarded(void)
 {
     enum {
         WIDTH = 16,
@@ -1224,8 +1173,7 @@ static int check_q8_collapsed_triangle_is_discarded(
     screen_vertex reconstructed[3];
     soc_mesh mesh;
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        depth_direction
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
     raster_capture capture;
     int64_t fixed_x[3];
@@ -1273,7 +1221,6 @@ static int check_q8_collapsed_triangle_is_discarded(
     for (pixel = 0u; pixel < (size_t)WIDTH * HEIGHT; ++pixel) {
         CHECK(!capture_pixel_is_covered(
             &capture,
-            depth_direction,
             pixel
         ));
     }
@@ -1283,12 +1230,7 @@ static int check_q8_collapsed_triangle_is_discarded(
 
 static int test_q8_collapsed_triangle_is_discarded(void)
 {
-    CHECK(check_q8_collapsed_triangle_is_discarded(
-        SOC_DEPTH_FORWARD
-    ) == 0);
-    CHECK(check_q8_collapsed_triangle_is_discarded(
-        SOC_DEPTH_REVERSED
-    ) == 0);
+    CHECK(check_q8_collapsed_triangle_is_discarded() == 0);
     return 0;
 }
 
@@ -1311,8 +1253,7 @@ static double ndc_edge_value(
 
 static int check_clipped_fan_coverage(
     const float source_positions[9],
-    uint64_t expected_rasterized_triangles,
-    soc_depth_direction depth_direction
+    uint64_t expected_rasterized_triangles
 )
 {
     enum {
@@ -1323,8 +1264,7 @@ static int check_clipped_fan_coverage(
     float positions[9];
     soc_mesh mesh;
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        depth_direction
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
     raster_capture capture;
     const double area = ndc_edge_value(
@@ -1397,7 +1337,6 @@ static int check_clipped_fan_coverage(
                 : (edge0 < 0.0 && edge1 < 0.0 && edge2 < 0.0);
             CHECK(capture_pixel_is_covered(
                 &capture,
-                depth_direction,
                 pixel
             ) == expected);
             ++checked_count;
@@ -1427,30 +1366,16 @@ static int test_clipped_polygon_fans_have_no_cracks(void)
 
     CHECK(check_clipped_fan_coverage(
         clipped_quad,
-        2u,
-        SOC_DEPTH_FORWARD
-    ) == 0);
-    CHECK(check_clipped_fan_coverage(
-        clipped_quad,
-        2u,
-        SOC_DEPTH_REVERSED
+        2u
     ) == 0);
     CHECK(check_clipped_fan_coverage(
         clipped_pentagon,
-        3u,
-        SOC_DEPTH_FORWARD
-    ) == 0);
-    CHECK(check_clipped_fan_coverage(
-        clipped_pentagon,
-        3u,
-        SOC_DEPTH_REVERSED
+        3u
     ) == 0);
     return 0;
 }
 
-static int check_varying_depth_direction(
-    soc_depth_direction depth_direction
-)
+static int check_varying_depth_is_conservative(void)
 {
     static const screen_vertex vertices[3] = {
         {1.0, 1.0, 0.125f},
@@ -1461,12 +1386,9 @@ static int check_varying_depth_direction(
     float positions[9];
     soc_mesh mesh;
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        depth_direction
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
-    const uint32_t clear_bits = float_bits(
-        clear_depth_for(depth_direction)
-    );
+    const uint32_t clear_bits = float_bits(0.0f);
     raster_capture capture;
     uint32_t covered_count = 0u;
     uint32_t minimum_ulp_count = UINT32_MAX;
@@ -1503,15 +1425,9 @@ static int check_varying_depth_direction(
                 0.75 * ((double)y + 0.5 - 1.0) / 12.0;
             nearest = (float)exact;
             nearest_bits = float_bits(nearest);
-            if (depth_direction == SOC_DEPTH_REVERSED) {
-                CHECK((double)stored <= exact);
-                CHECK(stored_bits <= nearest_bits);
-                ulps = nearest_bits - stored_bits;
-            } else {
-                CHECK((double)stored >= exact);
-                CHECK(stored_bits >= nearest_bits);
-                ulps = stored_bits - nearest_bits;
-            }
+            CHECK((double)stored <= exact);
+            CHECK(stored_bits <= nearest_bits);
+            ulps = nearest_bits - stored_bits;
             CHECK(ulps >= 3u);
             CHECK(ulps <= 6u);
             if (ulps < minimum_ulp_count) {
@@ -1531,16 +1447,13 @@ static int check_varying_depth_direction(
     return 0;
 }
 
-static int test_varying_depth_is_guarded_in_depth_direction(void)
+static int test_varying_depth_is_conservative(void)
 {
-    CHECK(check_varying_depth_direction(SOC_DEPTH_FORWARD) == 0);
-    CHECK(check_varying_depth_direction(SOC_DEPTH_REVERSED) == 0);
+    CHECK(check_varying_depth_is_conservative() == 0);
     return 0;
 }
 
-static int check_narrow_q8_triangle_uses_affine_depth(
-    soc_depth_direction depth_direction
-)
+static int check_narrow_q8_triangle_uses_affine_depth(void)
 {
     /*
      * The Q8 determinant is only 3 while its two product terms are large.
@@ -1557,8 +1470,7 @@ static int check_narrow_q8_triangle_uses_affine_depth(
     float positions[9];
     soc_mesh mesh;
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        depth_direction
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
     const double exact_depth = (
         (double)vertices[0].depth +
@@ -1582,15 +1494,9 @@ static int check_narrow_q8_triangle_uses_affine_depth(
     CHECK(capture.rasterized_triangle_count == 1u);
 
     stored_bits = float_bits(capture.depth[32u * 64u + 32u]);
-    if (depth_direction == SOC_DEPTH_REVERSED) {
-        CHECK((double)capture.depth[32u * 64u + 32u] < exact_depth);
-        CHECK(stored_bits < exact_bits);
-        ulps = exact_bits - stored_bits;
-    } else {
-        CHECK((double)capture.depth[32u * 64u + 32u] > exact_depth);
-        CHECK(stored_bits > exact_bits);
-        ulps = stored_bits - exact_bits;
-    }
+    CHECK((double)capture.depth[32u * 64u + 32u] < exact_depth);
+    CHECK(stored_bits < exact_bits);
+    ulps = exact_bits - stored_bits;
     release_capture(&capture);
     CHECK(ulps >= 1u);
     CHECK(ulps <= 8u);
@@ -1599,18 +1505,12 @@ static int check_narrow_q8_triangle_uses_affine_depth(
 
 static int test_narrow_q8_depth_is_conservative(void)
 {
-    CHECK(check_narrow_q8_triangle_uses_affine_depth(
-        SOC_DEPTH_FORWARD
-    ) == 0);
-    CHECK(check_narrow_q8_triangle_uses_affine_depth(
-        SOC_DEPTH_REVERSED
-    ) == 0);
+    CHECK(check_narrow_q8_triangle_uses_affine_depth() == 0);
     return 0;
 }
 
-static int check_depth_range_direction_and_submission_order(
-    soc_clip_depth_range clip_depth_range,
-    soc_depth_direction depth_direction
+static int check_depth_range_and_submission_order(
+    soc_clip_depth_range clip_depth_range
 )
 {
     static const double triangle_xy[6] = {
@@ -1618,13 +1518,9 @@ static int check_depth_range_direction_and_submission_order(
         15.0, 1.0,
         1.0, 15.0,
     };
-    const float winning_depth =
-        depth_direction == SOC_DEPTH_REVERSED ? 0.75f : 0.25f;
-    const float losing_depth =
-        depth_direction == SOC_DEPTH_REVERSED ? 0.25f : 0.75f;
-    const uint32_t clear_bits = float_bits(
-        clear_depth_for(depth_direction)
-    );
+    const float winning_depth = 0.75f;
+    const float losing_depth = 0.25f;
+    const uint32_t clear_bits = float_bits(0.0f);
     const uint32_t winning_bits = float_bits(winning_depth);
     uint32_t indices[] = {0u, 1u, 2u};
     float winning_positions[9];
@@ -1635,10 +1531,7 @@ static int check_depth_range_direction_and_submission_order(
     soc_mesh losing_mesh;
     const soc_mesh* losing_then_winning[2];
     const soc_mesh* winning_then_losing[2];
-    const soc_frame_desc frame = make_frame_desc(
-        clip_depth_range,
-        depth_direction
-    );
+    const soc_frame_desc frame = make_frame_desc(clip_depth_range);
     raster_capture first_capture;
     raster_capture second_capture;
     uint32_t covered_count = 0u;
@@ -1701,13 +1594,8 @@ static int check_depth_range_direction_and_submission_order(
         if (first_bits != clear_bits) {
             uint32_t ulps;
 
-            if (depth_direction == SOC_DEPTH_REVERSED) {
-                CHECK(first_bits < winning_bits);
-                ulps = winning_bits - first_bits;
-            } else {
-                CHECK(first_bits > winning_bits);
-                ulps = first_bits - winning_bits;
-            }
+            CHECK(first_bits < winning_bits);
+            ulps = winning_bits - first_bits;
             CHECK(ulps >= 1u);
             CHECK(ulps <= 2u);
             ++covered_count;
@@ -1719,50 +1607,37 @@ static int check_depth_range_direction_and_submission_order(
     return 0;
 }
 
-static int test_depth_ranges_directions_and_submission_orders(void)
+static int test_depth_ranges_and_submission_orders(void)
 {
     static const soc_clip_depth_range clip_depth_ranges[] = {
         SOC_CLIP_DEPTH_ZERO_TO_ONE,
         SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE,
-    };
-    static const soc_depth_direction depth_directions[] = {
-        SOC_DEPTH_FORWARD,
-        SOC_DEPTH_REVERSED,
     };
     size_t range_index;
 
     for (range_index = 0u;
          range_index < ARRAY_COUNT(clip_depth_ranges);
          ++range_index) {
-        size_t direction_index;
-
-        for (direction_index = 0u;
-             direction_index < ARRAY_COUNT(depth_directions);
-             ++direction_index) {
-            CHECK(check_depth_range_direction_and_submission_order(
-                clip_depth_ranges[range_index],
-                depth_directions[direction_index]
-            ) == 0);
-        }
+        CHECK(check_depth_range_and_submission_order(
+            clip_depth_ranges[range_index]
+        ) == 0);
     }
     return 0;
 }
 
 static int check_canary_dimensions(
     uint32_t width,
-    uint32_t height,
-    soc_depth_direction depth_direction
+    uint32_t height
 )
 {
     static const uint32_t canary_bits = UINT32_C(0x7fc12345);
     const size_t pixel_count = (size_t)width * height;
-    const float clear_depth = clear_depth_for(depth_direction);
+    const float clear_depth = 0.0f;
     const uint32_t clear_bits = float_bits(clear_depth);
     const uint32_t source_depth_bits = float_bits(0.5f);
     const soc_mat4 identity = identity_matrix();
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        depth_direction
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
     float storage[
         CANARY_WORD_COUNT + MAX_CANARY_PIXEL_COUNT + CANARY_WORD_COUNT
@@ -1822,13 +1697,8 @@ static int check_canary_dimensions(
         if (bits != clear_bits) {
             uint32_t ulps;
 
-            if (depth_direction == SOC_DEPTH_REVERSED) {
-                CHECK(bits < source_depth_bits);
-                ulps = source_depth_bits - bits;
-            } else {
-                CHECK(bits > source_depth_bits);
-                ulps = bits - source_depth_bits;
-            }
+            CHECK(bits < source_depth_bits);
+            ulps = source_depth_bits - bits;
             CHECK(ulps >= 1u);
             CHECK(ulps <= 2u);
             ++changed_count;
@@ -1846,26 +1716,15 @@ static int test_odd_block_tails_and_narrow_canaries(void)
         {1u, 17u},
         {17u, 1u},
     };
-    static const soc_depth_direction depth_directions[] = {
-        SOC_DEPTH_FORWARD,
-        SOC_DEPTH_REVERSED,
-    };
     size_t dimension_index;
 
     for (dimension_index = 0u;
          dimension_index < ARRAY_COUNT(dimensions);
          ++dimension_index) {
-        size_t direction_index;
-
-        for (direction_index = 0u;
-             direction_index < ARRAY_COUNT(depth_directions);
-             ++direction_index) {
-            CHECK(check_canary_dimensions(
-                dimensions[dimension_index][0],
-                dimensions[dimension_index][1],
-                depth_directions[direction_index]
-            ) == 0);
-        }
+        CHECK(check_canary_dimensions(
+            dimensions[dimension_index][0],
+            dimensions[dimension_index][1]
+        ) == 0);
     }
     return 0;
 }
@@ -1879,8 +1738,7 @@ static int test_triangle_range_submission_matches_full_mesh(void)
     const size_t pixel_count = (size_t)WIDTH * HEIGHT;
     const soc_mat4 identity = identity_matrix();
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        SOC_DEPTH_FORWARD
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
     float positions[] = {
         -0.9f, -0.8f, 0.8f,
@@ -1995,8 +1853,7 @@ static int test_triangle_range_submission_validates_bounds(void)
     };
     const soc_mat4 identity = identity_matrix();
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        SOC_DEPTH_FORWARD
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
     float depth[PIXEL_COUNT];
     float positions[] = {
@@ -2108,7 +1965,7 @@ static int test_triangle_range_submission_validates_bounds(void)
     CHECK(rasterizer.clipped_triangle_count == 0u);
     CHECK(rasterizer.rasterized_triangle_count == 0u);
     for (pixel = 0u; pixel < PIXEL_COUNT; ++pixel) {
-        CHECK(float_bits(depth[pixel]) == float_bits(1.0f));
+        CHECK(float_bits(depth[pixel]) == float_bits(0.0f));
     }
 
     CHECK(soc_rasterizer_submit_occluder_triangles(
@@ -2125,9 +1982,7 @@ static int test_triangle_range_submission_validates_bounds(void)
     return 0;
 }
 
-static int check_prepared_replay_matches_immediate(
-    soc_depth_direction depth_direction
-)
+static int check_prepared_replay_matches_immediate(void)
 {
     enum {
         WIDTH = 32,
@@ -2139,8 +1994,7 @@ static int check_prepared_replay_matches_immediate(
         {1.10, 1.30, 0.45f},
     };
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        depth_direction
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
     float positions[36] = {
         /* One ordinary, varying-depth triangle. */
@@ -2223,12 +2077,7 @@ static int check_prepared_replay_matches_immediate(
 
 static int test_prepared_replay_matches_immediate(void)
 {
-    CHECK(check_prepared_replay_matches_immediate(
-        SOC_DEPTH_FORWARD
-    ) == 0);
-    CHECK(check_prepared_replay_matches_immediate(
-        SOC_DEPTH_REVERSED
-    ) == 0);
+    CHECK(check_prepared_replay_matches_immediate() == 0);
     return 0;
 }
 
@@ -2243,8 +2092,7 @@ static int test_prepared_list_and_invalid_state_semantics(void)
         SIZE_MAX / sizeof(soc_raster_prepared_triangle) + 1u;
     const soc_mat4 identity = identity_matrix();
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        SOC_DEPTH_FORWARD
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
     float depth[PIXEL_COUNT];
     float positions[] = {
@@ -2391,9 +2239,7 @@ static int test_prepared_list_and_invalid_state_semantics(void)
     return 0;
 }
 
-static int check_prepared_region_replay(
-    soc_depth_direction depth_direction
-)
+static int check_prepared_region_replay(void)
 {
     enum {
         WIDTH = 67,
@@ -2408,10 +2254,9 @@ static int check_prepared_region_replay(
     const size_t depth_bytes = pixel_count * sizeof(float);
     const soc_mat4 identity = identity_matrix();
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        depth_direction
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
-    const uint32_t clear_bits = float_bits(clear_depth_for(depth_direction));
+    const uint32_t clear_bits = float_bits(0.0f);
     uint32_t indices[] = {0u, 1u, 2u};
     float positions[9];
     float* full_depth = malloc(depth_bytes);
@@ -2653,14 +2498,11 @@ static int check_prepared_region_replay(
 
 static int test_prepared_region_replay(void)
 {
-    CHECK(check_prepared_region_replay(SOC_DEPTH_FORWARD) == 0);
-    CHECK(check_prepared_region_replay(SOC_DEPTH_REVERSED) == 0);
+    CHECK(check_prepared_region_replay() == 0);
     return 0;
 }
 
-static int check_prepared_target_replay(
-    soc_depth_direction depth_direction
-)
+static int check_prepared_target_replay(void)
 {
     enum {
         WIDTH = 67,
@@ -2694,10 +2536,9 @@ static int check_prepared_target_replay(
     const size_t depth_bytes = pixel_count * sizeof(float);
     const soc_mat4 identity = identity_matrix();
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        depth_direction
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
-    const float clear_depth = clear_depth_for(depth_direction);
+    const float clear_depth = 0.0f;
     const uint32_t canary_bits = UINT32_C(0x7fc12345);
     const float canary = float_from_bits(canary_bits);
     uint32_t indices[] = {0u, 1u, 2u, 3u, 4u, 5u};
@@ -2823,10 +2664,7 @@ static int check_prepared_target_replay(
                 : HEIGHT;
             target.origin_x = tile_x;
             target.origin_y = tile_y;
-            soc_raster_target_reset_early_z_unchecked(
-                &target,
-                depth_direction
-            );
+            soc_raster_target_reset_early_z_unchecked(&target);
             for (prepared_index = 0u;
                  prepared_index < prepared.count;
                  ++prepared_index) {
@@ -2911,10 +2749,7 @@ static int check_prepared_target_replay(
                 : HEIGHT;
             target.origin_x = tile_x;
             target.origin_y = tile_y;
-            soc_raster_target_reset_early_z_unchecked(
-                &target,
-                depth_direction
-            );
+            soc_raster_target_reset_early_z_unchecked(&target);
             for (prepared_index = 0u;
                  prepared_index < prepared.count;
                  ++prepared_index) {
@@ -3058,8 +2893,7 @@ static int check_prepared_target_replay(
 
 static int test_prepared_target_replay(void)
 {
-    CHECK(check_prepared_target_replay(SOC_DEPTH_FORWARD) == 0);
-    CHECK(check_prepared_target_replay(SOC_DEPTH_REVERSED) == 0);
+    CHECK(check_prepared_target_replay() == 0);
     return 0;
 }
 
@@ -3130,9 +2964,7 @@ static soc_raster_prepared_triangle make_full_early_z_target_triangle(
     return prepared;
 }
 
-static int check_prepared_target_block_early_z(
-    soc_depth_direction depth_direction
-)
+static int check_prepared_target_block_early_z(void)
 {
     enum {
         FRAMEBUFFER_WIDTH = 24,
@@ -3157,22 +2989,13 @@ static int check_prepared_target_block_early_z(
     const uint32_t canary_bits = UINT32_C(0x7fc12345);
     const float canary = float_from_bits(canary_bits);
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        depth_direction
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
-    const float clear_depth = clear_depth_for(depth_direction);
-    const float untouched_depth = depth_direction == SOC_DEPTH_REVERSED
-        ? -1.0f
-        : 2.0f;
-    const float seed_depth = depth_direction == SOC_DEPTH_REVERSED
-        ? 0.75f
-        : 0.25f;
-    const float farther_depth = depth_direction == SOC_DEPTH_REVERSED
-        ? 0.25f
-        : 0.75f;
-    const float nearer_depth = depth_direction == SOC_DEPTH_REVERSED
-        ? 0.875f
-        : 0.125f;
+    const float clear_depth = 0.0f;
+    const float untouched_depth = -1.0f;
+    const float seed_depth = 0.75f;
+    const float farther_depth = 0.25f;
+    const float nearer_depth = 0.875f;
     const soc_raster_prepared_triangle seed =
         make_full_early_z_target_triangle(
             TARGET_ORIGIN_X,
@@ -3247,7 +3070,7 @@ static int check_prepared_target_block_early_z(
     target.early_z_pending_masks = early_z_pending_masks;
     target.early_z_block_count = TARGET_BLOCK_COUNT;
     target.early_z_column_count = TARGET_BLOCK_COLUMN_COUNT;
-    soc_raster_target_reset_early_z_unchecked(&target, depth_direction);
+    soc_raster_target_reset_early_z_unchecked(&target);
     for (index = 0u; index < TARGET_BLOCK_COUNT; ++index) {
         CHECK(float_bits(early_z_farthest_depths[index]) ==
             float_bits(untouched_depth));
@@ -3287,11 +3110,7 @@ static int check_prepared_target_block_early_z(
         CHECK(early_z_pending_masks[index] == 0u);
         CHECK(float_bits(early_z_farthest_depths[index]) !=
             float_bits(untouched_depth));
-        if (depth_direction == SOC_DEPTH_REVERSED) {
-            CHECK(early_z_farthest_depths[index] <= target_depth[0]);
-        } else {
-            CHECK(early_z_farthest_depths[index] >= target_depth[0]);
-        }
+        CHECK(early_z_farthest_depths[index] <= target_depth[0]);
     }
     memcpy(seed_snapshot, target_storage, sizeof(seed_snapshot));
 
@@ -3329,26 +3148,16 @@ static int check_prepared_target_block_early_z(
             const size_t local_index =
                 (size_t)y * TARGET_ROW_STRIDE + x;
 
-            if (depth_direction == SOC_DEPTH_REVERSED) {
-                CHECK(target_depth[local_index] > seed_snapshot[
-                    CANARY_WORD_COUNT + local_index
-                ]);
-            } else {
-                CHECK(target_depth[local_index] < seed_snapshot[
-                    CANARY_WORD_COUNT + local_index
-                ]);
-            }
+            CHECK(target_depth[local_index] > seed_snapshot[
+                CANARY_WORD_COUNT + local_index
+            ]);
             CHECK(float_bits(target_depth[local_index]) ==
                 float_bits(target_depth[0]));
         }
     }
     for (index = 0u; index < TARGET_BLOCK_COUNT; ++index) {
         CHECK(early_z_pending_masks[index] == 0u);
-        if (depth_direction == SOC_DEPTH_REVERSED) {
-            CHECK(early_z_farthest_depths[index] <= target_depth[0]);
-        } else {
-            CHECK(early_z_farthest_depths[index] >= target_depth[0]);
-        }
+        CHECK(early_z_farthest_depths[index] <= target_depth[0]);
     }
     for (index = 0u; index < CANARY_WORD_COUNT; ++index) {
         CHECK(float_bits(target_storage[index]) == canary_bits);
@@ -3382,12 +3191,7 @@ static int check_prepared_target_block_early_z(
 
 static int test_prepared_target_block_early_z(void)
 {
-    CHECK(check_prepared_target_block_early_z(
-        SOC_DEPTH_FORWARD
-    ) == 0);
-    CHECK(check_prepared_target_block_early_z(
-        SOC_DEPTH_REVERSED
-    ) == 0);
+    CHECK(check_prepared_target_block_early_z() == 0);
     return 0;
 }
 
@@ -3395,8 +3199,7 @@ static soc_raster_prepared_triangle make_full_early_z_prepared_plane(
     uint32_t width,
     uint32_t height,
     float kernel_origin,
-    double depth_error_bound,
-    soc_depth_direction depth_direction
+    double depth_error_bound
 )
 {
     soc_raster_prepared_triangle prepared =
@@ -3406,20 +3209,17 @@ static soc_raster_prepared_triangle make_full_early_z_prepared_plane(
             kernel_origin
         );
 
-    /* The directional error adjustment reconstructs kernel_origin exactly.
+    /* The conservative error adjustment reconstructs kernel_origin exactly.
      * Keep a nonzero plane slope while making its contribution far smaller
      * than one binary32 ULP across the complete test extent. */
-    prepared.depth_sample_origin = depth_direction == SOC_DEPTH_REVERSED
-        ? (double)kernel_origin + depth_error_bound
-        : (double)kernel_origin - depth_error_bound;
+    prepared.depth_sample_origin =
+        (double)kernel_origin + depth_error_bound;
     prepared.depth_step_x = 0x1p-40;
     prepared.depth_error_bound = depth_error_bound;
     return prepared;
 }
 
-static int check_prepared_plane_early_z_numeric_boundary(
-    soc_depth_direction depth_direction
-)
+static int check_prepared_plane_early_z_numeric_boundary(void)
 {
     enum {
         WIDTH = 24,
@@ -3429,8 +3229,7 @@ static int check_prepared_plane_early_z_numeric_boundary(
     };
     const double depth_error_bound = 0x1p-20;
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        depth_direction
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
     const soc_raster_prepared_triangle seed =
         make_sized_full_early_z_prepared_triangle(
@@ -3469,30 +3268,21 @@ static int check_prepared_plane_early_z_numeric_boundary(
     CHECK(counted_depth_block_store_calls == BLOCK_COUNT);
 
     stored_bits = float_bits(depth[0]);
-    if (depth_direction == SOC_DEPTH_REVERSED) {
-        equal_origin_bits =
-            stored_bits + SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS;
-        nearer_origin_bits = equal_origin_bits + 1u;
-        nearer_stored_bits = stored_bits + 1u;
-    } else {
-        equal_origin_bits =
-            stored_bits - SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS;
-        nearer_origin_bits = equal_origin_bits - 1u;
-        nearer_stored_bits = stored_bits - 1u;
-    }
+    equal_origin_bits =
+        stored_bits + SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS;
+    nearer_origin_bits = equal_origin_bits + 1u;
+    nearer_stored_bits = stored_bits + 1u;
     equal_candidate = make_full_early_z_prepared_plane(
         WIDTH,
         HEIGHT,
         float_from_bits(equal_origin_bits),
-        depth_error_bound,
-        depth_direction
+        depth_error_bound
     );
     nearer_candidate = make_full_early_z_prepared_plane(
         WIDTH,
         HEIGHT,
         float_from_bits(nearer_origin_bits),
-        depth_error_bound,
-        depth_direction
+        depth_error_bound
     );
 
     store_calls_before = counted_depth_block_store_calls;
@@ -3524,18 +3314,11 @@ static int check_prepared_plane_early_z_numeric_boundary(
 
 static int test_prepared_plane_early_z_numeric_boundary(void)
 {
-    CHECK(check_prepared_plane_early_z_numeric_boundary(
-        SOC_DEPTH_FORWARD
-    ) == 0);
-    CHECK(check_prepared_plane_early_z_numeric_boundary(
-        SOC_DEPTH_REVERSED
-    ) == 0);
+    CHECK(check_prepared_plane_early_z_numeric_boundary() == 0);
     return 0;
 }
 
-static int check_coarse_rebase_numeric_regression(
-    soc_depth_direction depth_direction
-)
+static int check_coarse_rebase_numeric_regression(void)
 {
     enum {
         WIDTH = 32,
@@ -3543,18 +3326,11 @@ static int check_coarse_rebase_numeric_regression(
         PIXEL_COUNT = WIDTH * HEIGHT,
     };
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        depth_direction
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
-    const double depth_origin = depth_direction == SOC_DEPTH_REVERSED
-        ? 0.41411303565308344
-        : 0.8063541982981466;
-    const double depth_step_x = depth_direction == SOC_DEPTH_REVERSED
-        ? 0.028578003279574778
-        : -0.014355072299262427;
-    const uint32_t summary_bits = depth_direction == SOC_DEPTH_REVERSED
-        ? UINT32_C(0x3f248a66)
-        : UINT32_C(0x3f31070e);
+    const double depth_origin = 0.41411303565308344;
+    const double depth_step_x = 0.028578003279574778;
+    const uint32_t summary_bits = UINT32_C(0x3f248a66);
     const float summary = float_from_bits(summary_bits);
     const soc_raster_prepared_region probe_region = {
         7u, 0u, 9u, 1u,
@@ -3630,11 +3406,7 @@ static int check_coarse_rebase_numeric_regression(
         &probe_region
     ) == SOC_RESULT_OK);
     CHECK(counted_depth_block_store_calls != 0u);
-    if (depth_direction == SOC_DEPTH_REVERSED) {
-        CHECK(depth[8] > summary);
-    } else {
-        CHECK(depth[8] < summary);
-    }
+    CHECK(depth[8] > summary);
 
     CHECK(soc_rasterizer_end_frame(&rasterizer) == SOC_RESULT_OK);
     soc_rasterizer_shutdown(&rasterizer);
@@ -3643,18 +3415,11 @@ static int check_coarse_rebase_numeric_regression(
 
 static int test_coarse_rebase_numeric_regression(void)
 {
-    CHECK(check_coarse_rebase_numeric_regression(
-        SOC_DEPTH_FORWARD
-    ) == 0);
-    CHECK(check_coarse_rebase_numeric_regression(
-        SOC_DEPTH_REVERSED
-    ) == 0);
+    CHECK(check_coarse_rebase_numeric_regression() == 0);
     return 0;
 }
 
-static int check_block_early_z_state_lifecycle(
-    soc_depth_direction depth_direction
-)
+static int check_block_early_z_state_lifecycle(void)
 {
     enum {
         WIDTH = 24,
@@ -3663,23 +3428,14 @@ static int check_block_early_z_state_lifecycle(
         BLOCK_COUNT = 9,
     };
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        depth_direction
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
-    const float clear_depth = clear_depth_for(depth_direction);
-    const float first_depth = depth_direction == SOC_DEPTH_REVERSED
-        ? 0.75f
-        : 0.25f;
-    const float farther_depth = depth_direction == SOC_DEPTH_REVERSED
-        ? 0.25f
-        : 0.75f;
-    const float closer_depth = depth_direction == SOC_DEPTH_REVERSED
-        ? 0.875f
-        : 0.125f;
-    const float no_clear_stored_depth =
-        depth_direction == SOC_DEPTH_REVERSED ? 0.05f : 0.95f;
-    const float no_clear_candidate_depth =
-        depth_direction == SOC_DEPTH_REVERSED ? 0.125f : 0.875f;
+    const float clear_depth = 0.0f;
+    const float first_depth = 0.75f;
+    const float farther_depth = 0.25f;
+    const float closer_depth = 0.875f;
+    const float no_clear_stored_depth = 0.05f;
+    const float no_clear_candidate_depth = 0.125f;
     const soc_raster_prepared_triangle first =
         make_sized_full_early_z_prepared_triangle(
             WIDTH,
@@ -3758,11 +3514,7 @@ static int check_block_early_z_state_lifecycle(
     CHECK(counted_depth_block_store_calls == BLOCK_COUNT * 2u);
     for (pixel = 0u; pixel < PIXEL_COUNT; ++pixel) {
         CHECK(float_bits(depth[pixel]) == float_bits(depth[0]));
-        if (depth_direction == SOC_DEPTH_REVERSED) {
-            CHECK(depth[pixel] > first_result[pixel]);
-        } else {
-            CHECK(depth[pixel] < first_result[pixel]);
-        }
+        CHECK(depth[pixel] > first_result[pixel]);
     }
 
     CHECK(soc_rasterizer_end_frame(&rasterizer) == SOC_RESULT_OK);
@@ -3804,11 +3556,7 @@ static int check_block_early_z_state_lifecycle(
         store_calls_before + BLOCK_COUNT);
     for (pixel = 0u; pixel < PIXEL_COUNT; ++pixel) {
         CHECK(float_bits(depth[pixel]) == float_bits(depth[0]));
-        if (depth_direction == SOC_DEPTH_REVERSED) {
-            CHECK(depth[pixel] > no_clear_stored_depth);
-        } else {
-            CHECK(depth[pixel] < no_clear_stored_depth);
-        }
+        CHECK(depth[pixel] > no_clear_stored_depth);
     }
 
     CHECK(soc_rasterizer_end_frame(&rasterizer) == SOC_RESULT_OK);
@@ -3818,18 +3566,11 @@ static int check_block_early_z_state_lifecycle(
 
 static int test_block_early_z_state_lifecycle(void)
 {
-    CHECK(check_block_early_z_state_lifecycle(
-        SOC_DEPTH_FORWARD
-    ) == 0);
-    CHECK(check_block_early_z_state_lifecycle(
-        SOC_DEPTH_REVERSED
-    ) == 0);
+    CHECK(check_block_early_z_state_lifecycle() == 0);
     return 0;
 }
 
-static int check_partial_block_pending_union(
-    soc_depth_direction depth_direction
-)
+static int check_partial_block_pending_union(void)
 {
     enum {
         WIDTH = 8,
@@ -3837,19 +3578,12 @@ static int check_partial_block_pending_union(
         PIXEL_COUNT = WIDTH * HEIGHT,
     };
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        depth_direction
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
-    const float clear_depth = clear_depth_for(depth_direction);
-    const float untouched_depth = depth_direction == SOC_DEPTH_REVERSED
-        ? -1.0f
-        : 2.0f;
-    const float near_depth = depth_direction == SOC_DEPTH_REVERSED
-        ? 0.75f
-        : 0.25f;
-    const float farther_depth = depth_direction == SOC_DEPTH_REVERSED
-        ? 0.25f
-        : 0.75f;
+    const float clear_depth = 0.0f;
+    const float untouched_depth = -1.0f;
+    const float near_depth = 0.75f;
+    const float farther_depth = 0.25f;
     const soc_raster_prepared_triangle near =
         make_sized_full_early_z_prepared_triangle(
             WIDTH,
@@ -3929,11 +3663,7 @@ static int check_partial_block_pending_union(
                 float_bits(depth[0]));
         }
     }
-    if (depth_direction == SOC_DEPTH_REVERSED) {
-        CHECK(rasterizer.early_z_farthest_depths[0] <= depth[0]);
-    } else {
-        CHECK(rasterizer.early_z_farthest_depths[0] >= depth[0]);
-    }
+    CHECK(rasterizer.early_z_farthest_depths[0] <= depth[0]);
     memcpy(filled_depth, depth, sizeof(filled_depth));
 
     store_calls_before = counted_depth_block_store_calls;
@@ -3952,8 +3682,7 @@ static int check_partial_block_pending_union(
 
 static int test_partial_block_pending_union(void)
 {
-    CHECK(check_partial_block_pending_union(SOC_DEPTH_FORWARD) == 0);
-    CHECK(check_partial_block_pending_union(SOC_DEPTH_REVERSED) == 0);
+    CHECK(check_partial_block_pending_union() == 0);
     return 0;
 }
 
@@ -3971,9 +3700,8 @@ static int rasterize_resized_early_z_surface(
 {
     static const uint32_t canary_bits = UINT32_C(0x7fc12345);
     const float canary = float_from_bits(canary_bits);
-    const float clear_depth = clear_depth_for(frame->depth_direction);
-    const float untouched_depth =
-        frame->depth_direction == SOC_DEPTH_REVERSED ? -1.0f : 2.0f;
+    const float clear_depth = 0.0f;
+    const float untouched_depth = -1.0f;
     const size_t pixel_count = (size_t)width * height;
     const size_t expected_block_count =
         (size_t)expected_block_columns * expected_block_rows;
@@ -4035,11 +3763,7 @@ static int rasterize_resized_early_z_surface(
     }
     for (index = 0u; index < expected_block_count; ++index) {
         CHECK(rasterizer->early_z_pending_masks[index] == 0u);
-        if (frame->depth_direction == SOC_DEPTH_REVERSED) {
-            CHECK(rasterizer->early_z_farthest_depths[index] <= depth[0]);
-        } else {
-            CHECK(rasterizer->early_z_farthest_depths[index] >= depth[0]);
-        }
+        CHECK(rasterizer->early_z_farthest_depths[index] <= depth[0]);
     }
     for (index = 0u; index < CANARY_WORD_COUNT; ++index) {
         CHECK(float_bits(storage[index]) == canary_bits);
@@ -4052,9 +3776,7 @@ static int rasterize_resized_early_z_surface(
     return 0;
 }
 
-static int check_rasterizer_resize_early_z_lifecycle(
-    soc_depth_direction depth_direction
-)
+static int check_rasterizer_resize_early_z_lifecycle(void)
 {
     enum {
         INITIAL_WIDTH = 16,
@@ -4072,12 +3794,9 @@ static int check_rasterizer_resize_early_z_lifecycle(
             CANARY_WORD_COUNT + SECOND_PIXEL_COUNT + CANARY_WORD_COUNT,
     };
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        depth_direction
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
-    const float source_depth = depth_direction == SOC_DEPTH_REVERSED
-        ? 0.65f
-        : 0.35f;
+    const float source_depth = 0.65f;
     soc_kernel_table kernels = make_counting_scalar_kernel_table();
     soc_rasterizer rasterizer;
     float initial_depth[INITIAL_PIXEL_COUNT];
@@ -4136,17 +3855,11 @@ static int check_rasterizer_resize_early_z_lifecycle(
 
 static int test_rasterizer_resize_early_z_lifecycle(void)
 {
-    CHECK(check_rasterizer_resize_early_z_lifecycle(
-        SOC_DEPTH_FORWARD
-    ) == 0);
-    CHECK(check_rasterizer_resize_early_z_lifecycle(
-        SOC_DEPTH_REVERSED
-    ) == 0);
+    CHECK(check_rasterizer_resize_early_z_lifecycle() == 0);
     return 0;
 }
 
 static int check_shared_tile_locks_match_serial(
-    soc_depth_direction depth_direction,
     soc_bool crosses_tile_boundary
 )
 {
@@ -4185,10 +3898,9 @@ static int check_shared_tile_locks_match_serial(
         : single_tile_triangle1;
     const size_t pixel_count = (size_t)WIDTH * HEIGHT;
     const soc_frame_desc frame = make_frame_desc(
-        SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        depth_direction
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
     );
-    const float clear_depth = clear_depth_for(depth_direction);
+    const float clear_depth = 0.0f;
     uint32_t indices[3] = {0u, 1u, 2u};
     float positions[RASTERIZER_COUNT][9];
     soc_mesh meshes[RASTERIZER_COUNT];
@@ -4342,19 +4054,9 @@ static int test_shared_tile_locks_and_no_clear_begin(void)
     ) == SOC_RESULT_INVALID_ARGUMENT);
     CHECK(invalid_locks.locks == NULL);
     CHECK(check_shared_tile_locks_match_serial(
-        SOC_DEPTH_FORWARD,
         SOC_TRUE
     ) == 0);
     CHECK(check_shared_tile_locks_match_serial(
-        SOC_DEPTH_REVERSED,
-        SOC_TRUE
-    ) == 0);
-    CHECK(check_shared_tile_locks_match_serial(
-        SOC_DEPTH_FORWARD,
-        SOC_FALSE
-    ) == 0);
-    CHECK(check_shared_tile_locks_match_serial(
-        SOC_DEPTH_REVERSED,
         SOC_FALSE
     ) == 0);
     return 0;
@@ -4383,13 +4085,13 @@ int main(void)
     if (test_clipped_polygon_fans_have_no_cracks() != 0) {
         return 1;
     }
-    if (test_varying_depth_is_guarded_in_depth_direction() != 0) {
+    if (test_varying_depth_is_conservative() != 0) {
         return 1;
     }
     if (test_narrow_q8_depth_is_conservative() != 0) {
         return 1;
     }
-    if (test_depth_ranges_directions_and_submission_orders() != 0) {
+    if (test_depth_ranges_and_submission_orders() != 0) {
         return 1;
     }
     if (test_odd_block_tails_and_narrow_canaries() != 0) {

@@ -58,6 +58,9 @@ if(NOT "${help_result}" STREQUAL "0" OR
         "stderr:\n${help_stderr}"
     )
 endif()
+if("${help_stdout}" MATCHES "--reversed-z")
+    message(FATAL_ERROR "soc_cli still advertises the removed --reversed-z option")
+endif()
 
 execute_process(
     COMMAND

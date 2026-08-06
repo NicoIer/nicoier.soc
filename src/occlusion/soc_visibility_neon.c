@@ -373,7 +373,7 @@ static void project_aabb_pair_f64_neon(
         SOC_FALSE
     );
     minimum_near = plane_distance_pair_f64(
-        &query->clip_planes[query->near_clip_plane_index],
+        &query->clip_planes[SOC_VISIBILITY_NEAR_CLIP_PLANE_INDEX],
         minimum_x,
         maximum_x,
         minimum_y,
@@ -419,7 +419,8 @@ static void project_aabb_pair_f64_neon(
         } else if (has_nonpositive_w == SOC_TRUE) {
             out_projection[lane] = SOC_AABB_PROJECTION_UNKNOWN;
         } else if (has_corner_outside_near == SOC_TRUE &&
-            (all_outside_mask[lane] & query->near_clip_plane_bit) == 0u) {
+            (all_outside_mask[lane] &
+                SOC_VISIBILITY_NEAR_CLIP_PLANE_BIT) == 0u) {
             out_projection[lane] = SOC_AABB_PROJECTION_UNKNOWN;
         } else if (all_outside_mask[lane] != 0u) {
             out_projection[lane] = SOC_AABB_PROJECTION_OUTSIDE;
@@ -515,9 +516,7 @@ static void project_aabb_pair_f64_neon(
     projected_maximum_x = vdupq_n_f64(-DBL_MAX);
     projected_minimum_y = vdupq_n_f64(DBL_MAX);
     projected_maximum_y = vdupq_n_f64(-DBL_MAX);
-    projected_nearest_depth = query->depth_direction == SOC_DEPTH_REVERSED
-        ? vdupq_n_f64(-DBL_MAX)
-        : vdupq_n_f64(DBL_MAX);
+    projected_nearest_depth = vdupq_n_f64(-DBL_MAX);
 
     for (corner = 0u; corner < 8u; ++corner) {
         const float64x2_t inverse_w = vdivq_f64(
@@ -559,10 +558,10 @@ static void project_aabb_pair_f64_neon(
             ndc_y
         );
         depth = clamp_pair_f64(depth, 0.0, 1.0);
-        projected_nearest_depth =
-            query->depth_direction == SOC_DEPTH_REVERSED
-                ? ordered_max_pair_f64(projected_nearest_depth, depth)
-                : ordered_min_pair_f64(projected_nearest_depth, depth);
+        projected_nearest_depth = ordered_max_pair_f64(
+            projected_nearest_depth,
+            depth
+        );
     }
 
     for (lane = 0u; lane < 2u; ++lane) {
@@ -600,11 +599,8 @@ static void project_aabb_pair_f64_neon(
             1.0
         );
         out_projected[lane].nearest_depth = clamp_double_neon(
-            query->depth_direction == SOC_DEPTH_REVERSED
-                ? get_pair_lane_f64(projected_nearest_depth, lane) +
-                    projection_margin
-                : get_pair_lane_f64(projected_nearest_depth, lane) -
-                    projection_margin,
+            get_pair_lane_f64(projected_nearest_depth, lane) +
+                projection_margin,
             0.0,
             1.0
         );
@@ -716,7 +712,6 @@ static SOC_NOINLINE soc_result soc_occlusion_test_aabbs_pair_neon(
             } else {
                 visibility = soc_test_projected_aabb_scalar(
                     hiz,
-                    query,
                     &projected[lane]
                 );
             }

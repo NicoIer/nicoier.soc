@@ -1010,7 +1010,6 @@ static soc_raster_setup_result setup_raster_triangle(
 }
 
 static float make_conservative_depth(
-    const soc_rasterizer* rasterizer,
     double depth,
     double depth_error_bound
 )
@@ -1019,9 +1018,7 @@ static float make_conservative_depth(
     uint32_t candidate_bits;
     uint32_t guard;
 
-    depth = rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
-        ? depth - depth_error_bound
-        : depth + depth_error_bound;
+    depth -= depth_error_bound;
     depth = clamp_double(depth, 0.0, 1.0);
     candidate_depth = (float)depth;
     memcpy(
@@ -1029,29 +1026,13 @@ static float make_conservative_depth(
         &candidate_depth,
         sizeof(candidate_bits)
     );
-    if (rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED) {
-        if ((double)candidate_depth > depth && candidate_bits != 0u) {
-            --candidate_bits;
-        }
-        for (guard = 0u;
-             guard < SOC_RASTER_DEPTH_GUARD_ULPS &&
-                candidate_bits != 0u;
-             ++guard) {
-            --candidate_bits;
-        }
-    } else {
-        const uint32_t one_bits = UINT32_C(0x3f800000);
-
-        if ((double)candidate_depth < depth &&
-            candidate_bits < one_bits) {
-            ++candidate_bits;
-        }
-        for (guard = 0u;
-             guard < SOC_RASTER_DEPTH_GUARD_ULPS &&
-                candidate_bits < one_bits;
-             ++guard) {
-            ++candidate_bits;
-        }
+    if ((double)candidate_depth > depth && candidate_bits != 0u) {
+        --candidate_bits;
+    }
+    for (guard = 0u;
+         guard < SOC_RASTER_DEPTH_GUARD_ULPS && candidate_bits != 0u;
+         ++guard) {
+        --candidate_bits;
     }
     memcpy(
         &candidate_depth,
@@ -1061,12 +1042,8 @@ static float make_conservative_depth(
     return candidate_depth;
 }
 
-static float make_far_biased_plane_depth(
-    float depth,
-    soc_depth_direction depth_direction
-)
+static float make_far_biased_plane_depth(float depth)
 {
-    const uint32_t one_bits = UINT32_C(0x3f800000);
     uint32_t bits;
 
     if (depth <= 0.0f) {
@@ -1075,15 +1052,9 @@ static float make_far_biased_plane_depth(
         depth = 1.0f;
     }
     memcpy(&bits, &depth, sizeof(bits));
-    if (depth_direction == SOC_DEPTH_REVERSED) {
-        bits = bits > SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
-            ? bits - SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
-            : 0u;
-    } else {
-        bits = bits < one_bits - SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
-            ? bits + SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
-            : one_bits;
-    }
+    bits = bits > SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
+        ? bits - SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
+        : 0u;
     memcpy(&depth, &bits, sizeof(depth));
     return depth;
 }
@@ -1091,17 +1062,14 @@ static float make_far_biased_plane_depth(
 static float make_depth_plane_block_origin(
     const soc_raster_triangle_setup* setup,
     uint32_t block_x,
-    uint32_t block_y,
-    soc_depth_direction depth_direction
+    uint32_t block_y
 )
 {
     double block_depth = setup->depth_sample_origin +
         setup->depth_step_x * (double)block_x +
         setup->depth_step_y * (double)block_y;
 
-    block_depth = depth_direction == SOC_DEPTH_REVERSED
-        ? block_depth - setup->depth_error_bound
-        : block_depth + setup->depth_error_bound;
+    block_depth -= setup->depth_error_bound;
     return (float)block_depth;
 }
 
@@ -1111,7 +1079,6 @@ static float make_depth_plane_block_origin(
  * keep the nearest corner conservative for every sample in the rectangle.
  */
 static void configure_depth_block_candidate(
-    const soc_rasterizer* rasterizer,
     const soc_raster_triangle_setup* setup,
     uint32_t block_x,
     uint32_t block_y,
@@ -1120,8 +1087,6 @@ static void configure_depth_block_candidate(
     soc_raster_depth_block_candidate* out_candidate
 )
 {
-    const soc_depth_direction depth_direction =
-        rasterizer->frame.depth_direction;
     float x_offsets[2];
     float y_offsets[2];
     uint32_t corner_y;
@@ -1130,7 +1095,6 @@ static void configure_depth_block_candidate(
         const double block_depth = setup->depth_sample_origin;
 
         out_candidate->depth_origin = make_conservative_depth(
-            rasterizer,
             block_depth,
             setup->depth_error_bound
         );
@@ -1145,8 +1109,7 @@ static void configure_depth_block_candidate(
     out_candidate->depth_origin = make_depth_plane_block_origin(
         setup,
         block_x,
-        block_y,
-        depth_direction
+        block_y
     );
     out_candidate->depth_step_x = (float)setup->depth_step_x;
     out_candidate->depth_step_y = (float)setup->depth_step_y;
@@ -1172,24 +1135,19 @@ static void configure_depth_block_candidate(
                     out_candidate->depth_step_x,
                     x_offsets[corner_x],
                     row_depth
-                ),
-                depth_direction
+                )
             );
 
             if (corner_x == 0u && corner_y == 0u) {
                 out_candidate->nearest_depth = candidate;
                 out_candidate->farthest_depth = candidate;
-            } else if (depth_direction == SOC_DEPTH_REVERSED) {
+            } else {
                 if (candidate > out_candidate->nearest_depth) {
                     out_candidate->nearest_depth = candidate;
                 }
                 if (candidate < out_candidate->farthest_depth) {
                     out_candidate->farthest_depth = candidate;
                 }
-            } else if (candidate < out_candidate->nearest_depth) {
-                out_candidate->nearest_depth = candidate;
-            } else if (candidate > out_candidate->farthest_depth) {
-                out_candidate->farthest_depth = candidate;
             }
         }
     }
@@ -1201,14 +1159,11 @@ static void configure_depth_block_candidate(
  * the complete [0,7] local-offset envelope contain every fine candidate.
  */
 static void configure_coarse_depth_candidate(
-    const soc_rasterizer* rasterizer,
     const soc_raster_triangle_setup* setup,
     const soc_raster_region* region,
     soc_raster_depth_block_candidate* out_candidate
 )
 {
-    const soc_depth_direction depth_direction =
-        rasterizer->frame.depth_direction;
     uint32_t last_block_x =
         (region->end_x - 1u) & ~(SOC_RASTER_BLOCK_SIZE - 1u);
     uint32_t last_block_y =
@@ -1220,7 +1175,6 @@ static void configure_coarse_depth_candidate(
 
     if (setup->depth_step_x == 0.0 && setup->depth_step_y == 0.0) {
         configure_depth_block_candidate(
-            rasterizer,
             setup,
             region->minimum_x,
             region->minimum_y,
@@ -1239,8 +1193,7 @@ static void configure_coarse_depth_candidate(
     minimum_origin = make_depth_plane_block_origin(
         setup,
         region->minimum_x,
-        region->minimum_y,
-        depth_direction
+        region->minimum_y
     );
     maximum_origin = minimum_origin;
     {
@@ -1261,8 +1214,7 @@ static void configure_coarse_depth_candidate(
                 const float origin = make_depth_plane_block_origin(
                     setup,
                     block_x[x_index],
-                    block_y[y_index],
-                    depth_direction
+                    block_y[y_index]
                 );
 
                 if (origin < minimum_origin) {
@@ -1307,26 +1259,18 @@ static void configure_coarse_depth_candidate(
                         out_candidate->depth_step_x,
                         offset_x,
                         row_depth
-                    ),
-                    depth_direction
+                    )
                 );
 
                 if (origin_index == 0u && offset_y_index == 0u &&
                     offset_x_index == 0u) {
                     out_candidate->nearest_depth = candidate;
                     out_candidate->farthest_depth = candidate;
-                } else if (depth_direction == SOC_DEPTH_REVERSED) {
+                } else {
                     if (candidate > out_candidate->nearest_depth) {
                         out_candidate->nearest_depth = candidate;
                     }
                     if (candidate < out_candidate->farthest_depth) {
-                        out_candidate->farthest_depth = candidate;
-                    }
-                } else {
-                    if (candidate < out_candidate->nearest_depth) {
-                        out_candidate->nearest_depth = candidate;
-                    }
-                    if (candidate > out_candidate->farthest_depth) {
                         out_candidate->farthest_depth = candidate;
                     }
                 }
@@ -1368,17 +1312,11 @@ static const float* find_small_early_z_farthest_depth(
 }
 
 static soc_bool depth_block_is_early_z_rejected(
-    const soc_rasterizer* rasterizer,
     const soc_raster_depth_block_candidate* candidate,
     float farthest_depth
 )
 {
-    if (rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED) {
-        return candidate->nearest_depth <= farthest_depth
-            ? SOC_TRUE
-            : SOC_FALSE;
-    }
-    return candidate->nearest_depth >= farthest_depth
+    return candidate->nearest_depth <= farthest_depth
         ? SOC_TRUE
         : SOC_FALSE;
 }
@@ -1393,10 +1331,9 @@ static void store_small_constant_depth(
     const size_t depth_index =
         (size_t)pixel_y * rasterizer->width + pixel_x;
     const float stored_depth = rasterizer->depth[depth_index];
-    const soc_bool passes_depth =
-        rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
-            ? (candidate_depth > stored_depth ? SOC_TRUE : SOC_FALSE)
-            : (candidate_depth < stored_depth ? SOC_TRUE : SOC_FALSE);
+    const soc_bool passes_depth = candidate_depth > stored_depth
+        ? SOC_TRUE
+        : SOC_FALSE;
 
     if (passes_depth == SOC_TRUE) {
         rasterizer->depth[depth_index] = candidate_depth;
@@ -1411,7 +1348,6 @@ static void rasterize_small_constant_triangle(
 {
     const soc_raster_region* region = &setup->bounds;
     const float candidate_depth = make_conservative_depth(
-        rasterizer,
         setup->depth_sample_origin,
         setup->depth_error_bound
     );
@@ -1422,9 +1358,7 @@ static void rasterize_small_constant_triangle(
     uint32_t pixel_y;
 
     if (early_z_farthest_depth != NULL &&
-        (rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
-            ? candidate_depth <= *early_z_farthest_depth
-            : candidate_depth >= *early_z_farthest_depth)) {
+        candidate_depth <= *early_z_farthest_depth) {
         return;
     }
     for (edge_index = 0u; edge_index < 3u; ++edge_index) {
@@ -1510,8 +1444,7 @@ static void rasterize_small_plane_triangle_untracked(
     depth_candidate.depth_origin = make_depth_plane_block_origin(
         setup,
         region->minimum_x,
-        region->minimum_y,
-        rasterizer->frame.depth_direction
+        region->minimum_y
     );
     depth_candidate.depth_step_x = (float)setup->depth_step_x;
     depth_candidate.depth_step_y = (float)setup->depth_step_y;
@@ -1593,7 +1526,6 @@ static void rasterize_small_triangle_blocks_untracked(
             if (setup->depth_step_x == 0.0 &&
                 setup->depth_step_y == 0.0) {
                 depth_candidate.depth_origin = make_conservative_depth(
-                    rasterizer,
                     setup->depth_sample_origin,
                     setup->depth_error_bound
                 );
@@ -1605,8 +1537,7 @@ static void rasterize_small_triangle_blocks_untracked(
                     make_depth_plane_block_origin(
                         setup,
                         block_x,
-                        block_y,
-                        rasterizer->frame.depth_direction
+                        block_y
                     );
                 depth_candidate.depth_step_x =
                     (float)setup->depth_step_x;
@@ -1680,8 +1611,7 @@ static float scan_depth_block_summary(
     const float* depth,
     size_t row_stride,
     uint32_t block_width,
-    uint32_t block_height,
-    soc_depth_direction depth_direction
+    uint32_t block_height
 )
 {
     float summary = depth[0];
@@ -1694,11 +1624,7 @@ static float scan_depth_block_summary(
         for (; column < block_width; ++column) {
             const float candidate = depth_row[column];
 
-            if (depth_direction == SOC_DEPTH_REVERSED) {
-                if (candidate < summary) {
-                    summary = candidate;
-                }
-            } else if (candidate > summary) {
+            if (candidate < summary) {
                 summary = candidate;
             }
         }
@@ -1707,7 +1633,6 @@ static float scan_depth_block_summary(
 }
 
 static soc_bool update_early_z_after_store(
-    const soc_rasterizer* rasterizer,
     float* farthest_depth,
     uint64_t* pending_mask_storage,
     const soc_raster_depth_block_candidate* candidate,
@@ -1718,23 +1643,13 @@ static soc_bool update_early_z_after_store(
     uint32_t physical_height
 )
 {
-    const float untouched_depth =
-        rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
-            ? -1.0f
-            : 2.0f;
-    const float clear_depth =
-        rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
-            ? 0.0f
-            : 1.0f;
+    const float untouched_depth = -1.0f;
+    const float clear_depth = 0.0f;
     const float previous_farthest_depth = *farthest_depth;
     const soc_bool replaces_farthest =
-        rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
-            ? (candidate->farthest_depth > previous_farthest_depth
-                ? SOC_TRUE
-                : SOC_FALSE)
-            : (candidate->farthest_depth < previous_farthest_depth
-                ? SOC_TRUE
-                : SOC_FALSE);
+        candidate->farthest_depth > previous_farthest_depth
+            ? SOC_TRUE
+            : SOC_FALSE;
     uint64_t pending_mask;
     uint64_t physical_mask;
 
@@ -1771,8 +1686,7 @@ static soc_bool update_early_z_after_store(
         physical_depth,
         row_stride,
         physical_width,
-        physical_height,
-        rasterizer->frame.depth_direction
+        physical_height
     );
     *pending_mask_storage = 0u;
     return SOC_TRUE;
@@ -1780,14 +1694,8 @@ static soc_bool update_early_z_after_store(
 
 static void rebuild_coarse_early_z(soc_rasterizer* rasterizer)
 {
-    const float clear_depth =
-        rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
-            ? 0.0f
-            : 1.0f;
-    const float untouched_depth =
-        rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
-            ? -1.0f
-            : 2.0f;
+    const float clear_depth = 0.0f;
+    const float untouched_depth = -1.0f;
     uint32_t tile_row;
 
     if (rasterizer->early_z_coarse_dirty != SOC_TRUE) {
@@ -1833,12 +1741,7 @@ static void rebuild_coarse_early_z(soc_rasterizer* rasterizer)
                         first_block_column + column
                     ];
 
-                    if (rasterizer->frame.depth_direction ==
-                        SOC_DEPTH_REVERSED) {
-                        if (candidate < summary) {
-                            summary = candidate;
-                        }
-                    } else if (candidate > summary) {
+                    if (candidate < summary) {
                         summary = candidate;
                     }
                 }
@@ -1861,11 +1764,7 @@ static void rebuild_coarse_early_z(soc_rasterizer* rasterizer)
             const float candidate =
                 rasterizer->early_z_tile_farthest_depths[tile_index];
 
-            if (rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED) {
-                if (candidate < summary) {
-                    summary = candidate;
-                }
-            } else if (candidate > summary) {
+            if (candidate < summary) {
                 summary = candidate;
             }
         }
@@ -1978,8 +1877,7 @@ static void rasterize_depth_block(
             block_width,
             block_height,
             coverage_mask,
-            candidate->depth_origin,
-            rasterizer->frame.depth_direction
+            candidate->depth_origin
         );
         return;
     }
@@ -1993,8 +1891,7 @@ static void rasterize_depth_block(
         coverage_mask,
         candidate->depth_origin,
         candidate->depth_step_x,
-        candidate->depth_step_y,
-        rasterizer->frame.depth_direction
+        candidate->depth_step_y
     );
 }
 
@@ -2072,7 +1969,6 @@ static void rasterize_triangle_blocks_fine(
                 aligned_y
             );
             configure_depth_block_candidate(
-                rasterizer,
                 setup,
                 block_x,
                 block_y,
@@ -2081,7 +1977,6 @@ static void rasterize_triangle_blocks_fine(
                 &depth_candidate
             );
             if (depth_block_is_early_z_rejected(
-                    rasterizer,
                     &depth_candidate,
                     rasterizer->early_z_farthest_depths[early_z_index]
                 ) == SOC_TRUE) {
@@ -2109,7 +2004,6 @@ static void rasterize_triangle_blocks_fine(
                     coverage_mask
                 );
                 if (update_early_z_after_store(
-                        rasterizer,
                         &rasterizer->early_z_farthest_depths[
                             early_z_index
                         ],
@@ -2138,10 +2032,7 @@ static void rasterize_triangle_blocks(
     const soc_raster_region* region
 )
 {
-    const float clear_depth =
-        rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
-            ? 0.0f
-            : 1.0f;
+    const float clear_depth = 0.0f;
     soc_raster_depth_block_candidate frame_candidate;
     uint32_t tile_y = region->minimum_y &
         ~(SOC_RASTER_LOCK_TILE_SIZE - 1u);
@@ -2158,31 +2049,18 @@ static void rasterize_triangle_blocks(
         return;
     }
     configure_coarse_depth_candidate(
-        rasterizer,
         setup,
         region,
         &frame_candidate
     );
-    if (rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED) {
-        if (frame_candidate.nearest_depth <=
-            rasterizer->early_z_frame_farthest_depth) {
-            return;
-        }
-        if (frame_candidate.farthest_depth >
-            rasterizer->early_z_frame_farthest_depth) {
-            rasterize_triangle_blocks_fine(rasterizer, setup, region);
-            return;
-        }
-    } else {
-        if (frame_candidate.nearest_depth >=
-            rasterizer->early_z_frame_farthest_depth) {
-            return;
-        }
-        if (frame_candidate.farthest_depth <
-            rasterizer->early_z_frame_farthest_depth) {
-            rasterize_triangle_blocks_fine(rasterizer, setup, region);
-            return;
-        }
+    if (frame_candidate.nearest_depth <=
+        rasterizer->early_z_frame_farthest_depth) {
+        return;
+    }
+    if (frame_candidate.farthest_depth >
+        rasterizer->early_z_frame_farthest_depth) {
+        rasterize_triangle_blocks_fine(rasterizer, setup, region);
+        return;
     }
 
     for (; tile_y < region->end_y; tile_y += SOC_RASTER_LOCK_TILE_SIZE) {
@@ -2221,17 +2099,11 @@ static void rasterize_triangle_blocks(
                 soc_raster_depth_block_candidate candidate;
 
                 configure_coarse_depth_candidate(
-                    rasterizer,
                     setup,
                     &tile_region,
                     &candidate
                 );
-                if (rasterizer->frame.depth_direction ==
-                        SOC_DEPTH_REVERSED
-                        ? candidate.nearest_depth <=
-                            early_z_farthest_depth
-                        : candidate.nearest_depth >=
-                            early_z_farthest_depth) {
+                if (candidate.nearest_depth <= early_z_farthest_depth) {
                     continue;
                 }
             }
@@ -2267,8 +2139,7 @@ static void rasterize_depth_block_to_target(
             block_width,
             block_height,
             coverage_mask,
-            candidate->depth_origin,
-            rasterizer->frame.depth_direction
+            candidate->depth_origin
         );
         return;
     }
@@ -2281,8 +2152,7 @@ static void rasterize_depth_block_to_target(
         coverage_mask,
         candidate->depth_origin,
         candidate->depth_step_x,
-        candidate->depth_step_y,
-        rasterizer->frame.depth_direction
+        candidate->depth_step_y
     );
 }
 
@@ -2361,7 +2231,6 @@ static void rasterize_triangle_blocks_to_target(
                 aligned_y
             );
             configure_depth_block_candidate(
-                rasterizer,
                 setup,
                 block_x,
                 block_y,
@@ -2370,7 +2239,6 @@ static void rasterize_triangle_blocks_to_target(
                 &depth_candidate
             );
             if (depth_block_is_early_z_rejected(
-                    rasterizer,
                     &depth_candidate,
                     target->early_z_farthest_depths[early_z_index]
                 ) == SOC_TRUE) {
@@ -2399,7 +2267,6 @@ static void rasterize_triangle_blocks_to_target(
                     coverage_mask
                 );
                 (void)update_early_z_after_store(
-                    rasterizer,
                     &target->early_z_farthest_depths[early_z_index],
                     &target->early_z_pending_masks[early_z_index],
                     &depth_candidate,
@@ -2970,10 +2837,8 @@ static soc_result begin_frame(
         return SOC_RESULT_INVALID_STATE;
     }
 
-    initial_depth =
-        desc->depth_direction == SOC_DEPTH_REVERSED ? 0.0f : 1.0f;
-    untouched_depth =
-        desc->depth_direction == SOC_DEPTH_REVERSED ? -1.0f : 2.0f;
+    initial_depth = 0.0f;
+    untouched_depth = -1.0f;
     rasterizer->frame = *desc;
     if (clear_depth == SOC_TRUE) {
         rasterizer->kernels->clear_f32(
@@ -3382,18 +3247,15 @@ static soc_bool raster_target_is_valid(
 }
 
 void soc_raster_target_reset_early_z_unchecked(
-    soc_raster_target* target,
-    soc_depth_direction depth_direction
+    soc_raster_target* target
 )
 {
-    const float untouched_depth =
-        depth_direction == SOC_DEPTH_REVERSED ? -1.0f : 2.0f;
     size_t block_index;
 
     for (block_index = 0u;
          block_index < target->early_z_block_count;
          ++block_index) {
-        target->early_z_farthest_depths[block_index] = untouched_depth;
+        target->early_z_farthest_depths[block_index] = -1.0f;
     }
 }
 

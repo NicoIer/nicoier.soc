@@ -80,7 +80,7 @@ static soc_mat4 z_translation_matrix(float translation)
     return matrix;
 }
 
-static soc_frame_desc make_frame_desc(soc_depth_direction depth_direction)
+static soc_frame_desc make_frame_desc(void)
 {
     const soc_frame_desc desc = {
         .struct_size = sizeof(soc_frame_desc),
@@ -91,7 +91,6 @@ static soc_frame_desc make_frame_desc(soc_depth_direction depth_direction)
             .col3 = {0.0f, 0.0f, 0.0f, 1.0f},
         },
         .clip_depth_range = SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        .depth_direction = depth_direction,
         .front_face = SOC_FRONT_FACE_CCW,
         .flags = SOC_FRAME_FLAG_NONE,
     };
@@ -243,13 +242,12 @@ static soc_result capture_frame_with_desc(
 
 static soc_result capture_frame(
     soc_context* context,
-    soc_depth_direction depth_direction,
     soc_mesh* const* meshes,
     uint32_t mesh_count,
     frame_capture* out_capture
 )
 {
-    const soc_frame_desc frame_desc = make_frame_desc(depth_direction);
+    const soc_frame_desc frame_desc = make_frame_desc();
 
     return capture_frame_with_desc(
         context,
@@ -445,11 +443,11 @@ static int test_single_triangle_level_zero(void)
     meshes[0] = mesh;
 
     CHECK_RESULT(
-        capture_frame(context, SOC_DEPTH_FORWARD, meshes, 1u, &capture),
+        capture_frame(context, meshes, 1u, &capture),
         SOC_RESULT_OK
     );
     CHECK(check_layout(&capture, TEST_WIDTH, TEST_HEIGHT) == 0);
-    CHECK(check_triangle_depth(&capture, 0.375f, 1.0f) == 0);
+    CHECK(check_triangle_depth(&capture, 0.375f, 0.0f) == 0);
     CHECK(check_stats(&capture, 4u, 1u, 0u, 1u) == 0);
 
     CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
@@ -458,7 +456,6 @@ static int test_single_triangle_level_zero(void)
 }
 
 static int test_depth_order(
-    soc_depth_direction direction,
     float near_depth,
     float far_depth,
     float clear_depth
@@ -503,7 +500,7 @@ static int test_depth_order(
     meshes[1] = far_mesh;
 
     CHECK_RESULT(
-        capture_frame(context, direction, meshes, 2u, &capture),
+        capture_frame(context, meshes, 2u, &capture),
         SOC_RESULT_OK
     );
     CHECK(check_layout(&capture, TEST_WIDTH, TEST_HEIGHT) == 0);
@@ -516,18 +513,9 @@ static int test_depth_order(
     return 0;
 }
 
-static int test_forward_and_reversed_depth(void)
+static int test_reversed_depth(void)
 {
     if (test_depth_order(
-            SOC_DEPTH_FORWARD,
-            0.20f,
-            0.80f,
-            1.0f
-        ) != 0) {
-        return 1;
-    }
-    if (test_depth_order(
-            SOC_DEPTH_REVERSED,
             0.80f,
             0.20f,
             0.0f
@@ -544,7 +532,7 @@ static int test_negative_one_to_one_depth_mapping(void)
     soc_context* context = NULL;
     soc_mesh* mesh = NULL;
     soc_mesh* meshes[1];
-    soc_frame_desc frame_desc = make_frame_desc(SOC_DEPTH_FORWARD);
+    soc_frame_desc frame_desc = make_frame_desc();
     frame_capture capture;
 
     make_triangle(0.0f, positions);
@@ -578,7 +566,7 @@ static int test_negative_one_to_one_depth_mapping(void)
         SOC_RESULT_OK
     );
     CHECK(check_layout(&capture, TEST_WIDTH, TEST_HEIGHT) == 0);
-    CHECK(check_triangle_depth(&capture, 0.50f, 1.0f) == 0);
+    CHECK(check_triangle_depth(&capture, 0.50f, 0.0f) == 0);
     CHECK(check_stats(&capture, 4u, 1u, 0u, 1u) == 0);
 
     CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
@@ -594,7 +582,7 @@ static int test_homogeneous_scale_invariance(void)
     soc_context* context = NULL;
     soc_mesh* mesh = NULL;
     soc_mesh* meshes[1];
-    soc_frame_desc scaled_frame = make_frame_desc(SOC_DEPTH_FORWARD);
+    soc_frame_desc scaled_frame = make_frame_desc();
     frame_capture identity_capture;
     frame_capture scaled_capture;
     uint32_t pixel;
@@ -624,7 +612,6 @@ static int test_homogeneous_scale_invariance(void)
     CHECK_RESULT(
         capture_frame(
             context,
-            SOC_DEPTH_FORWARD,
             meshes,
             1u,
             &identity_capture
@@ -644,8 +631,8 @@ static int test_homogeneous_scale_invariance(void)
         SOC_RESULT_OK
     );
 
-    CHECK(check_triangle_depth(&identity_capture, 0.375f, 1.0f) == 0);
-    CHECK(check_triangle_depth(&scaled_capture, 0.375f, 1.0f) == 0);
+    CHECK(check_triangle_depth(&identity_capture, 0.375f, 0.0f) == 0);
+    CHECK(check_triangle_depth(&scaled_capture, 0.375f, 0.0f) == 0);
     CHECK(check_stats(&identity_capture, 4u, 1u, 0u, 1u) == 0);
     CHECK(check_stats(&scaled_capture, 4u, 1u, 0u, 1u) == 0);
     for (pixel = 0u; pixel < TEST_PIXEL_COUNT; ++pixel) {
@@ -679,7 +666,7 @@ static int test_instance_transform_depth(void)
     soc_mesh* meshes[1];
     soc_mat4 transforms[2];
     const soc_mat4* transform_arrays[1];
-    const soc_frame_desc frame_desc = make_frame_desc(SOC_DEPTH_FORWARD);
+    const soc_frame_desc frame_desc = make_frame_desc();
     frame_capture capture;
 
     make_triangle(0.0f, positions);
@@ -715,7 +702,7 @@ static int test_instance_transform_depth(void)
         SOC_RESULT_OK
     );
     CHECK(check_layout(&capture, TEST_WIDTH, TEST_HEIGHT) == 0);
-    CHECK(check_triangle_depth(&capture, 0.25f, 1.0f) == 0);
+    CHECK(check_triangle_depth(&capture, 0.75f, 0.0f) == 0);
     CHECK(check_stats(&capture, 4u, 2u, 0u, 2u) == 0);
 
     CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
@@ -763,18 +750,18 @@ static int test_front_face_culling(void)
 
     meshes[0] = front_mesh;
     CHECK_RESULT(
-        capture_frame(context, SOC_DEPTH_FORWARD, meshes, 1u, &front),
+        capture_frame(context, meshes, 1u, &front),
         SOC_RESULT_OK
     );
-    CHECK(check_triangle_depth(&front, 0.35f, 1.0f) == 0);
+    CHECK(check_triangle_depth(&front, 0.35f, 0.0f) == 0);
     CHECK(check_stats(&front, 4u, 1u, 0u, 1u) == 0);
 
     meshes[0] = back_mesh;
     CHECK_RESULT(
-        capture_frame(context, SOC_DEPTH_FORWARD, meshes, 1u, &back),
+        capture_frame(context, meshes, 1u, &back),
         SOC_RESULT_OK
     );
-    CHECK(check_all_depth(&back, TEST_PIXEL_COUNT, 1.0f) == 0);
+    CHECK(check_all_depth(&back, TEST_PIXEL_COUNT, 0.0f) == 0);
     CHECK(check_stats(&back, 4u, 1u, 0u, 0u) == 0);
 
     CHECK_RESULT(soc_mesh_destroy(front_mesh), SOC_RESULT_OK);
@@ -827,17 +814,17 @@ static int test_two_sided_winding_and_frame_clear(void)
 
     meshes[0] = first_mesh;
     CHECK_RESULT(
-        capture_frame(context, SOC_DEPTH_FORWARD, meshes, 1u, &first),
+        capture_frame(context, meshes, 1u, &first),
         SOC_RESULT_OK
     );
     meshes[0] = second_mesh;
     CHECK_RESULT(
-        capture_frame(context, SOC_DEPTH_FORWARD, meshes, 1u, &second),
+        capture_frame(context, meshes, 1u, &second),
         SOC_RESULT_OK
     );
 
-    CHECK(check_triangle_depth(&first, 0.25f, 1.0f) == 0);
-    CHECK(check_triangle_depth(&second, 0.625f, 1.0f) == 0);
+    CHECK(check_triangle_depth(&first, 0.25f, 0.0f) == 0);
+    CHECK(check_triangle_depth(&second, 0.625f, 0.0f) == 0);
     CHECK(check_stats(&first, 4u, 1u, 0u, 1u) == 0);
     CHECK(check_stats(&second, 4u, 1u, 0u, 1u) == 0);
 
@@ -892,7 +879,7 @@ static int test_clipped_oversized_triangle(void)
     meshes[0] = mesh;
 
     CHECK_RESULT(
-        capture_frame(context, SOC_DEPTH_FORWARD, meshes, 1u, &capture),
+        capture_frame(context, meshes, 1u, &capture),
         SOC_RESULT_OK
     );
     CHECK(check_layout(&capture, TEST_WIDTH, TEST_HEIGHT) == 0);
@@ -939,7 +926,7 @@ static int check_trivially_rejected_triangle_with_desc(
         SOC_RESULT_OK
     );
     CHECK(check_layout(&capture, TEST_WIDTH, TEST_HEIGHT) == 0);
-    CHECK(check_all_depth(&capture, TEST_PIXEL_COUNT, 1.0f) == 0);
+    CHECK(check_all_depth(&capture, TEST_PIXEL_COUNT, 0.0f) == 0);
     CHECK(check_stats(&capture, 4u, 1u, 1u, 0u) == 0);
     CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
     return 0;
@@ -950,7 +937,7 @@ static int check_trivially_rejected_triangle(
     const float positions[9]
 )
 {
-    const soc_frame_desc frame_desc = make_frame_desc(SOC_DEPTH_FORWARD);
+    const soc_frame_desc frame_desc = make_frame_desc();
 
     return check_trivially_rejected_triangle_with_desc(
         context,
@@ -1027,10 +1014,10 @@ static int test_clip_outcode_trivial_paths(void)
     );
     meshes[0] = mesh;
     CHECK_RESULT(
-        capture_frame(context, SOC_DEPTH_FORWARD, meshes, 1u, &capture),
+        capture_frame(context, meshes, 1u, &capture),
         SOC_RESULT_OK
     );
-    CHECK(check_triangle_depth(&capture, 0.25f, 1.0f) == 0);
+    CHECK(check_triangle_depth(&capture, 0.25f, 0.0f) == 0);
     CHECK(check_stats(&capture, 4u, 1u, 0u, 1u) == 0);
     CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
 
@@ -1046,12 +1033,12 @@ static int test_clip_outcode_trivial_paths(void)
     );
     meshes[0] = mesh;
     CHECK_RESULT(
-        capture_frame(context, SOC_DEPTH_FORWARD, meshes, 1u, &capture),
+        capture_frame(context, meshes, 1u, &capture),
         SOC_RESULT_OK
     );
     CHECK(check_stats(&capture, 4u, 1u, 0u, 1u) == 0);
     for (pixel = 0u; pixel < TEST_PIXEL_COUNT; ++pixel) {
-        if (!depth_equal(capture.depth[pixel], 1.0f)) {
+        if (!depth_equal(capture.depth[pixel], 0.0f)) {
             ++drawn_count;
         }
     }
@@ -1071,10 +1058,10 @@ static int test_clip_outcode_trivial_paths(void)
     );
     meshes[0] = mesh;
     CHECK_RESULT(
-        capture_frame(context, SOC_DEPTH_FORWARD, meshes, 1u, &capture),
+        capture_frame(context, meshes, 1u, &capture),
         SOC_RESULT_OK
     );
-    CHECK(check_triangle_depth(&capture, -0.0f, 1.0f) == 0);
+    CHECK(check_all_depth(&capture, TEST_PIXEL_COUNT, 0.0f) == 0);
     CHECK(check_stats(&capture, 4u, 1u, 0u, 1u) == 0);
     CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
 
@@ -1158,7 +1145,6 @@ static int test_clip_outcode_partial_active_plane(void)
     CHECK_RESULT(
         capture_frame(
             context,
-            SOC_DEPTH_FORWARD,
             source_meshes,
             1u,
             &source_capture
@@ -1170,7 +1156,6 @@ static int test_clip_outcode_partial_active_plane(void)
     CHECK_RESULT(
         capture_frame(
             context,
-            SOC_DEPTH_FORWARD,
             reference_meshes,
             2u,
             &reference_capture
@@ -1207,26 +1192,26 @@ static int test_negative_one_to_one_near_outcodes(void)
 {
     const uint16_t indices[] = {0u, 1u, 2u};
     const float rejected_positions[] = {
-        -0.50f, -0.50f, -1.25f,
-         0.50f, -0.50f, -1.25f,
-         0.00f,  0.50f, -1.25f,
+        -0.50f, -0.50f, 1.25f,
+         0.50f, -0.50f, 1.25f,
+         0.00f,  0.50f, 1.25f,
     };
     const float source_positions[] = {
-        -0.75f, -0.50f, -1.50f,
-         0.75f, -0.50f, -0.50f,
-         0.00f,  0.75f, -0.50f,
+        -0.75f, -0.50f, 1.50f,
+         0.75f, -0.50f, 0.50f,
+         0.00f,  0.75f, 0.50f,
     };
     const float reference_first_positions[] = {
-        -0.375f,  0.125f, -1.00f,
-         0.000f, -0.500f, -1.00f,
-         0.750f, -0.500f, -0.50f,
+        -0.375f,  0.125f, 1.00f,
+         0.000f, -0.500f, 1.00f,
+         0.750f, -0.500f, 0.50f,
     };
     const float reference_second_positions[] = {
-        -0.375f, 0.125f, -1.00f,
-         0.750f, -0.500f, -0.50f,
-         0.000f, 0.750f, -0.50f,
+        -0.375f, 0.125f, 1.00f,
+         0.750f, -0.500f, 0.50f,
+         0.000f, 0.750f, 0.50f,
     };
-    soc_frame_desc frame_desc = make_frame_desc(SOC_DEPTH_FORWARD);
+    soc_frame_desc frame_desc = make_frame_desc();
     soc_context* context = NULL;
     soc_mesh* source_mesh = NULL;
     soc_mesh* reference_first_mesh = NULL;
@@ -1363,7 +1348,7 @@ static int test_clip_outcode_disjoint_vertex_planes(void)
     );
     meshes[0] = mesh;
     CHECK_RESULT(
-        capture_frame(context, SOC_DEPTH_FORWARD, meshes, 1u, &capture),
+        capture_frame(context, meshes, 1u, &capture),
         SOC_RESULT_OK
     );
     CHECK(capture.stats.hiz_level_count == 4u);
@@ -1386,7 +1371,7 @@ static int test_clip_outcode_multi_instance_stats(void)
 {
     const uint16_t indices[] = {0u, 1u, 2u};
     const uint32_t instance_counts[] = {3u};
-    const soc_frame_desc frame_desc = make_frame_desc(SOC_DEPTH_FORWARD);
+    const soc_frame_desc frame_desc = make_frame_desc();
     float positions[9];
     soc_mat4 transforms[3];
     const soc_mat4* transform_arrays[1];
@@ -1437,14 +1422,11 @@ static int test_clip_outcode_multi_instance_stats(void)
     return 0;
 }
 
-static int test_fullscreen_hiz_levels(
-    soc_depth_direction depth_direction,
-    float expected_depth
-)
+static int test_fullscreen_hiz_levels(float expected_depth)
 {
     const uint16_t indices[] = {0u, 1u, 2u};
     const soc_mat4 identity = identity_matrix();
-    soc_frame_desc frame_desc = make_frame_desc(depth_direction);
+    soc_frame_desc frame_desc = make_frame_desc();
     soc_occluder_group group;
     soc_occlusion_build_desc build_desc;
     float positions[9];
@@ -1531,10 +1513,7 @@ static int test_fullscreen_hiz_levels(
 
 static int test_hiz_pipeline_integration(void)
 {
-    if (test_fullscreen_hiz_levels(SOC_DEPTH_FORWARD, 0.40f) != 0) {
-        return 1;
-    }
-    if (test_fullscreen_hiz_levels(SOC_DEPTH_REVERSED, 0.60f) != 0) {
+    if (test_fullscreen_hiz_levels(0.60f) != 0) {
         return 1;
     }
     return 0;
@@ -1543,7 +1522,7 @@ static int test_hiz_pipeline_integration(void)
 static int test_zero_to_one_near_plane_clipping(void)
 {
     const float positions[] = {
-        -0.75f, -0.75f, -0.25f,
+        -0.75f, -0.75f,  1.25f,
          0.75f, -0.75f,  0.50f,
          0.00f,  0.75f,  0.50f,
     };
@@ -1572,7 +1551,7 @@ static int test_zero_to_one_near_plane_clipping(void)
     meshes[0] = mesh;
 
     CHECK_RESULT(
-        capture_frame(context, SOC_DEPTH_FORWARD, meshes, 1u, &capture),
+        capture_frame(context, meshes, 1u, &capture),
         SOC_RESULT_OK
     );
     CHECK(check_layout(&capture, TEST_WIDTH, TEST_HEIGHT) == 0);
@@ -1581,10 +1560,11 @@ static int test_zero_to_one_near_plane_clipping(void)
     for (pixel = 0u; pixel < TEST_PIXEL_COUNT; ++pixel) {
         const float depth = capture.depth[pixel];
 
-        if (depth_equal(depth, 1.0f)) {
+        if (depth_equal(depth, 0.0f)) {
             continue;
         }
-        if (depth < -DEPTH_EPSILON || depth > 0.50f + DEPTH_EPSILON) {
+        if (depth < 0.50f - DEPTH_EPSILON ||
+            depth > 1.0f + DEPTH_EPSILON) {
             fprintf(
                 stderr,
                 "near-clipped pixel %u has out-of-range depth %.9g\n",
@@ -1611,7 +1591,7 @@ static int test_resize_and_empty_frame_clear(void)
     soc_mesh* mesh = NULL;
     soc_mesh* meshes[1];
     soc_snapshot* snapshot = NULL;
-    const soc_frame_desc frame_desc = make_frame_desc(SOC_DEPTH_FORWARD);
+    const soc_frame_desc frame_desc = make_frame_desc();
     frame_capture drawn;
     frame_capture cleared;
     uint32_t pixel;
@@ -1634,18 +1614,18 @@ static int test_resize_and_empty_frame_clear(void)
     meshes[0] = mesh;
 
     CHECK_RESULT(
-        capture_frame(context, SOC_DEPTH_FORWARD, meshes, 1u, &drawn),
+        capture_frame(context, meshes, 1u, &drawn),
         SOC_RESULT_OK
     );
-    CHECK(check_triangle_depth(&drawn, 0.30f, 1.0f) == 0);
+    CHECK(check_triangle_depth(&drawn, 0.30f, 0.0f) == 0);
 
     CHECK_RESULT(soc_context_resize(context, 5u, 3u), SOC_RESULT_OK);
     CHECK_RESULT(
-        capture_frame(context, SOC_DEPTH_FORWARD, NULL, 0u, &cleared),
+        capture_frame(context, NULL, 0u, &cleared),
         SOC_RESULT_OK
     );
     CHECK(check_layout(&cleared, 5u, 3u) == 0);
-    CHECK(check_all_depth(&cleared, 15u, 1.0f) == 0);
+    CHECK(check_all_depth(&cleared, 15u, 0.0f) == 0);
     CHECK(check_stats(&cleared, 4u, 0u, 0u, 0u) == 0);
     for (pixel = 15u; pixel < TEST_PIXEL_COUNT; ++pixel) {
         CHECK(depth_equal(cleared.depth[pixel], DEPTH_SENTINEL));
@@ -1696,7 +1676,7 @@ static int test_resize_and_empty_frame_clear(void)
             CHECK(info.height == expected_height);
             CHECK(info.required_element_count == expected_count);
             for (pixel = 0u; pixel < expected_count; ++pixel) {
-                CHECK(depth_equal(depth[pixel], 1.0f));
+                CHECK(depth_equal(depth[pixel], 0.0f));
             }
             for (pixel = expected_count;
                  pixel < TEST_PIXEL_COUNT;
@@ -1722,7 +1702,7 @@ int main(void)
     if (test_single_triangle_level_zero() != 0) {
         return 1;
     }
-    if (test_forward_and_reversed_depth() != 0) {
+    if (test_reversed_depth() != 0) {
         return 1;
     }
     if (test_negative_one_to_one_depth_mapping() != 0) {

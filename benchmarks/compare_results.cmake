@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.21)
 
 if(NOT DEFINED BASELINE OR BASELINE STREQUAL "")
-    message(FATAL_ERROR "BASELINE must name a soc-bench-v1 JSON result")
+    message(FATAL_ERROR "BASELINE must name a soc-bench-v2 JSON result")
 endif()
 if(NOT DEFINED CANDIDATE OR CANDIDATE STREQUAL "")
-    message(FATAL_ERROR "CANDIDATE must name a soc-bench-v1 JSON result")
+    message(FATAL_ERROR "CANDIDATE must name a soc-bench-v2 JSON result")
 endif()
 if(NOT EXISTS "${BASELINE}")
     message(FATAL_ERROR "Baseline result does not exist: ${BASELINE}")
@@ -45,9 +45,9 @@ endif()
 if(NOT candidate_schema_error STREQUAL "NOTFOUND")
     message(FATAL_ERROR "Invalid candidate JSON schema field: ${candidate_schema_error}")
 endif()
-if(NOT baseline_schema STREQUAL "soc-bench-v1" OR
-   NOT candidate_schema STREQUAL "soc-bench-v1")
-    message(FATAL_ERROR "Both inputs must use schema \"soc-bench-v1\"")
+if(NOT baseline_schema STREQUAL "soc-bench-v2" OR
+   NOT candidate_schema STREQUAL "soc-bench-v2")
+    message(FATAL_ERROR "Both inputs must use schema \"soc-bench-v2\"")
 endif()
 
 string(JSON baseline_seed ERROR_VARIABLE baseline_seed_error
@@ -262,7 +262,6 @@ foreach(candidate_index RANGE 0 ${candidate_case_last})
         queries
         query_batch
         clip_depth_range
-        depth_direction
         geometry_pattern
         query_pattern
         large_queries

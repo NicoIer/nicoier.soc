@@ -101,13 +101,8 @@ static size_t name( \
 }
 
 SOC_DEFINE_MERGE_DEPTH_PLANES_F32_NEON_IMPL(
-    merge_depth_planes_f32_neon_reversed,
+    merge_depth_planes_f32_neon_vectorized,
     vcgtq_f32
-)
-
-SOC_DEFINE_MERGE_DEPTH_PLANES_F32_NEON_IMPL(
-    merge_depth_planes_f32_neon_forward,
-    vcltq_f32
 )
 
 #undef SOC_DEFINE_MERGE_DEPTH_PLANES_F32_NEON_IMPL
@@ -117,8 +112,7 @@ static void merge_depth_planes_f32_neon(
     const float* scratch_planes,
     size_t element_count,
     size_t scratch_plane_stride,
-    uint32_t lane_count,
-    soc_depth_direction depth_direction
+    uint32_t lane_count
 )
 {
     size_t merged_element_count;
@@ -126,66 +120,46 @@ static void merge_depth_planes_f32_neon(
     if (lane_count <= 1u || element_count == 0u) {
         return;
     }
-    merged_element_count = depth_direction == SOC_DEPTH_REVERSED
-        ? merge_depth_planes_f32_neon_reversed(
-            level_zero,
-            scratch_planes,
-            element_count,
-            scratch_plane_stride,
-            lane_count
-        )
-        : merge_depth_planes_f32_neon_forward(
-            level_zero,
-            scratch_planes,
-            element_count,
-            scratch_plane_stride,
-            lane_count
-        );
+    merged_element_count = merge_depth_planes_f32_neon_vectorized(
+        level_zero,
+        scratch_planes,
+        element_count,
+        scratch_plane_stride,
+        lane_count
+    );
     if (merged_element_count != element_count) {
         soc_kernel_merge_depth_planes_f32_scalar(
             level_zero + merged_element_count,
             scratch_planes + merged_element_count,
             element_count - merged_element_count,
             scratch_plane_stride,
-            lane_count,
-            depth_direction
+            lane_count
         );
     }
 }
 
 static float32x4_t reduce_depth_neon(
     float32x4_t accumulated,
-    float32x4_t candidate,
-    soc_depth_direction depth_direction
+    float32x4_t candidate
 )
 {
-    const uint32x4_t mask = depth_direction == SOC_DEPTH_REVERSED
-        ? vcltq_f32(candidate, accumulated)
-        : vcgtq_f32(candidate, accumulated);
+    const uint32x4_t mask = vcltq_f32(candidate, accumulated);
 
     return vbslq_f32(mask, candidate, accumulated);
 }
 
-static float reduce_depth_scalar(
-    float accumulated,
-    float candidate,
-    soc_depth_direction depth_direction
-)
+static float reduce_depth_scalar(float accumulated, float candidate)
 {
-    if (depth_direction == SOC_DEPTH_REVERSED) {
-        return candidate < accumulated ? candidate : accumulated;
-    }
-    return candidate > accumulated ? candidate : accumulated;
+    return candidate < accumulated ? candidate : accumulated;
 }
 
-static SOC_NEON_FORCE_INLINE void store_constant_depth_block_f32_neon_impl(
+static void store_constant_depth_block_f32_neon(
     float* destination,
     size_t row_stride,
     uint32_t block_width,
     uint32_t block_height,
     uint64_t coverage_mask,
-    float candidate_depth,
-    soc_bool reversed_depth
+    float candidate_depth
 )
 {
     static const uint32_t lane_bits_values[4] = {1u, 2u, 4u, 8u};
@@ -223,9 +197,7 @@ static SOC_NEON_FORCE_INLINE void store_constant_depth_block_f32_neon_impl(
                     );
                 }
                 const uint32x4_t store_mask =
-                    reversed_depth == SOC_TRUE
-                        ? vcgtq_f32(candidates, compared_stored)
-                        : vcltq_f32(candidates, compared_stored);
+                    vcgtq_f32(candidates, compared_stored);
                 const float32x4_t merged =
                     vbslq_f32(store_mask, candidates, stored);
 
@@ -237,65 +209,19 @@ static SOC_NEON_FORCE_INLINE void store_constant_depth_block_f32_neon_impl(
         for (; column < block_width; ++column) {
             const float stored_depth = destination_row[column];
 
-            if ((row_mask & (UINT32_C(1) << column)) != 0u) {
-                const soc_bool passes_depth = reversed_depth == SOC_TRUE
-                    ? (candidate_depth > stored_depth
-                        ? SOC_TRUE
-                        : SOC_FALSE)
-                    : (candidate_depth < stored_depth
-                        ? SOC_TRUE
-                        : SOC_FALSE);
-
-                if (passes_depth == SOC_TRUE) {
-                    destination_row[column] = candidate_depth;
-                }
+            if ((row_mask & (UINT32_C(1) << column)) != 0u &&
+                candidate_depth > stored_depth) {
+                destination_row[column] = candidate_depth;
             }
         }
     }
 }
 
-static void store_constant_depth_block_f32_neon(
-    float* destination,
-    size_t row_stride,
-    uint32_t block_width,
-    uint32_t block_height,
-    uint64_t coverage_mask,
-    float candidate_depth,
-    soc_depth_direction depth_direction
-)
-{
-    if (depth_direction == SOC_DEPTH_REVERSED) {
-        store_constant_depth_block_f32_neon_impl(
-            destination,
-            row_stride,
-            block_width,
-            block_height,
-            coverage_mask,
-            candidate_depth,
-            SOC_TRUE
-        );
-        return;
-    }
-    store_constant_depth_block_f32_neon_impl(
-        destination,
-        row_stride,
-        block_width,
-        block_height,
-        coverage_mask,
-        candidate_depth,
-        SOC_FALSE
-    );
-}
-
 static SOC_NEON_FORCE_INLINE float32x4_t
-make_far_biased_plane_depth_neon(
-    float32x4_t depth,
-    soc_bool reversed_depth
-)
+make_far_biased_plane_depth_neon(float32x4_t depth)
 {
     const uint32x4_t guard =
         vdupq_n_u32(SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS);
-    const uint32x4_t one_bits = vdupq_n_u32(UINT32_C(0x3f800000));
     const float32x4_t zero = vdupq_n_f32(0.0f);
     uint32x4_t bits;
 
@@ -303,21 +229,13 @@ make_far_biased_plane_depth_neon(
     depth = vminq_f32(depth, vdupq_n_f32(1.0f));
     depth = vbslq_f32(vceqq_f32(depth, zero), zero, depth);
     bits = vreinterpretq_u32_f32(depth);
-    if (reversed_depth == SOC_TRUE) {
-        bits = vqsubq_u32(bits, guard);
-    } else {
-        bits = vminq_u32(vaddq_u32(bits, guard), one_bits);
-    }
+    bits = vqsubq_u32(bits, guard);
     return vreinterpretq_f32_u32(bits);
 }
 
 static SOC_NEON_FORCE_INLINE float
-make_far_biased_plane_depth_neon_tail(
-    float depth,
-    soc_bool reversed_depth
-)
+make_far_biased_plane_depth_neon_tail(float depth)
 {
-    const uint32_t one_bits = UINT32_C(0x3f800000);
     uint32_t bits;
 
     if (depth <= 0.0f) {
@@ -326,15 +244,9 @@ make_far_biased_plane_depth_neon_tail(
         depth = 1.0f;
     }
     memcpy(&bits, &depth, sizeof(bits));
-    if (reversed_depth == SOC_TRUE) {
-        bits = bits > SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
-            ? bits - SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
-            : 0u;
-    } else {
-        bits = bits < one_bits - SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
-            ? bits + SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
-            : one_bits;
-    }
+    bits = bits > SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
+        ? bits - SOC_KERNEL_DEPTH_PLANE_GUARD_ULPS
+        : 0u;
     memcpy(&depth, &bits, sizeof(depth));
     return depth;
 }
@@ -347,16 +259,13 @@ static void store_depth_plane_block_f32_neon(
     uint64_t coverage_mask,
     float depth_origin,
     float depth_step_x,
-    float depth_step_y,
-    soc_depth_direction depth_direction
+    float depth_step_y
 )
 {
     static const uint32_t lane_bits_values[4] = {1u, 2u, 4u, 8u};
     static const float lane_offsets_values[4] = {0.0f, 1.0f, 2.0f, 3.0f};
     const uint32x4_t lane_bits = vld1q_u32(lane_bits_values);
     const float32x4_t lane_offsets = vld1q_f32(lane_offsets_values);
-    const soc_bool reversed_depth =
-        depth_direction == SOC_DEPTH_REVERSED ? SOC_TRUE : SOC_FALSE;
     uint32_t row;
 
     for (row = 0u; row < block_height; ++row) {
@@ -389,10 +298,7 @@ static void store_depth_plane_block_f32_neon(
                 float32x4_t compared_stored = stored;
                 uint32x4_t store_mask;
 
-                candidates = make_far_biased_plane_depth_neon(
-                    candidates,
-                    reversed_depth
-                );
+                candidates = make_far_biased_plane_depth_neon(candidates);
                 if (lane_mask != 0x0fu) {
                     const uint32x4_t covered = vtstq_u32(
                         vdupq_n_u32(lane_mask),
@@ -405,9 +311,7 @@ static void store_depth_plane_block_f32_neon(
                         candidates
                     );
                 }
-                store_mask = reversed_depth == SOC_TRUE
-                    ? vcgtq_f32(candidates, compared_stored)
-                    : vcltq_f32(candidates, compared_stored);
+                store_mask = vcgtq_f32(candidates, compared_stored);
                 const float32x4_t merged =
                     vbslq_f32(store_mask, candidates, stored);
 
@@ -422,18 +326,9 @@ static void store_depth_plane_block_f32_neon(
             if ((row_mask & (UINT32_C(1) << column)) != 0u) {
                 const float candidate_depth =
                     make_far_biased_plane_depth_neon_tail(
-                        fmaf(depth_step_x, (float)column, row_depth),
-                        reversed_depth
+                        fmaf(depth_step_x, (float)column, row_depth)
                     );
-                const soc_bool passes_depth = reversed_depth == SOC_TRUE
-                    ? (candidate_depth > stored_depth
-                        ? SOC_TRUE
-                        : SOC_FALSE)
-                    : (candidate_depth < stored_depth
-                        ? SOC_TRUE
-                        : SOC_FALSE);
-
-                if (passes_depth == SOC_TRUE) {
+                if (candidate_depth > stored_depth) {
                     destination_row[column] = candidate_depth;
                 }
             }
@@ -447,8 +342,7 @@ static void reduce_hiz_row_scalar(
     uint32_t source_width,
     float* destination,
     uint32_t destination_begin,
-    uint32_t destination_width,
-    soc_depth_direction depth_direction
+    uint32_t destination_width
 )
 {
     uint32_t destination_x;
@@ -460,23 +354,14 @@ static void reduce_hiz_row_scalar(
         float reduced = top[source_x];
 
         if (source_x + 1u < source_width) {
-            reduced = reduce_depth_scalar(
-                reduced,
-                top[source_x + 1u],
-                depth_direction
-            );
+            reduced = reduce_depth_scalar(reduced, top[source_x + 1u]);
         }
         if (bottom != NULL) {
-            reduced = reduce_depth_scalar(
-                reduced,
-                bottom[source_x],
-                depth_direction
-            );
+            reduced = reduce_depth_scalar(reduced, bottom[source_x]);
             if (source_x + 1u < source_width) {
                 reduced = reduce_depth_scalar(
                     reduced,
-                    bottom[source_x + 1u],
-                    depth_direction
+                    bottom[source_x + 1u]
                 );
             }
         }
@@ -488,8 +373,7 @@ static void reduce_hiz_level_f32_neon(
     const float* source,
     uint32_t source_width,
     uint32_t source_height,
-    float* destination,
-    soc_depth_direction depth_direction
+    float* destination
 )
 {
     const uint32_t destination_width =
@@ -516,18 +400,15 @@ static void reduce_hiz_level_f32_neon(
 
             reduced = reduce_depth_neon(
                 reduced,
-                top_pairs.val[1],
-                depth_direction
+                top_pairs.val[1]
             );
             reduced = reduce_depth_neon(
                 reduced,
-                bottom_pairs.val[0],
-                depth_direction
+                bottom_pairs.val[0]
             );
             reduced = reduce_depth_neon(
                 reduced,
-                bottom_pairs.val[1],
-                depth_direction
+                bottom_pairs.val[1]
             );
             vst1q_f32(destination_row + destination_x, reduced);
             source_x += 8u;
@@ -540,8 +421,7 @@ static void reduce_hiz_level_f32_neon(
             source_width,
             destination_row,
             destination_x,
-            destination_width,
-            depth_direction
+            destination_width
         );
     }
 
@@ -557,8 +437,7 @@ static void reduce_hiz_level_f32_neon(
             source_width,
             destination_row,
             0u,
-            destination_width,
-            depth_direction
+            destination_width
         );
     }
 }

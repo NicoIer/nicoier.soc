@@ -132,54 +132,7 @@ static int set_level_zero(
     return 0;
 }
 
-static int test_forward_max_reduction(void)
-{
-    const float level_zero[] = {
-        0.10f, 0.70f, 0.20f, 0.30f,
-        0.60f, 0.40f, 0.90f, 0.80f,
-        0.05f, 0.15f, 0.25f, 0.35f,
-        0.45f, 0.55f, 0.65f, 0.75f,
-    };
-    const float level_one[] = {
-        0.70f, 0.90f,
-        0.55f, 0.75f,
-    };
-    const float level_two[] = {0.90f};
-    soc_hiz hiz = {0};
-
-    CHECK_RESULT(soc_hiz_initialize(&hiz, 4u, 4u), SOC_RESULT_OK);
-    CHECK(hiz.level_count == 3u);
-    CHECK(set_level_zero(&hiz, level_zero, ARRAY_COUNT(level_zero)) == 0);
-    CHECK_RESULT(soc_hiz_build(&hiz, SOC_DEPTH_FORWARD), SOC_RESULT_OK);
-    CHECK(check_level(
-        &hiz,
-        0u,
-        4u,
-        4u,
-        level_zero,
-        ARRAY_COUNT(level_zero)
-    ) == 0);
-    CHECK(check_level(
-        &hiz,
-        1u,
-        2u,
-        2u,
-        level_one,
-        ARRAY_COUNT(level_one)
-    ) == 0);
-    CHECK(check_level(
-        &hiz,
-        2u,
-        1u,
-        1u,
-        level_two,
-        ARRAY_COUNT(level_two)
-    ) == 0);
-    soc_hiz_shutdown(&hiz);
-    return 0;
-}
-
-static int test_reversed_min_reduction(void)
+static int test_min_reduction(void)
 {
     const float level_zero[] = {
         0.10f, 0.70f, 0.20f, 0.30f,
@@ -196,7 +149,7 @@ static int test_reversed_min_reduction(void)
 
     CHECK_RESULT(soc_hiz_initialize(&hiz, 4u, 4u), SOC_RESULT_OK);
     CHECK(set_level_zero(&hiz, level_zero, ARRAY_COUNT(level_zero)) == 0);
-    CHECK_RESULT(soc_hiz_build(&hiz, SOC_DEPTH_REVERSED), SOC_RESULT_OK);
+    CHECK_RESULT(soc_hiz_build(&hiz), SOC_RESULT_OK);
     CHECK(check_level(
         &hiz,
         0u,
@@ -232,73 +185,41 @@ static int test_odd_5_by_3_edges(void)
          6.0f,  7.0f,  8.0f,  9.0f, 10.0f,
         11.0f, 12.0f, 13.0f, 14.0f, 15.0f,
     };
-    const float forward_level_one[] = {
-         7.0f,  9.0f, 10.0f,
-        12.0f, 14.0f, 15.0f,
-    };
-    const float forward_level_two[] = {14.0f, 15.0f};
-    const float forward_level_three[] = {15.0f};
-    const float reversed_level_one[] = {
+    const float level_one[] = {
          1.0f,  3.0f,  5.0f,
         11.0f, 13.0f, 15.0f,
     };
-    const float reversed_level_two[] = {1.0f, 5.0f};
-    const float reversed_level_three[] = {1.0f};
+    const float level_two[] = {1.0f, 5.0f};
+    const float level_three[] = {1.0f};
     soc_hiz hiz = {0};
 
     CHECK_RESULT(soc_hiz_initialize(&hiz, 5u, 3u), SOC_RESULT_OK);
     CHECK(hiz.level_count == 4u);
     CHECK(set_level_zero(&hiz, level_zero, ARRAY_COUNT(level_zero)) == 0);
-    CHECK_RESULT(soc_hiz_build(&hiz, SOC_DEPTH_FORWARD), SOC_RESULT_OK);
+    CHECK_RESULT(soc_hiz_build(&hiz), SOC_RESULT_OK);
     CHECK(check_level(
         &hiz,
         1u,
         3u,
         2u,
-        forward_level_one,
-        ARRAY_COUNT(forward_level_one)
+        level_one,
+        ARRAY_COUNT(level_one)
     ) == 0);
     CHECK(check_level(
         &hiz,
         2u,
         2u,
         1u,
-        forward_level_two,
-        ARRAY_COUNT(forward_level_two)
-    ) == 0);
-    CHECK(check_level(
-        &hiz,
-        3u,
-        1u,
-        1u,
-        forward_level_three,
-        ARRAY_COUNT(forward_level_three)
-    ) == 0);
-
-    CHECK_RESULT(soc_hiz_build(&hiz, SOC_DEPTH_REVERSED), SOC_RESULT_OK);
-    CHECK(check_level(
-        &hiz,
-        1u,
-        3u,
-        2u,
-        reversed_level_one,
-        ARRAY_COUNT(reversed_level_one)
-    ) == 0);
-    CHECK(check_level(
-        &hiz,
-        2u,
-        2u,
-        1u,
-        reversed_level_two,
-        ARRAY_COUNT(reversed_level_two)
+        level_two,
+        ARRAY_COUNT(level_two)
     ) == 0);
     CHECK(check_level(
         &hiz,
         3u,
         1u,
         1u,
-        reversed_level_three,
-        ARRAY_COUNT(reversed_level_three)
+        level_three,
+        ARRAY_COUNT(level_three)
     ) == 0);
     soc_hiz_shutdown(&hiz);
     return 0;
@@ -307,9 +228,9 @@ static int test_odd_5_by_3_edges(void)
 static int test_single_axis_and_single_pixel_shapes(void)
 {
     const float vertical_zero[] = {0.20f, 0.90f, 0.40f, 0.70f, 0.80f};
-    const float vertical_one[] = {0.90f, 0.70f, 0.80f};
-    const float vertical_two[] = {0.90f, 0.80f};
-    const float vertical_three[] = {0.90f};
+    const float vertical_one[] = {0.20f, 0.40f, 0.80f};
+    const float vertical_two[] = {0.20f, 0.80f};
+    const float vertical_three[] = {0.20f};
     const float horizontal_zero[] = {0.20f, 0.90f, 0.40f, 0.70f, 0.80f};
     const float horizontal_one[] = {0.20f, 0.40f, 0.80f};
     const float horizontal_two[] = {0.20f, 0.80f};
@@ -324,7 +245,7 @@ static int test_single_axis_and_single_pixel_shapes(void)
         vertical_zero,
         ARRAY_COUNT(vertical_zero)
     ) == 0);
-    CHECK_RESULT(soc_hiz_build(&hiz, SOC_DEPTH_FORWARD), SOC_RESULT_OK);
+    CHECK_RESULT(soc_hiz_build(&hiz), SOC_RESULT_OK);
     CHECK(check_level(
         &hiz,
         1u,
@@ -358,7 +279,7 @@ static int test_single_axis_and_single_pixel_shapes(void)
         horizontal_zero,
         ARRAY_COUNT(horizontal_zero)
     ) == 0);
-    CHECK_RESULT(soc_hiz_build(&hiz, SOC_DEPTH_REVERSED), SOC_RESULT_OK);
+    CHECK_RESULT(soc_hiz_build(&hiz), SOC_RESULT_OK);
     CHECK(check_level(
         &hiz,
         1u,
@@ -388,16 +309,7 @@ static int test_single_axis_and_single_pixel_shapes(void)
     CHECK_RESULT(soc_hiz_initialize(&hiz, 1u, 1u), SOC_RESULT_OK);
     CHECK(hiz.level_count == 1u);
     CHECK(set_level_zero(&hiz, single, ARRAY_COUNT(single)) == 0);
-    CHECK_RESULT(soc_hiz_build(&hiz, SOC_DEPTH_FORWARD), SOC_RESULT_OK);
-    CHECK(check_level(
-        &hiz,
-        0u,
-        1u,
-        1u,
-        single,
-        ARRAY_COUNT(single)
-    ) == 0);
-    CHECK_RESULT(soc_hiz_build(&hiz, SOC_DEPTH_REVERSED), SOC_RESULT_OK);
+    CHECK_RESULT(soc_hiz_build(&hiz), SOC_RESULT_OK);
     CHECK(check_level(
         &hiz,
         0u,
@@ -418,8 +330,8 @@ static int test_query_metadata_and_buffer_size(void)
         11.0f, 12.0f, 13.0f, 14.0f, 15.0f,
     };
     const float expected[] = {
-         7.0f,  9.0f, 10.0f,
-        12.0f, 14.0f, 15.0f,
+         1.0f,  3.0f,  5.0f,
+        11.0f, 13.0f, 15.0f,
     };
     const float sentinel = -123.0f;
     soc_hiz_level_info info = {
@@ -431,7 +343,7 @@ static int test_query_metadata_and_buffer_size(void)
 
     CHECK_RESULT(soc_hiz_initialize(&hiz, 5u, 3u), SOC_RESULT_OK);
     CHECK(set_level_zero(&hiz, level_zero, ARRAY_COUNT(level_zero)) == 0);
-    CHECK_RESULT(soc_hiz_build(&hiz, SOC_DEPTH_FORWARD), SOC_RESULT_OK);
+    CHECK_RESULT(soc_hiz_build(&hiz), SOC_RESULT_OK);
 
     CHECK_RESULT(
         soc_hiz_query(&hiz, 1u, &info, NULL, 0u),
@@ -486,13 +398,13 @@ static int test_query_metadata_and_buffer_size(void)
 static int test_layout_reinitialization(void)
 {
     const float original_zero[] = {0.10f, 0.20f, 0.30f, 0.40f};
-    const float original_one[] = {0.40f};
+    const float original_one[] = {0.10f};
     const float resized_zero[] = {
          1.0f,  2.0f,  3.0f,  4.0f,  5.0f,
          6.0f,  7.0f,  8.0f,  9.0f, 10.0f,
         11.0f, 12.0f, 13.0f, 14.0f, 15.0f,
     };
-    const float resized_top[] = {15.0f};
+    const float resized_top[] = {1.0f};
     soc_hiz hiz = {0};
 
     CHECK_RESULT(soc_hiz_initialize(&hiz, 2u, 2u), SOC_RESULT_OK);
@@ -501,7 +413,7 @@ static int test_layout_reinitialization(void)
         original_zero,
         ARRAY_COUNT(original_zero)
     ) == 0);
-    CHECK_RESULT(soc_hiz_build(&hiz, SOC_DEPTH_FORWARD), SOC_RESULT_OK);
+    CHECK_RESULT(soc_hiz_build(&hiz), SOC_RESULT_OK);
     CHECK(check_level(
         &hiz,
         1u,
@@ -524,7 +436,7 @@ static int test_layout_reinitialization(void)
         resized_zero,
         ARRAY_COUNT(resized_zero)
     ) == 0);
-    CHECK_RESULT(soc_hiz_build(&hiz, SOC_DEPTH_FORWARD), SOC_RESULT_OK);
+    CHECK_RESULT(soc_hiz_build(&hiz), SOC_RESULT_OK);
     CHECK(check_level(
         &hiz,
         3u,
@@ -538,51 +450,16 @@ static int test_layout_reinitialization(void)
     CHECK_RESULT(soc_hiz_initialize(&hiz, 3u, 2u), SOC_RESULT_OK);
     CHECK(hiz.level_count == 3u);
     CHECK(hiz.element_count == 9u);
-    CHECK_RESULT(
-        soc_hiz_clear_level_zero(&hiz, SOC_DEPTH_REVERSED),
-        SOC_RESULT_OK
-    );
-    CHECK_RESULT(soc_hiz_build(&hiz, SOC_DEPTH_REVERSED), SOC_RESULT_OK);
+    CHECK_RESULT(soc_hiz_clear_level_zero(&hiz), SOC_RESULT_OK);
+    CHECK_RESULT(soc_hiz_build(&hiz), SOC_RESULT_OK);
     CHECK(check_all_values(&hiz, 0.0f, "resized clear") == 0);
-    soc_hiz_shutdown(&hiz);
-    return 0;
-}
-
-static int test_depth_direction_rebuild_across_frames(void)
-{
-    soc_hiz hiz = {0};
-
-    CHECK_RESULT(soc_hiz_initialize(&hiz, 5u, 3u), SOC_RESULT_OK);
-
-    CHECK_RESULT(
-        soc_hiz_clear_level_zero(&hiz, SOC_DEPTH_FORWARD),
-        SOC_RESULT_OK
-    );
-    CHECK_RESULT(soc_hiz_build(&hiz, SOC_DEPTH_FORWARD), SOC_RESULT_OK);
-    CHECK(check_all_values(&hiz, 1.0f, "forward frame") == 0);
-
-    CHECK_RESULT(
-        soc_hiz_clear_level_zero(&hiz, SOC_DEPTH_REVERSED),
-        SOC_RESULT_OK
-    );
-    CHECK_RESULT(soc_hiz_build(&hiz, SOC_DEPTH_REVERSED), SOC_RESULT_OK);
-    CHECK(check_all_values(&hiz, 0.0f, "reversed frame") == 0);
-
-    CHECK_RESULT(
-        soc_hiz_clear_level_zero(&hiz, SOC_DEPTH_FORWARD),
-        SOC_RESULT_OK
-    );
-    CHECK_RESULT(soc_hiz_build(&hiz, SOC_DEPTH_FORWARD), SOC_RESULT_OK);
-    CHECK(check_all_values(&hiz, 1.0f, "second forward frame") == 0);
-
     soc_hiz_shutdown(&hiz);
     return 0;
 }
 
 static int compare_split_band_pyramid(
     uint32_t width,
-    uint32_t height,
-    soc_depth_direction depth_direction
+    uint32_t height
 )
 {
     soc_hiz serial = {0};
@@ -632,7 +509,6 @@ static int compare_split_band_pyramid(
     CHECK_RESULT(
         soc_hiz_build_with_kernels(
             &serial,
-            depth_direction,
             soc_kernel_table_scalar()
         ),
         SOC_RESULT_OK
@@ -649,7 +525,6 @@ static int compare_split_band_pyramid(
         CHECK_RESULT(
             soc_hiz_build_lower_band_with_kernels(
                 &split,
-                depth_direction,
                 soc_kernel_table_scalar(),
                 band_index - 1u
             ),
@@ -657,7 +532,6 @@ static int compare_split_band_pyramid(
         );
         soc_hiz_build_lower_band_unchecked_with_kernels(
             &unchecked,
-            depth_direction,
             soc_kernel_table_scalar(),
             band_index - 1u
         );
@@ -665,7 +539,6 @@ static int compare_split_band_pyramid(
     CHECK_RESULT(
         soc_hiz_build_upper_levels_with_kernels(
             &split,
-            depth_direction,
             soc_kernel_table_scalar()
         ),
         SOC_RESULT_OK
@@ -673,7 +546,6 @@ static int compare_split_band_pyramid(
     CHECK_RESULT(
         soc_hiz_build_upper_levels_with_kernels(
             &unchecked,
-            depth_direction,
             soc_kernel_table_scalar()
         ),
         SOC_RESULT_OK
@@ -705,27 +577,17 @@ static int test_split_band_build_matches_serial(void)
         {1025u, 1u},
         {641u, 63u},
     };
-    const soc_depth_direction directions[] = {
-        SOC_DEPTH_FORWARD,
-        SOC_DEPTH_REVERSED,
-    };
-    size_t direction_index;
     size_t shape_index;
 
     CHECK(SOC_HIZ_LOWER_BAND_HEIGHT == 16u);
     CHECK(SOC_HIZ_LOWER_LEVEL_COUNT == 4u);
-    for (direction_index = 0u;
-         direction_index < ARRAY_COUNT(directions);
-         ++direction_index) {
-        for (shape_index = 0u;
-             shape_index < ARRAY_COUNT(shapes);
-             ++shape_index) {
-            CHECK(compare_split_band_pyramid(
-                shapes[shape_index].width,
-                shapes[shape_index].height,
-                directions[direction_index]
-            ) == 0);
-        }
+    for (shape_index = 0u;
+         shape_index < ARRAY_COUNT(shapes);
+         ++shape_index) {
+        CHECK(compare_split_band_pyramid(
+            shapes[shape_index].width,
+            shapes[shape_index].height
+        ) == 0);
     }
     return 0;
 }
@@ -755,10 +617,7 @@ static int test_split_band_api_validation(void)
     );
 
     CHECK_RESULT(soc_hiz_initialize(&hiz, 33u, 17u), SOC_RESULT_OK);
-    CHECK_RESULT(
-        soc_hiz_clear_level_zero(&hiz, SOC_DEPTH_FORWARD),
-        SOC_RESULT_OK
-    );
+    CHECK_RESULT(soc_hiz_clear_level_zero(&hiz), SOC_RESULT_OK);
     CHECK_RESULT(
         soc_hiz_lower_band_count(&hiz, NULL),
         SOC_RESULT_INVALID_ARGUMENT
@@ -768,7 +627,6 @@ static int test_split_band_api_validation(void)
     CHECK_RESULT(
         soc_hiz_build_lower_band_with_kernels(
             NULL,
-            SOC_DEPTH_FORWARD,
             kernels,
             0u
         ),
@@ -777,16 +635,6 @@ static int test_split_band_api_validation(void)
     CHECK_RESULT(
         soc_hiz_build_lower_band_with_kernels(
             &hiz,
-            (soc_depth_direction)99,
-            kernels,
-            0u
-        ),
-        SOC_RESULT_INVALID_ARGUMENT
-    );
-    CHECK_RESULT(
-        soc_hiz_build_lower_band_with_kernels(
-            &hiz,
-            SOC_DEPTH_FORWARD,
             NULL,
             0u
         ),
@@ -795,7 +643,6 @@ static int test_split_band_api_validation(void)
     CHECK_RESULT(
         soc_hiz_build_lower_band_with_kernels(
             &hiz,
-            SOC_DEPTH_FORWARD,
             &missing_reduce,
             0u
         ),
@@ -804,7 +651,6 @@ static int test_split_band_api_validation(void)
     CHECK_RESULT(
         soc_hiz_build_lower_band_with_kernels(
             &hiz,
-            SOC_DEPTH_FORWARD,
             kernels,
             band_count
         ),
@@ -813,7 +659,6 @@ static int test_split_band_api_validation(void)
     CHECK_RESULT(
         soc_hiz_build_upper_levels_with_kernels(
             NULL,
-            SOC_DEPTH_FORWARD,
             kernels
         ),
         SOC_RESULT_INVALID_ARGUMENT
@@ -821,15 +666,6 @@ static int test_split_band_api_validation(void)
     CHECK_RESULT(
         soc_hiz_build_upper_levels_with_kernels(
             &hiz,
-            (soc_depth_direction)99,
-            kernels
-        ),
-        SOC_RESULT_INVALID_ARGUMENT
-    );
-    CHECK_RESULT(
-        soc_hiz_build_upper_levels_with_kernels(
-            &hiz,
-            SOC_DEPTH_FORWARD,
             &missing_reduce
         ),
         SOC_RESULT_INVALID_ARGUMENT
@@ -850,7 +686,6 @@ static int test_split_band_api_validation(void)
     CHECK_RESULT(
         soc_hiz_build_lower_band_with_kernels(
             &synthetic,
-            SOC_DEPTH_FORWARD,
             kernels,
             band_count - 1u
         ),
@@ -859,7 +694,6 @@ static int test_split_band_api_validation(void)
     CHECK_RESULT(
         soc_hiz_build_lower_band_with_kernels(
             &synthetic,
-            SOC_DEPTH_FORWARD,
             kernels,
             band_count
         ),
@@ -871,8 +705,7 @@ static int test_split_band_api_validation(void)
 static int compare_parallel_pyramid(
     soc_thread_pool* thread_pool,
     uint32_t width,
-    uint32_t height,
-    soc_depth_direction depth_direction
+    uint32_t height
 )
 {
     soc_hiz serial = {0};
@@ -910,7 +743,6 @@ static int compare_parallel_pyramid(
     CHECK_RESULT(
         soc_hiz_build_with_kernels(
             &serial,
-            depth_direction,
             soc_kernel_table_scalar()
         ),
         SOC_RESULT_OK
@@ -918,7 +750,6 @@ static int compare_parallel_pyramid(
     CHECK_RESULT(
         soc_hiz_build_parallel_with_kernels(
             &parallel,
-            depth_direction,
             soc_kernel_table_scalar(),
             thread_pool
         ),
@@ -949,14 +780,9 @@ static int test_parallel_build_matches_serial(void)
         {393217u, 1u},
         {127u, 73u},
     };
-    const soc_depth_direction directions[] = {
-        SOC_DEPTH_FORWARD,
-        SOC_DEPTH_REVERSED,
-    };
     soc_thread_pool parallel_pool = {0};
     soc_thread_pool serial_pool = {0};
     size_t shape_index;
-    size_t direction_index;
 
     CHECK_RESULT(
         soc_thread_pool_initialize(&parallel_pool, 4u),
@@ -967,25 +793,19 @@ static int test_parallel_build_matches_serial(void)
         SOC_RESULT_OK
     );
 
-    for (direction_index = 0u;
-         direction_index < ARRAY_COUNT(directions);
-         ++direction_index) {
-        for (shape_index = 0u;
-             shape_index < ARRAY_COUNT(shapes);
-             ++shape_index) {
-            CHECK(compare_parallel_pyramid(
-                &parallel_pool,
-                shapes[shape_index].width,
-                shapes[shape_index].height,
-                directions[direction_index]
-            ) == 0);
-        }
+    for (shape_index = 0u;
+         shape_index < ARRAY_COUNT(shapes);
+         ++shape_index) {
+        CHECK(compare_parallel_pyramid(
+            &parallel_pool,
+            shapes[shape_index].width,
+            shapes[shape_index].height
+        ) == 0);
     }
     CHECK(compare_parallel_pyramid(
         &serial_pool,
         641u,
-        643u,
-        SOC_DEPTH_FORWARD
+        643u
     ) == 0);
 
     soc_thread_pool_shutdown(&serial_pool);
@@ -995,10 +815,7 @@ static int test_parallel_build_matches_serial(void)
 
 int main(void)
 {
-    if (test_forward_max_reduction() != 0) {
-        return 1;
-    }
-    if (test_reversed_min_reduction() != 0) {
+    if (test_min_reduction() != 0) {
         return 1;
     }
     if (test_odd_5_by_3_edges() != 0) {
@@ -1011,9 +828,6 @@ int main(void)
         return 1;
     }
     if (test_layout_reinitialization() != 0) {
-        return 1;
-    }
-    if (test_depth_direction_rebuild_across_frames() != 0) {
         return 1;
     }
     if (test_split_band_build_matches_serial() != 0) {

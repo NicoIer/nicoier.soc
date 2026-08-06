@@ -664,7 +664,6 @@ static int initialize_query_workload(
             .col3 = {0.0f, 0.0f, 0.0f, 1.0f},
         },
         .clip_depth_range = SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        .depth_direction = SOC_DEPTH_FORWARD,
         .front_face = SOC_FRONT_FACE_CCW,
         .flags = SOC_FRAME_FLAG_NONE,
     };
@@ -698,7 +697,6 @@ static int initialize_query_workload(
     }
     if (soc_hiz_build_with_kernels(
             &workload->hiz,
-            SOC_DEPTH_FORWARD,
             scalar_kernels
         ) != SOC_RESULT_OK) {
         soc_hiz_shutdown(&workload->hiz);
@@ -841,17 +839,23 @@ static void execute_raster_depth_blocks(
     uint64_t invocation
 )
 {
-    const soc_depth_direction depth_direction = (invocation & 1u) == 0u
-        ? SOC_DEPTH_FORWARD
-        : SOC_DEPTH_REVERSED;
-    const float candidate_depth = (invocation & 1u) == 0u
-        ? 0.25f
-        : 0.75f;
+    const uint64_t cycle_index = invocation & UINT64_C(0xffff);
+    const float candidate_depth = 0.25f + (float)cycle_index *
+            (0.5f / 65536.0f);
     const uint64_t coverage_mask =
         workload->kind == BENCHMARK_RASTER_DEPTH_BLOCK_FULL_F32
             ? UINT64_MAX
             : RASTER_PARTIAL_MASK;
     uint32_t block_y;
+
+    /* Keep every timed depth test on the passing/store path after wraparound. */
+    if (cycle_index == 0u) {
+        kernels->clear_f32(
+            workload->destination,
+            workload->destination_count,
+            0.0f
+        );
+    }
 
     for (block_y = 0u;
          block_y < RASTER_HEIGHT;
@@ -868,8 +872,7 @@ static void execute_raster_depth_blocks(
                 SOC_KERNEL_RASTER_BLOCK_SIZE,
                 SOC_KERNEL_RASTER_BLOCK_SIZE,
                 coverage_mask,
-                candidate_depth,
-                depth_direction
+                candidate_depth
             );
         }
     }
@@ -897,8 +900,7 @@ static void execute_operation(
             workload->source,
             workload->source_width,
             workload->source_height,
-            workload->destination,
-            SOC_DEPTH_FORWARD
+            workload->destination
         );
     } else {
         execute_raster_depth_blocks(
@@ -970,8 +972,7 @@ static uint64_t capture_checksum(
             workload->source,
             workload->source_width,
             workload->source_height,
-            workload->destination,
-            SOC_DEPTH_FORWARD
+            workload->destination
         );
     } else {
         size_t index;
@@ -979,7 +980,7 @@ static uint64_t capture_checksum(
         for (index = 0u;
              index < workload->destination_count;
              ++index) {
-            workload->destination[index] = 0.75f;
+            workload->destination[index] = 0.0f;
         }
         execute_raster_depth_blocks(workload, kernels, 0u);
     }

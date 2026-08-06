@@ -238,8 +238,7 @@ static int run_raster_depth_block_case(
     size_t row_stride,
     size_t offset,
     uint64_t coverage_mask,
-    uint32_t candidate_bits,
-    soc_depth_direction depth_direction
+    uint32_t candidate_bits
 )
 {
     static const uint32_t stored_values[] = {
@@ -286,9 +285,7 @@ static int run_raster_depth_block_case(
                 column;
 
             if ((coverage_mask & (UINT64_C(1) << bit)) != 0u &&
-                (depth_direction == SOC_DEPTH_REVERSED
-                    ? candidate_depth > *stored
-                    : candidate_depth < *stored)) {
+                candidate_depth > *stored) {
                 *stored = candidate_depth;
             }
         }
@@ -300,8 +297,7 @@ static int run_raster_depth_block_case(
         width,
         height,
         coverage_mask,
-        candidate_depth,
-        depth_direction
+        candidate_depth
     );
     neon->store_constant_depth_block_f32(
         neon_storage + begin,
@@ -309,8 +305,7 @@ static int run_raster_depth_block_case(
         width,
         height,
         coverage_mask,
-        candidate_depth,
-        depth_direction
+        candidate_depth
     );
 
     for (index = 0u; index < ARRAY_COUNT(expected); ++index) {
@@ -322,7 +317,7 @@ static int run_raster_depth_block_case(
             fprintf(
                 stderr,
                 "raster depth mismatch: %ux%u stride=%zu offset=%zu "
-                "mask=%016llx candidate=%08x direction=%u index=%zu "
+                "mask=%016llx candidate=%08x index=%zu "
                 "expected=%08x scalar=%08x neon=%08x\n",
                 (unsigned)width,
                 (unsigned)height,
@@ -330,7 +325,6 @@ static int run_raster_depth_block_case(
                 offset,
                 (unsigned long long)coverage_mask,
                 (unsigned)candidate_bits,
-                (unsigned)depth_direction,
                 index,
                 (unsigned)expected_bits,
                 (unsigned)scalar_bits,
@@ -355,10 +349,6 @@ static int test_raster_depth_block_differential(
         UINT32_C(0x3f000000),
         UINT32_C(0x3f800000),
         UINT32_C(0x00000001),
-    };
-    static const soc_depth_direction depth_directions[] = {
-        SOC_DEPTH_FORWARD,
-        SOC_DEPTH_REVERSED,
     };
     uint32_t width;
 
@@ -400,25 +390,17 @@ static int test_raster_depth_block_differential(
                         for (candidate_index = 0u;
                              candidate_index < ARRAY_COUNT(candidate_values);
                              ++candidate_index) {
-                            size_t direction_index;
-
-                            for (direction_index = 0u;
-                                 direction_index <
-                                    ARRAY_COUNT(depth_directions);
-                                 ++direction_index) {
-                                if (run_raster_depth_block_case(
-                                        scalar,
-                                        neon,
-                                        width,
-                                        height,
-                                        row_strides[stride_index],
-                                        offset,
-                                        masks[mask_index],
-                                        candidate_values[candidate_index],
-                                        depth_directions[direction_index]
-                                    ) != 0) {
-                                    return 1;
-                                }
+                            if (run_raster_depth_block_case(
+                                    scalar,
+                                    neon,
+                                    width,
+                                    height,
+                                    row_strides[stride_index],
+                                    offset,
+                                    masks[mask_index],
+                                    candidate_values[candidate_index]
+                                ) != 0) {
+                                return 1;
                             }
                         }
                     }
@@ -444,10 +426,6 @@ static int test_raster_depth_plane_block_differential(
         {0.1234567f, 0.0135791f, 0.0213579f},
         {0.8765432f, -0.017531f, -0.009713f},
     };
-    static const soc_depth_direction depth_directions[] = {
-        SOC_DEPTH_FORWARD,
-        SOC_DEPTH_REVERSED,
-    };
     uint32_t width;
 
     for (width = 1u; width <= SOC_KERNEL_RASTER_BLOCK_SIZE; ++width) {
@@ -466,66 +444,57 @@ static int test_raster_depth_plane_block_differential(
                 for (plane_index = 0u;
                      plane_index < ARRAY_COUNT(plane_parameters);
                      ++plane_index) {
-                    size_t direction_index;
+                    float scalar_storage[RASTER_DEPTH_STORAGE_COUNT];
+                    float neon_storage[RASTER_DEPTH_STORAGE_COUNT];
+                    const size_t begin = RASTER_DEPTH_GUARD_COUNT + 3u;
+                    size_t index;
 
-                    for (direction_index = 0u;
-                         direction_index < ARRAY_COUNT(depth_directions);
-                         ++direction_index) {
-                        float scalar_storage[RASTER_DEPTH_STORAGE_COUNT];
-                        float neon_storage[RASTER_DEPTH_STORAGE_COUNT];
-                        const size_t begin = RASTER_DEPTH_GUARD_COUNT + 3u;
-                        size_t index;
+                    for (index = 0u;
+                         index < ARRAY_COUNT(scalar_storage);
+                         ++index) {
+                        const uint32_t bits = (index & 1u) != 0u
+                            ? UINT32_C(0x3e4ccccd)
+                            : UINT32_C(0x3f4ccccd);
 
-                        for (index = 0u;
-                             index < ARRAY_COUNT(scalar_storage);
-                             ++index) {
-                            const uint32_t bits = (index & 1u) != 0u
-                                ? UINT32_C(0x3e4ccccd)
-                                : UINT32_C(0x3f4ccccd);
-
-                            scalar_storage[index] = float_from_bits(bits);
-                            neon_storage[index] = float_from_bits(bits);
-                        }
-                        scalar->store_depth_plane_block_f32(
-                            scalar_storage + begin,
-                            9u,
-                            width,
-                            height,
-                            masks[mask_index],
-                            plane_parameters[plane_index][0],
-                            plane_parameters[plane_index][1],
-                            plane_parameters[plane_index][2],
-                            depth_directions[direction_index]
-                        );
-                        neon->store_depth_plane_block_f32(
-                            neon_storage + begin,
-                            9u,
-                            width,
-                            height,
-                            masks[mask_index],
-                            plane_parameters[plane_index][0],
-                            plane_parameters[plane_index][1],
-                            plane_parameters[plane_index][2],
-                            depth_directions[direction_index]
-                        );
-                        for (index = 0u;
-                             index < ARRAY_COUNT(scalar_storage);
-                             ++index) {
-                            if (float_bits(scalar_storage[index]) !=
-                                float_bits(neon_storage[index])) {
-                                fprintf(
-                                    stderr,
-                                    "raster plane mismatch: %ux%u mask=%zu "
-                                    "plane=%zu direction=%zu index=%zu\n",
-                                    (unsigned)width,
-                                    (unsigned)height,
-                                    mask_index,
-                                    plane_index,
-                                    direction_index,
-                                    index
-                                );
-                                return 1;
-                            }
+                        scalar_storage[index] = float_from_bits(bits);
+                        neon_storage[index] = float_from_bits(bits);
+                    }
+                    scalar->store_depth_plane_block_f32(
+                        scalar_storage + begin,
+                        9u,
+                        width,
+                        height,
+                        masks[mask_index],
+                        plane_parameters[plane_index][0],
+                        plane_parameters[plane_index][1],
+                        plane_parameters[plane_index][2]
+                    );
+                    neon->store_depth_plane_block_f32(
+                        neon_storage + begin,
+                        9u,
+                        width,
+                        height,
+                        masks[mask_index],
+                        plane_parameters[plane_index][0],
+                        plane_parameters[plane_index][1],
+                        plane_parameters[plane_index][2]
+                    );
+                    for (index = 0u;
+                         index < ARRAY_COUNT(scalar_storage);
+                         ++index) {
+                        if (float_bits(scalar_storage[index]) !=
+                            float_bits(neon_storage[index])) {
+                            fprintf(
+                                stderr,
+                                "raster plane mismatch: %ux%u mask=%zu "
+                                "plane=%zu index=%zu\n",
+                                (unsigned)width,
+                                (unsigned)height,
+                                mask_index,
+                                plane_index,
+                                index
+                            );
+                            return 1;
                         }
                     }
                 }
@@ -576,7 +545,7 @@ static int test_raster_depth_block_redzones(
                 for (index = 0u; index < allocation_count; ++index) {
                     scalar_storage[index] = float_from_bits(
                         (index & 1u) == 0u
-                            ? UINT32_C(0x3f400000)
+                            ? UINT32_C(0x3e800000)
                             : UINT32_C(0x7fc12345)
                     );
                 }
@@ -592,8 +561,7 @@ static int test_raster_depth_block_redzones(
                     width,
                     height,
                     UINT64_MAX,
-                    0.25f,
-                    SOC_DEPTH_FORWARD
+                    0.75f
                 );
                 neon->store_constant_depth_block_f32(
                     neon_storage + offset,
@@ -601,8 +569,7 @@ static int test_raster_depth_block_redzones(
                     width,
                     height,
                     UINT64_MAX,
-                    0.25f,
-                    SOC_DEPTH_FORWARD
+                    0.75f
                 );
                 if (memcmp(
                         scalar_storage,
@@ -633,7 +600,6 @@ static void make_hiz_source_bits(
     size_t count,
     uint32_t width,
     uint32_t height,
-    soc_depth_direction depth_direction,
     size_t source_offset,
     size_t destination_offset,
     uint32_t pattern
@@ -652,7 +618,7 @@ static void make_hiz_source_bits(
     uint32_t random_state = UINT32_C(0xa341316c) ^
         width * UINT32_C(0x9e3779b9) ^
         height * UINT32_C(0x85ebca6b) ^
-        depth_direction * UINT32_C(0xc2b2ae35) ^
+        UINT32_C(0xc2b2ae35) ^
         (uint32_t)source_offset * UINT32_C(0x27d4eb2d) ^
         (uint32_t)destination_offset * UINT32_C(0x165667b1);
     size_t index;
@@ -745,7 +711,6 @@ static int run_hiz_case(
     const soc_kernel_table* neon,
     uint32_t width,
     uint32_t height,
-    soc_depth_direction depth_direction,
     size_t source_offset,
     size_t destination_offset,
     uint32_t pattern
@@ -777,7 +742,6 @@ static int run_hiz_case(
         source_count,
         width,
         height,
-        depth_direction,
         source_offset,
         destination_offset,
         pattern
@@ -809,15 +773,13 @@ static int run_hiz_case(
         scalar_source + source_begin,
         width,
         height,
-        scalar_destination + destination_begin,
-        depth_direction
+        scalar_destination + destination_begin
     );
     neon->reduce_hiz_level_f32(
         neon_source + source_begin,
         width,
         height,
-        neon_destination + destination_begin,
-        depth_direction
+        neon_destination + destination_begin
     );
 
     if (memcmp(
@@ -836,12 +798,11 @@ static int run_hiz_case(
             if (scalar_bits != neon_bits) {
                 fprintf(
                     stderr,
-                    "Hi-Z mismatch: %ux%u direction=%u src_offset=%zu "
+                    "Hi-Z mismatch: %ux%u src_offset=%zu "
                     "dst_offset=%zu pattern=%u index=%zu "
                     "scalar=0x%08x neon=0x%08x\n",
                     (unsigned)width,
                     (unsigned)height,
-                    (unsigned)depth_direction,
                     source_offset,
                     destination_offset,
                     (unsigned)pattern,
@@ -903,7 +864,6 @@ static int run_hiz_redzone_case(
     const soc_kernel_table* neon,
     uint32_t width,
     uint32_t height,
-    soc_depth_direction depth_direction,
     size_t offset,
     uint32_t pattern
 )
@@ -947,7 +907,6 @@ static int run_hiz_redzone_case(
         source_count,
         width,
         height,
-        depth_direction,
         offset,
         offset,
         pattern
@@ -981,15 +940,13 @@ static int run_hiz_redzone_case(
         scalar_source + offset,
         width,
         height,
-        scalar_destination + offset,
-        depth_direction
+        scalar_destination + offset
     );
     neon->reduce_hiz_level_f32(
         neon_source + offset,
         width,
         height,
-        neon_destination + offset,
-        depth_direction
+        neon_destination + offset
     );
 
     if (memcmp(
@@ -1004,11 +961,10 @@ static int run_hiz_redzone_case(
         ) != 0) {
         fprintf(
             stderr,
-            "Hi-Z redzone mismatch: %ux%u direction=%u offset=%zu "
+            "Hi-Z redzone mismatch: %ux%u offset=%zu "
             "pattern=%u\n",
             (unsigned)width,
             (unsigned)height,
-            (unsigned)depth_direction,
             offset,
             (unsigned)pattern
         );
@@ -1066,10 +1022,6 @@ static int test_hiz_redzones(
         63u, 64u, 65u,
     };
     static const uint32_t heights[] = {1u, 2u, 3u, 8u, 9u};
-    static const soc_depth_direction depth_directions[] = {
-        SOC_DEPTH_FORWARD,
-        SOC_DEPTH_REVERSED,
-    };
     size_t width_index;
 
     for (width_index = 0u;
@@ -1080,28 +1032,21 @@ static int test_hiz_redzones(
         for (height_index = 0u;
              height_index < ARRAY_COUNT(heights);
              ++height_index) {
-            size_t direction_index;
+            size_t offset;
 
-            for (direction_index = 0u;
-                 direction_index < ARRAY_COUNT(depth_directions);
-                 ++direction_index) {
-                size_t offset;
+            for (offset = 0u; offset < 4u; ++offset) {
+                uint32_t pattern;
 
-                for (offset = 0u; offset < 4u; ++offset) {
-                    uint32_t pattern;
-
-                    for (pattern = 0u; pattern < 2u; ++pattern) {
-                        if (run_hiz_redzone_case(
-                                scalar,
-                                neon,
-                                widths[width_index],
-                                heights[height_index],
-                                depth_directions[direction_index],
-                                offset,
-                                pattern
-                            ) != 0) {
-                            return 1;
-                        }
+                for (pattern = 0u; pattern < 2u; ++pattern) {
+                    if (run_hiz_redzone_case(
+                            scalar,
+                            neon,
+                            widths[width_index],
+                            heights[height_index],
+                            offset,
+                            pattern
+                        ) != 0) {
+                        return 1;
                     }
                 }
             }
@@ -1115,45 +1060,34 @@ static int test_hiz_differential(
     const soc_kernel_table* neon
 )
 {
-    static const soc_depth_direction depth_directions[] = {
-        SOC_DEPTH_FORWARD,
-        SOC_DEPTH_REVERSED,
-    };
     uint32_t width;
 
     for (width = 1u; width <= HIZ_MAX_WIDTH; ++width) {
         uint32_t height;
 
         for (height = 1u; height <= HIZ_MAX_HEIGHT; ++height) {
-            size_t direction_index;
+            size_t source_offset;
 
-            for (direction_index = 0u;
-                 direction_index < ARRAY_COUNT(depth_directions);
-                 ++direction_index) {
-                size_t source_offset;
+            for (source_offset = 0u; source_offset < 4u;
+                 ++source_offset) {
+                size_t destination_offset;
 
-                for (source_offset = 0u; source_offset < 4u;
-                     ++source_offset) {
-                    size_t destination_offset;
+                for (destination_offset = 0u;
+                     destination_offset < 4u;
+                     ++destination_offset) {
+                    uint32_t pattern;
 
-                    for (destination_offset = 0u;
-                         destination_offset < 4u;
-                         ++destination_offset) {
-                        uint32_t pattern;
-
-                        for (pattern = 0u; pattern < 2u; ++pattern) {
-                            if (run_hiz_case(
-                                    scalar,
-                                    neon,
-                                    width,
-                                    height,
-                                    depth_directions[direction_index],
-                                    source_offset,
-                                    destination_offset,
-                                    pattern
-                                ) != 0) {
-                                return 1;
-                            }
+                    for (pattern = 0u; pattern < 2u; ++pattern) {
+                        if (run_hiz_case(
+                                scalar,
+                                neon,
+                                width,
+                                height,
+                                source_offset,
+                                destination_offset,
+                                pattern
+                            ) != 0) {
+                            return 1;
                         }
                     }
                 }
@@ -1780,7 +1714,6 @@ static int test_transform_differential(
 
 static soc_frame_desc make_aabb_test_frame(
     soc_clip_depth_range clip_depth_range,
-    soc_depth_direction depth_direction,
     soc_bool perspective
 )
 {
@@ -1793,7 +1726,6 @@ static soc_frame_desc make_aabb_test_frame(
             .col3 = {0.0f, 0.0f, 0.0f, 1.0f},
         },
         .clip_depth_range = clip_depth_range,
-        .depth_direction = depth_direction,
         .front_face = SOC_FRONT_FACE_CCW,
         .flags = SOC_FRAME_FLAG_NONE,
     };
@@ -1802,15 +1734,11 @@ static soc_frame_desc make_aabb_test_frame(
         frame.clip_from_world.col2.w = 1.0f;
         frame.clip_from_world.col3.w = 0.0f;
         if (clip_depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE) {
-            frame.clip_from_world.col2.z =
-                depth_direction == SOC_DEPTH_FORWARD ? 1.0f : 0.0f;
-            frame.clip_from_world.col3.z =
-                depth_direction == SOC_DEPTH_FORWARD ? -1.0f : 1.0f;
+            frame.clip_from_world.col2.z = 0.0f;
+            frame.clip_from_world.col3.z = 1.0f;
         } else {
-            frame.clip_from_world.col2.z =
-                depth_direction == SOC_DEPTH_FORWARD ? 1.0f : -1.0f;
-            frame.clip_from_world.col3.z =
-                depth_direction == SOC_DEPTH_FORWARD ? -2.0f : 2.0f;
+            frame.clip_from_world.col2.z = -1.0f;
+            frame.clip_from_world.col3.z = 2.0f;
         }
     }
     return frame;
@@ -1834,7 +1762,6 @@ static soc_aabb make_kernel_aabb(
 
 static int initialize_aabb_test_hiz(
     const soc_kernel_table* scalar,
-    soc_depth_direction depth_direction,
     uint32_t width,
     uint32_t height,
     soc_hiz* out_hiz
@@ -1848,15 +1775,10 @@ static int initialize_aabb_test_hiz(
     for (index = 0u; index < out_hiz->levels[0].element_count; ++index) {
         const float steps[] = {0.20f, 0.40f, 0.60f, 0.80f};
 
-        out_hiz->data[index] = depth_direction == SOC_DEPTH_REVERSED
-            ? 1.0f - steps[(index * 5u + 3u) & 3u]
-            : steps[(index * 5u + 3u) & 3u];
+        out_hiz->data[index] =
+            1.0f - steps[(index * 5u + 3u) & 3u];
     }
-    if (soc_hiz_build_with_kernels(
-            out_hiz,
-            depth_direction,
-            scalar
-        ) != SOC_RESULT_OK) {
+    if (soc_hiz_build_with_kernels(out_hiz, scalar) != SOC_RESULT_OK) {
         soc_hiz_shutdown(out_hiz);
         return 1;
     }
@@ -1873,12 +1795,11 @@ static void initialize_aabb_test_bounds(
     soc_aabb* bounds,
     uint32_t count,
     soc_clip_depth_range clip_depth_range,
-    soc_depth_direction depth_direction,
     soc_bool perspective
 )
 {
     uint32_t state = UINT32_C(0x41414242) ^
-        (uint32_t)clip_depth_range ^ ((uint32_t)depth_direction << 8u) ^
+        (uint32_t)clip_depth_range ^ (UINT32_C(1) << 8u) ^
         ((uint32_t)perspective << 16u);
     uint32_t index;
 
@@ -1955,11 +1876,11 @@ static void initialize_aabb_test_bounds(
                 -0.0f,
                 0.0f,
                 perspective == SOC_TRUE ? 2.0f :
-                    (depth_direction == SOC_DEPTH_REVERSED ? 0.75f : 0.25f),
+                    0.75f,
                 0.0f,
                 -0.0f,
                 perspective == SOC_TRUE ? 2.0f :
-                    (depth_direction == SOC_DEPTH_REVERSED ? 0.75f : 0.25f)
+                    0.75f
             );
             break;
         default:
@@ -2077,20 +1998,16 @@ static int run_aabb_kernel_differential_case(
 static int test_aabb_noncontiguous_hiz_sampling(
     const soc_kernel_table* scalar,
     const soc_kernel_table* neon,
-    soc_clip_depth_range clip_depth_range,
-    soc_depth_direction depth_direction
+    soc_clip_depth_range clip_depth_range
 )
 {
-    const float normalized_depth = depth_direction == SOC_DEPTH_REVERSED
-        ? 0.20f
-        : 0.80f;
+    const float normalized_depth = 0.20f;
     const float world_depth =
         clip_depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE
             ? normalized_depth
             : normalized_depth * 2.0f - 1.0f;
     const soc_frame_desc frame = make_aabb_test_frame(
         clip_depth_range,
-        depth_direction,
         SOC_FALSE
     );
     const soc_aabb footprint = make_kernel_aabb(
@@ -2129,14 +2046,10 @@ static int test_aabb_noncontiguous_hiz_sampling(
         return 1;
     }
     for (index = 0u; index < hiz.levels[0].element_count; ++index) {
-        hiz.data[index] = depth_direction == SOC_DEPTH_REVERSED
-            ? 0.60f
-            : 0.40f;
+        hiz.data[index] = 0.60f;
     }
-    hiz.data[3u * 8u + 2u] = depth_direction == SOC_DEPTH_REVERSED
-        ? 0.0f
-        : 1.0f;
-    if (soc_hiz_build_with_kernels(&hiz, depth_direction, scalar) !=
+    hiz.data[3u * 8u + 2u] = 0.0f;
+    if (soc_hiz_build_with_kernels(&hiz, scalar) !=
         SOC_RESULT_OK ||
         scalar->test_aabbs(
             &hiz,
@@ -2159,10 +2072,9 @@ static int test_aabb_noncontiguous_hiz_sampling(
         memcmp(&scalar_counts, &neon_counts, sizeof(scalar_counts)) != 0) {
         fprintf(
             stderr,
-            "noncontiguous Hi-Z AABB mismatch: range=%u z=%u "
+            "noncontiguous Hi-Z AABB mismatch: range=%u "
             "scalar=%u,%u,%u,%u neon=%u,%u,%u,%u\n",
             (unsigned)clip_depth_range,
-            (unsigned)depth_direction,
             (unsigned)scalar_visibility[0],
             (unsigned)scalar_visibility[1],
             (unsigned)scalar_visibility[2],
@@ -2186,7 +2098,6 @@ static int test_aabb_tiny_positive_w_fail_open(
 {
     soc_frame_desc frame = make_aabb_test_frame(
         SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        SOC_DEPTH_FORWARD,
         SOC_FALSE
     );
     const soc_aabb point = make_kernel_aabb(
@@ -2245,20 +2156,19 @@ static int test_aabb_fallback_lane_order(
 {
     const soc_frame_desc frame = make_aabb_test_frame(
         SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        SOC_DEPTH_FORWARD,
         SOC_FALSE
     );
     const soc_aabb invalid = make_kernel_aabb(
         0.1f, -0.1f, 0.2f, -0.1f, 0.1f, 0.3f
     );
     const soc_aabb fast_visible = make_kernel_aabb(
-        -0.1f, -0.1f, 0.2f, 0.1f, 0.1f, 0.3f
-    );
-    const soc_aabb fast_occluded = make_kernel_aabb(
         -0.1f, -0.1f, 0.8f, 0.1f, 0.1f, 0.9f
     );
+    const soc_aabb fast_occluded = make_kernel_aabb(
+        -0.1f, -0.1f, 0.2f, 0.1f, 0.1f, 0.3f
+    );
     const soc_aabb boundary = make_kernel_aabb(
-        1.0f, 0.0f, 0.2f, 1.0f, 0.0f, 0.2f
+        1.0f, 0.0f, 0.8f, 1.0f, 0.0f, 0.8f
     );
     const soc_aabb bounds[] = {
         invalid,
@@ -2295,7 +2205,7 @@ static int test_aabb_fallback_lane_order(
     for (index = 0u; index < hiz.levels[0].element_count; ++index) {
         hiz.data[index] = 0.5f;
     }
-    if (soc_hiz_build_with_kernels(&hiz, SOC_DEPTH_FORWARD, scalar) !=
+    if (soc_hiz_build_with_kernels(&hiz, scalar) !=
         SOC_RESULT_OK ||
         scalar->test_aabbs(
             &hiz,
@@ -2337,7 +2247,6 @@ static int test_aabb_overlap(
     } aabb_overlap_storage;
     soc_frame_desc frame = make_aabb_test_frame(
         SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        SOC_DEPTH_FORWARD,
         SOC_FALSE
     );
     const soc_aabb source[] = {
@@ -2361,7 +2270,6 @@ static int test_aabb_overlap(
     soc_aabb_query_context_initialize(&frame, &query);
     if (initialize_aabb_test_hiz(
             scalar,
-            SOC_DEPTH_FORWARD,
             8u,
             8u,
             &hiz
@@ -2405,29 +2313,20 @@ static int test_aabb_query_differential(
         SOC_CLIP_DEPTH_ZERO_TO_ONE,
         SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE,
     };
-    static const soc_depth_direction depth_directions[] = {
-        SOC_DEPTH_FORWARD,
-        SOC_DEPTH_REVERSED,
-    };
     soc_aabb bounds_storage[259];
     size_t range_index;
-    size_t direction_index;
     size_t perspective_index;
 
     for (range_index = 0u;
          range_index < ARRAY_COUNT(clip_depth_ranges);
          ++range_index) {
-        for (direction_index = 0u;
-             direction_index < ARRAY_COUNT(depth_directions);
-             ++direction_index) {
-            for (perspective_index = 0u; perspective_index < 2u;
-                 ++perspective_index) {
+        for (perspective_index = 0u; perspective_index < 2u;
+             ++perspective_index) {
                 const soc_bool perspective = perspective_index != 0u
                     ? SOC_TRUE
                     : SOC_FALSE;
                 const soc_frame_desc frame = make_aabb_test_frame(
                     clip_depth_ranges[range_index],
-                    depth_directions[direction_index],
                     perspective
                 );
                 soc_aabb_query_context query;
@@ -2439,12 +2338,10 @@ static int test_aabb_query_differential(
                     bounds_storage,
                     (uint32_t)ARRAY_COUNT(bounds_storage),
                     clip_depth_ranges[range_index],
-                    depth_directions[direction_index],
                     perspective
                 );
                 if (initialize_aabb_test_hiz(
                         scalar,
-                        depth_directions[direction_index],
                         31u,
                         19u,
                         &hiz
@@ -2508,11 +2405,10 @@ static int test_aabb_query_differential(
                     }
                 }
                 soc_hiz_shutdown(&hiz);
-            }
-            {
+        }
+        {
                 soc_frame_desc dense_frame = make_aabb_test_frame(
                     clip_depth_ranges[range_index],
-                    depth_directions[direction_index],
                     SOC_FALSE
                 );
                 soc_aabb_query_context dense_query;
@@ -2539,12 +2435,10 @@ static int test_aabb_query_differential(
                     bounds_storage,
                     257u,
                     clip_depth_ranges[range_index],
-                    depth_directions[direction_index],
                     SOC_FALSE
                 );
                 if (initialize_aabb_test_hiz(
                         scalar,
-                        depth_directions[direction_index],
                         31u,
                         19u,
                         &dense_hiz
@@ -2566,18 +2460,15 @@ static int test_aabb_query_differential(
             if (test_aabb_noncontiguous_hiz_sampling(
                     scalar,
                     neon,
-                    clip_depth_ranges[range_index],
-                    depth_directions[direction_index]
+                    clip_depth_ranges[range_index]
                 ) != 0) {
                 return 1;
             }
-        }
     }
 
     {
         const soc_frame_desc frame = make_aabb_test_frame(
             SOC_CLIP_DEPTH_ZERO_TO_ONE,
-            SOC_DEPTH_FORWARD,
             SOC_FALSE
         );
         soc_aabb_query_context query;
@@ -2588,7 +2479,6 @@ static int test_aabb_query_differential(
         soc_aabb_query_context_initialize(&frame, &query);
         if (initialize_aabb_test_hiz(
                 scalar,
-                SOC_DEPTH_FORWARD,
                 3u,
                 3u,
                 &hiz

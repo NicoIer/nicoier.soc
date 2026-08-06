@@ -23,7 +23,7 @@ int main(void)
     soc_snapshot_destroy(snapshot);
 
     return soc_get_abi_version() == SOC_ABI_VERSION &&
-        SOC_ABI_VERSION_MAJOR == 2u &&
+        SOC_ABI_VERSION_MAJOR == 3u &&
         SOC_OCCLUDER_GROUP_SIZE_V1 <= sizeof(group) &&
         SOC_OCCLUSION_BUILD_DESC_SIZE_V1 <= sizeof(build) &&
         SOC_BUILD_STATS_SIZE_V1 <= sizeof(build_stats) &&

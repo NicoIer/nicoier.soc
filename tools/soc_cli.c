@@ -48,7 +48,6 @@ typedef struct soc_cli_options {
     int has_near;
     int has_far;
     int two_sided;
-    int reversed_z;
     soc_front_face front_face;
 } soc_cli_options;
 
@@ -93,13 +92,12 @@ static void print_usage(FILE* stream, const char* executable)
         "\n"
         "Rasterization:\n"
         "  --two-sided               Disable face culling\n"
-        "  --reversed-z              Use reversed-Z depth\n"
         "  --front-face ccw|cw       Front-face winding (default: ccw)\n"
         "  -h, --help                Show this help\n"
         "\n"
         "When camera or clip-plane values are omitted, they are derived from\n"
         "the OBJ bounding box. OBJ v/f records, negative indices, and polygon\n"
-        "fan triangulation are supported.\n",
+        "fan triangulation are supported. Depth always uses reversed Z.\n",
         executable,
         SOC_CLI_DEFAULT_WIDTH,
         SOC_CLI_DEFAULT_HEIGHT,
@@ -300,8 +298,6 @@ static int parse_options(
             ++argument;
         } else if (strcmp(name, "--two-sided") == 0) {
             options->two_sided = 1;
-        } else if (strcmp(name, "--reversed-z") == 0) {
-            options->reversed_z = 1;
         } else if (strcmp(name, "--front-face") == 0) {
             if (argument + 1 >= argc) {
                 set_error(
@@ -478,7 +474,6 @@ static int make_perspective(
     double aspect,
     double near_plane,
     double far_plane,
-    int reversed_z,
     soc_cli_matrix4d* out_matrix
 )
 {
@@ -496,13 +491,8 @@ static int make_perspective(
 
     matrix.values[0] = focal_length / aspect;
     matrix.values[5] = focal_length;
-    if (reversed_z != 0) {
-        matrix.values[10] = near_plane / depth_range;
-        matrix.values[14] = near_plane * far_plane / depth_range;
-    } else {
-        matrix.values[10] = -far_plane / depth_range;
-        matrix.values[14] = -near_plane * far_plane / depth_range;
-    }
+    matrix.values[10] = near_plane / depth_range;
+    matrix.values[14] = near_plane * far_plane / depth_range;
     matrix.values[11] = -1.0;
 
     *out_matrix = matrix;
@@ -686,7 +676,6 @@ static int resolve_camera(
             aspect,
             options->near_plane,
             options->far_plane,
-            options->reversed_z,
             &projection
         )) {
         set_error(error, error_capacity, "cannot build projection matrix");
@@ -872,9 +861,6 @@ static int render(
         .struct_size = sizeof(soc_frame_desc),
         .clip_from_world = clip_from_world,
         .clip_depth_range = SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        .depth_direction = options->reversed_z != 0
-            ? SOC_DEPTH_REVERSED
-            : SOC_DEPTH_FORWARD,
         .front_face = options->front_face,
         .flags = SOC_FRAME_FLAG_NONE,
     };
@@ -932,7 +918,6 @@ static int render(
     drawn_pixel_count = soc_cli_depth_to_gray8(
         depth,
         pixel_count,
-        options->reversed_z,
         options->near_plane,
         options->far_plane,
         pixels
@@ -964,7 +949,7 @@ static int render(
     (void)printf(
         "camera eye=(%.9g, %.9g, %.9g)"
         " target=(%.9g, %.9g, %.9g)"
-        " fov=%.9g near=%.9g far=%.9g depth=%s\n",
+        " fov=%.9g near=%.9g far=%.9g\n",
         options->eye.x,
         options->eye.y,
         options->eye.z,
@@ -973,8 +958,7 @@ static int render(
         options->target.z,
         options->fov_degrees,
         options->near_plane,
-        options->far_plane,
-        options->reversed_z != 0 ? "reversed" : "forward"
+        options->far_plane
     );
     success = 1;
 

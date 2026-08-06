@@ -102,9 +102,9 @@ SOC_API void SOC_CALL soc_snapshot_destroy(soc_snapshot* snapshot);
  * strictly proves the complete projected bounds to be behind occluder depth.
  * Unordered, near-plane-crossing, or otherwise unprojectable bounds produce
  * SOC_VISIBILITY_UNKNOWN (fail-open); other bounds produce
- * SOC_VISIBILITY_VISIBLE. The frame's clip depth range and depth direction are
- * honored. When out_stats is non-null it receives counters for this call only;
- * the snapshot itself is never mutated by a query.
+ * SOC_VISIBILITY_VISIBLE. The frame's clip depth range is honored under the
+ * Reverse-Z convention. When out_stats is non-null it receives counters for
+ * this call only; the snapshot itself is never mutated by a query.
  */
 SOC_API soc_result SOC_CALL soc_snapshot_test_aabbs(
     const soc_snapshot* snapshot,
@@ -121,8 +121,8 @@ SOC_API soc_result SOC_CALL soc_snapshot_get_build_stats(
 
 /*
  * Copies a depth Level into caller storage. Level 0 contains rasterized depth.
- * Each higher Level has ceil(previous / 2) dimensions and reduces only valid
- * children: maximum depth for forward Z, minimum depth for reversed Z.
+ * Each higher Level has ceil(previous / 2) dimensions and stores the minimum
+ * of its valid Reverse-Z children.
  */
 SOC_API soc_result SOC_CALL soc_snapshot_hiz_level_query(
     const soc_snapshot* snapshot,

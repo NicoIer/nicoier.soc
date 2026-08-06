@@ -4,8 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SOC_ABI_VERSION_MAJOR 2u
-#define SOC_ABI_VERSION_MINOR 1u
+#define SOC_ABI_VERSION_MAJOR 3u
+#define SOC_ABI_VERSION_MINOR 0u
 #define SOC_ABI_VERSION \
     ((SOC_ABI_VERSION_MAJOR << 16u) | SOC_ABI_VERSION_MINOR)
 
@@ -119,15 +119,6 @@ typedef uint32_t soc_clip_depth_range;
 #define SOC_CLIP_DEPTH_ZERO_TO_ONE ((soc_clip_depth_range)0u)
 #define SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE ((soc_clip_depth_range)1u)
 
-typedef uint32_t soc_depth_direction;
-
-/*
- * Forward-Z clears to 1 and keeps smaller depth; reversed-Z clears to 0 and
- * keeps larger depth.
- */
-#define SOC_DEPTH_FORWARD ((soc_depth_direction)0u)
-#define SOC_DEPTH_REVERSED ((soc_depth_direction)1u)
-
 typedef uint32_t soc_front_face;
 
 /* Winding is evaluated in NDC XY with positive Y up, before viewport Y flip. */
@@ -152,9 +143,9 @@ typedef struct soc_config {
 
 typedef struct soc_frame_desc {
     uint32_t struct_size;
+    /* Reverse-Z projection; stored depth maps near to 1 and far toward 0. */
     soc_mat4 clip_from_world;
     soc_clip_depth_range clip_depth_range;
-    soc_depth_direction depth_direction;
     soc_front_face front_face;
     uint32_t flags;
 } soc_frame_desc;

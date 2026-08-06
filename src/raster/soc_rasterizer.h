@@ -93,7 +93,7 @@ typedef struct soc_rasterizer {
     /*
      * Summary storage is one owned allocation split into cache-dense streams;
      * pending masks are allocated on the first tracked block path.
-     * Farthest depths use 2/-1 as forward/reversed untouched sentinels;
+     * Farthest depths use -1 as the Reverse-Z untouched sentinel;
      * a zero pending mask denotes the complete physical cell. Pending state
      * is undefined while its farthest depth is the untouched sentinel.
      */
@@ -258,8 +258,7 @@ void soc_rasterizer_rasterize_prepared_region_to_target_unchecked(
 
 /* Initializes every live early-Z cell for caller-cleared target depth. */
 void soc_raster_target_reset_early_z_unchecked(
-    soc_raster_target* target,
-    soc_depth_direction depth_direction
+    soc_raster_target* target
 );
 
 soc_result soc_rasterizer_finish_occluders(soc_rasterizer* rasterizer);

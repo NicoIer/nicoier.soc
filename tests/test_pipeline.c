@@ -58,7 +58,6 @@ static soc_frame_desc make_frame_desc(void)
             .col3 = {0.0f, 0.0f, 0.0f, 1.0f},
         },
         .clip_depth_range = SOC_CLIP_DEPTH_ZERO_TO_ONE,
-        .depth_direction = SOC_DEPTH_FORWARD,
         .front_face = SOC_FRONT_FACE_CCW,
         .flags = SOC_FRAME_FLAG_NONE,
     };
@@ -234,7 +233,7 @@ static int test_build_query_and_snapshot_lifetime(void)
     CHECK(level_info.width == 1u);
     CHECK(level_info.height == 1u);
     CHECK(level_info.required_element_count == 1u);
-    CHECK(top_depth == 1.0f);
+    CHECK(top_depth == 0.0f);
     CHECK_RESULT(
         soc_snapshot_hiz_level_query(
             snapshot,
@@ -528,13 +527,6 @@ static int test_error_paths(void)
         SOC_RESULT_INVALID_ARGUMENT
     );
     frame.clip_depth_range = SOC_CLIP_DEPTH_ZERO_TO_ONE;
-    frame.depth_direction = UINT32_MAX;
-    build_desc = make_build_desc(&frame, NULL, 0u);
-    CHECK_RESULT(
-        soc_occlusion_build(owner, &build_desc, &output),
-        SOC_RESULT_INVALID_ARGUMENT
-    );
-    frame.depth_direction = SOC_DEPTH_FORWARD;
     frame.front_face = UINT32_MAX;
     build_desc = make_build_desc(&frame, NULL, 0u);
     CHECK_RESULT(

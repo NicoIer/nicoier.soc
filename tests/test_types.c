@@ -63,6 +63,18 @@ _Static_assert(
     offsetof(soc_frame_desc, clip_from_world) == 4u,
     "soc_frame_desc matrix offset changed"
 );
+_Static_assert(
+    offsetof(soc_frame_desc, front_face) == 72u,
+    "soc_frame_desc front-face offset changed"
+);
+_Static_assert(
+    offsetof(soc_frame_desc, flags) == 76u,
+    "soc_frame_desc flags offset changed"
+);
+_Static_assert(
+    sizeof(soc_frame_desc) == 80u,
+    "soc_frame_desc must be 80 bytes"
+);
 _Static_assert(SOC_FALSE == 0u, "SOC_FALSE must be zero");
 _Static_assert(SOC_TRUE != 0u, "SOC_TRUE must be nonzero");
 _Static_assert(SOC_RESULT_OK == 0, "SOC_RESULT_OK must be zero");
@@ -83,6 +95,8 @@ _Static_assert(
         ((SOC_ABI_VERSION_MAJOR << 16u) | SOC_ABI_VERSION_MINOR),
     "SOC_ABI_VERSION encoding changed"
 );
+_Static_assert(SOC_ABI_VERSION_MAJOR == 3u, "unexpected ABI major version");
+_Static_assert(SOC_ABI_VERSION_MINOR == 0u, "unexpected ABI minor version");
 
 int main(void)
 {
