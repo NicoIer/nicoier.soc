@@ -50,12 +50,14 @@ typedef struct soc_raster_target {
     uint32_t width;
     uint32_t height;
     /*
-     * Optional borrowed farthest-depth summaries for the global 8x8 cells
-     * intersecting this target, packed from the cell containing the origin.
-     * The caller initializes each entry to a conservative bound for depth.
+     * Borrowed SoA early-Z state; target origins are 8x8-cell aligned.
+     * A zero pending mask denotes the complete physical cell; pending state
+     * is undefined while its farthest depth is the untouched sentinel.
      */
-    float* block_depth_summaries;
-    size_t block_depth_summary_count;
+    float* early_z_farthest_depths;
+    uint64_t* early_z_pending_masks;
+    size_t early_z_block_count;
+    uint32_t early_z_column_count;
 } soc_raster_target;
 
 typedef struct soc_raster_prepared_triangle {
@@ -87,9 +89,24 @@ typedef struct soc_rasterizer {
     float* depth;
     uint32_t block_column_count;
     uint32_t block_row_count;
-    size_t block_depth_summary_count;
-    /* Owned farthest-depth summaries for the fixed 8x8 block grid. */
-    float* block_depth_summaries;
+    size_t early_z_block_count;
+    /*
+     * Summary storage is one owned allocation split into cache-dense streams;
+     * pending masks are allocated on the first tracked block path.
+     * Farthest depths use 2/-1 as forward/reversed untouched sentinels;
+     * a zero pending mask denotes the complete physical cell. Pending state
+     * is undefined while its farthest depth is the untouched sentinel.
+     */
+    void* early_z_storage;
+    float* early_z_farthest_depths;
+    uint64_t* early_z_pending_masks;
+    uint32_t early_z_tile_column_count;
+    uint32_t early_z_tile_row_count;
+    size_t early_z_tile_count;
+    float* early_z_tile_farthest_depths;
+    size_t early_z_ready_tile_count;
+    float early_z_frame_farthest_depth;
+    soc_bool early_z_coarse_dirty;
     const soc_kernel_table* kernels;
     /* Optional borrowed grid; NULL keeps the original lock-free path. */
     soc_raster_tile_locks* tile_locks;
@@ -183,7 +200,10 @@ soc_result soc_rasterizer_prepare_occluder_triangles(
     soc_raster_prepared_list* prepared
 );
 
-/* Full-frame replay of immutable setup records; performs no allocation. */
+/*
+ * Full-frame replay of immutable setup records. The first tracked record
+ * lazily allocates pending masks; allocation success is a runtime contract.
+ */
 soc_result soc_rasterizer_rasterize_prepared_triangles(
     soc_rasterizer* rasterizer,
     const soc_raster_prepared_triangle* prepared,
@@ -234,6 +254,12 @@ void soc_rasterizer_rasterize_prepared_region_to_target_unchecked(
     const soc_raster_prepared_triangle* prepared,
     const soc_raster_prepared_region* region,
     const soc_raster_target* target
+);
+
+/* Initializes every live early-Z cell for caller-cleared target depth. */
+void soc_raster_target_reset_early_z_unchecked(
+    soc_raster_target* target,
+    soc_depth_direction depth_direction
 );
 
 soc_result soc_rasterizer_finish_occluders(soc_rasterizer* rasterizer);

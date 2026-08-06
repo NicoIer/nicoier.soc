@@ -19,7 +19,7 @@
 #define SOC_PARALLEL_HOT_TILE_MINIMUM_REFERENCES ((size_t)1024u)
 #define SOC_PARALLEL_TILE_REFERENCES_PER_LANE ((size_t)256u)
 #define SOC_PARALLEL_TILE_ELEMENT_COUNT ((size_t)1024u)
-#define SOC_PARALLEL_TILE_BLOCK_SUMMARY_COUNT \
+#define SOC_PARALLEL_TILE_EARLY_Z_BLOCK_COUNT \
     ((size_t)(SOC_RASTER_LOCK_TILE_SIZE / SOC_KERNEL_RASTER_BLOCK_SIZE) * \
         (size_t)(SOC_RASTER_LOCK_TILE_SIZE / SOC_KERNEL_RASTER_BLOCK_SIZE))
 #define SOC_PARALLEL_TILE_BIN_INLINE_REFERENCE_COUNT UINT32_C(3)
@@ -995,8 +995,11 @@ static void parallel_rasterize_tiles(
     soc_rasterizer* rasterizer = &state->rasterizers[worker_index];
     const size_t lane_index = (size_t)worker_index;
     const size_t lane_count = (size_t)worker_count;
-    float target_block_depth_summaries[
-        SOC_PARALLEL_TILE_BLOCK_SUMMARY_COUNT
+    float target_early_z_farthest_depths[
+        SOC_PARALLEL_TILE_EARLY_Z_BLOCK_COUNT
+    ];
+    uint64_t target_early_z_pending_masks[
+        SOC_PARALLEL_TILE_EARLY_Z_BLOCK_COUNT
     ];
     size_t hot_index;
 
@@ -1040,13 +1043,19 @@ static void parallel_rasterize_tiles(
         target.origin_y = region.minimum_y;
         target.width = region.end_x - region.minimum_x;
         target.height = region.end_y - region.minimum_y;
-        target.block_depth_summaries = target_block_depth_summaries;
-        target.block_depth_summary_count =
-            SOC_PARALLEL_TILE_BLOCK_SUMMARY_COUNT;
-        state->kernels->clear_f32(
-            target_block_depth_summaries,
-            SOC_PARALLEL_TILE_BLOCK_SUMMARY_COUNT,
-            state->depth_direction == SOC_DEPTH_REVERSED ? 0.0f : 1.0f
+        target.early_z_farthest_depths =
+            target_early_z_farthest_depths;
+        target.early_z_pending_masks = target_early_z_pending_masks;
+        target.early_z_column_count =
+            (target.width + SOC_KERNEL_RASTER_BLOCK_SIZE - 1u) /
+            SOC_KERNEL_RASTER_BLOCK_SIZE;
+        target.early_z_block_count =
+            (size_t)target.early_z_column_count *
+            ((target.height + SOC_KERNEL_RASTER_BLOCK_SIZE - 1u) /
+                SOC_KERNEL_RASTER_BLOCK_SIZE);
+        soc_raster_target_reset_early_z_unchecked(
+            &target,
+            state->depth_direction
         );
 
         rasterize_parallel_hot_tile_range(
@@ -2346,8 +2355,6 @@ static soc_bool try_sample_prepared_density(
     const uint64_t extra_triangle_count =
         input_triangle_count % segment_count;
     size_t sampled_source_count = 0u;
-    soc_bool rasterizer_initialized = SOC_FALSE;
-    soc_bool frame_active = SOC_FALSE;
     soc_bool hint_available = SOC_FALSE;
     uint32_t sample_index;
     soc_result result;
@@ -2358,24 +2365,20 @@ static soc_bool try_sample_prepared_density(
         return SOC_FALSE;
     }
 
-    result = soc_rasterizer_initialize(
-        &rasterizer,
-        context->width,
-        context->height,
-        level_zero,
-        depth_element_count,
-        context->kernels
-    );
-    if (result != SOC_RESULT_OK) {
-        goto sample_cleanup;
-    }
-    rasterizer_initialized = SOC_TRUE;
-
-    result = soc_rasterizer_begin_frame_no_clear(&rasterizer, frame);
-    if (result != SOC_RESULT_OK) {
-        goto sample_cleanup;
-    }
-    frame_active = SOC_TRUE;
+    /*
+     * The selector only runs transform, clipping and setup.  Construct the
+     * preparation view directly instead of allocating and clearing a
+     * framebuffer-sized early-Z sidecar that can never be consumed here.
+     */
+    memset(&rasterizer, 0, sizeof(rasterizer));
+    rasterizer.width = context->width;
+    rasterizer.height = context->height;
+    rasterizer.depth_element_count = depth_element_count;
+    rasterizer.depth = level_zero;
+    rasterizer.kernels = context->kernels;
+    rasterizer.initialized = SOC_TRUE;
+    rasterizer.frame_active = SOC_TRUE;
+    rasterizer.frame = *frame;
 
     for (sample_index = 0u;
          sample_index < SOC_PARALLEL_SELECTOR_SAMPLE_SEGMENTS;
@@ -2469,11 +2472,6 @@ static soc_bool try_sample_prepared_density(
         }
     }
 
-    result = soc_rasterizer_end_frame(&rasterizer);
-    if (result != SOC_RESULT_OK) {
-        goto sample_cleanup;
-    }
-    frame_active = SOC_FALSE;
     if (sampled_source_count != 0u) {
         *out_source_triangle_count = sampled_source_count;
         *out_prepared_record_count = prepared.count;
@@ -2481,13 +2479,7 @@ static soc_bool try_sample_prepared_density(
     }
 
 sample_cleanup:
-    if (frame_active == SOC_TRUE) {
-        (void)soc_rasterizer_end_frame(&rasterizer);
-    }
     soc_raster_prepared_list_shutdown(&prepared);
-    if (rasterizer_initialized == SOC_TRUE) {
-        soc_rasterizer_shutdown(&rasterizer);
-    }
     return hint_available;
 }
 

@@ -178,7 +178,7 @@ static float reduce_depth_scalar(
     return candidate > accumulated ? candidate : accumulated;
 }
 
-static SOC_NEON_FORCE_INLINE float store_constant_depth_block_f32_neon_impl(
+static SOC_NEON_FORCE_INLINE void store_constant_depth_block_f32_neon_impl(
     float* destination,
     size_t row_stride,
     uint32_t block_width,
@@ -191,14 +191,6 @@ static SOC_NEON_FORCE_INLINE float store_constant_depth_block_f32_neon_impl(
     static const uint32_t lane_bits_values[4] = {1u, 2u, 4u, 8u};
     const uint32x4_t lane_bits = vld1q_u32(lane_bits_values);
     const float32x4_t candidates = vdupq_n_f32(candidate_depth);
-    const soc_depth_direction depth_direction = reversed_depth == SOC_TRUE
-        ? SOC_DEPTH_REVERSED
-        : SOC_DEPTH_FORWARD;
-    float block_depth_summary = depth_direction == SOC_DEPTH_REVERSED
-        ? INFINITY
-        : -INFINITY;
-    float32x4_t vector_depth_summary =
-        vdupq_n_f32(block_depth_summary);
     uint32_t row;
 
     for (row = 0u; row < block_height; ++row) {
@@ -212,7 +204,6 @@ static SOC_NEON_FORCE_INLINE float store_constant_depth_block_f32_neon_impl(
             const uint32_t lane_mask = (row_mask >> column) & 0x0fu;
             const float32x4_t stored =
                 vld1q_f32(destination_row + column);
-            float32x4_t merged = stored;
 
             if (lane_mask != 0u) {
                 float32x4_t compared_stored = stored;
@@ -235,20 +226,16 @@ static SOC_NEON_FORCE_INLINE float store_constant_depth_block_f32_neon_impl(
                     reversed_depth == SOC_TRUE
                         ? vcgtq_f32(candidates, compared_stored)
                         : vcltq_f32(candidates, compared_stored);
+                const float32x4_t merged =
+                    vbslq_f32(store_mask, candidates, stored);
 
-                merged = vbslq_f32(store_mask, candidates, stored);
                 vst1q_f32(destination_row + column, merged);
             }
-            vector_depth_summary = reduce_depth_neon(
-                vector_depth_summary,
-                merged,
-                depth_direction
-            );
             column += 4u;
         }
 
         for (; column < block_width; ++column) {
-            float stored_depth = destination_row[column];
+            const float stored_depth = destination_row[column];
 
             if ((row_mask & (UINT32_C(1) << column)) != 0u) {
                 const soc_bool passes_depth = reversed_depth == SOC_TRUE
@@ -261,40 +248,13 @@ static SOC_NEON_FORCE_INLINE float store_constant_depth_block_f32_neon_impl(
 
                 if (passes_depth == SOC_TRUE) {
                     destination_row[column] = candidate_depth;
-                    stored_depth = candidate_depth;
                 }
             }
-            block_depth_summary = reduce_depth_scalar(
-                block_depth_summary,
-                stored_depth,
-                depth_direction
-            );
         }
     }
-    block_depth_summary = reduce_depth_scalar(
-        block_depth_summary,
-        vgetq_lane_f32(vector_depth_summary, 0),
-        depth_direction
-    );
-    block_depth_summary = reduce_depth_scalar(
-        block_depth_summary,
-        vgetq_lane_f32(vector_depth_summary, 1),
-        depth_direction
-    );
-    block_depth_summary = reduce_depth_scalar(
-        block_depth_summary,
-        vgetq_lane_f32(vector_depth_summary, 2),
-        depth_direction
-    );
-    block_depth_summary = reduce_depth_scalar(
-        block_depth_summary,
-        vgetq_lane_f32(vector_depth_summary, 3),
-        depth_direction
-    );
-    return block_depth_summary == 0.0f ? 0.0f : block_depth_summary;
 }
 
-static float store_constant_depth_block_f32_neon(
+static void store_constant_depth_block_f32_neon(
     float* destination,
     size_t row_stride,
     uint32_t block_width,
@@ -305,7 +265,7 @@ static float store_constant_depth_block_f32_neon(
 )
 {
     if (depth_direction == SOC_DEPTH_REVERSED) {
-        return store_constant_depth_block_f32_neon_impl(
+        store_constant_depth_block_f32_neon_impl(
             destination,
             row_stride,
             block_width,
@@ -314,8 +274,9 @@ static float store_constant_depth_block_f32_neon(
             candidate_depth,
             SOC_TRUE
         );
+        return;
     }
-    return store_constant_depth_block_f32_neon_impl(
+    store_constant_depth_block_f32_neon_impl(
         destination,
         row_stride,
         block_width,
@@ -378,7 +339,7 @@ make_far_biased_plane_depth_neon_tail(
     return depth;
 }
 
-static float store_depth_plane_block_f32_neon(
+static void store_depth_plane_block_f32_neon(
     float* destination,
     size_t row_stride,
     uint32_t block_width,
@@ -396,11 +357,6 @@ static float store_depth_plane_block_f32_neon(
     const float32x4_t lane_offsets = vld1q_f32(lane_offsets_values);
     const soc_bool reversed_depth =
         depth_direction == SOC_DEPTH_REVERSED ? SOC_TRUE : SOC_FALSE;
-    float block_depth_summary = depth_direction == SOC_DEPTH_REVERSED
-        ? INFINITY
-        : -INFINITY;
-    float32x4_t vector_depth_summary =
-        vdupq_n_f32(block_depth_summary);
     uint32_t row;
 
     for (row = 0u; row < block_height; ++row) {
@@ -419,7 +375,6 @@ static float store_depth_plane_block_f32_neon(
             const uint32_t lane_mask = (row_mask >> column) & 0x0fu;
             const float32x4_t stored =
                 vld1q_f32(destination_row + column);
-            float32x4_t merged = stored;
 
             if (lane_mask != 0u) {
                 const float32x4_t columns = vaddq_f32(
@@ -453,19 +408,16 @@ static float store_depth_plane_block_f32_neon(
                 store_mask = reversed_depth == SOC_TRUE
                     ? vcgtq_f32(candidates, compared_stored)
                     : vcltq_f32(candidates, compared_stored);
-                merged = vbslq_f32(store_mask, candidates, stored);
+                const float32x4_t merged =
+                    vbslq_f32(store_mask, candidates, stored);
+
                 vst1q_f32(destination_row + column, merged);
             }
-            vector_depth_summary = reduce_depth_neon(
-                vector_depth_summary,
-                merged,
-                depth_direction
-            );
             column += 4u;
         }
 
         for (; column < block_width; ++column) {
-            float stored_depth = destination_row[column];
+            const float stored_depth = destination_row[column];
 
             if ((row_mask & (UINT32_C(1) << column)) != 0u) {
                 const float candidate_depth =
@@ -483,37 +435,10 @@ static float store_depth_plane_block_f32_neon(
 
                 if (passes_depth == SOC_TRUE) {
                     destination_row[column] = candidate_depth;
-                    stored_depth = candidate_depth;
                 }
             }
-            block_depth_summary = reduce_depth_scalar(
-                block_depth_summary,
-                stored_depth,
-                depth_direction
-            );
         }
     }
-    block_depth_summary = reduce_depth_scalar(
-        block_depth_summary,
-        vgetq_lane_f32(vector_depth_summary, 0),
-        depth_direction
-    );
-    block_depth_summary = reduce_depth_scalar(
-        block_depth_summary,
-        vgetq_lane_f32(vector_depth_summary, 1),
-        depth_direction
-    );
-    block_depth_summary = reduce_depth_scalar(
-        block_depth_summary,
-        vgetq_lane_f32(vector_depth_summary, 2),
-        depth_direction
-    );
-    block_depth_summary = reduce_depth_scalar(
-        block_depth_summary,
-        vgetq_lane_f32(vector_depth_summary, 3),
-        depth_direction
-    );
-    return block_depth_summary == 0.0f ? 0.0f : block_depth_summary;
 }
 
 static void reduce_hiz_row_scalar(

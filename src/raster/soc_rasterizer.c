@@ -18,6 +18,7 @@
 #define SOC_RASTER_SUBPIXEL_HALF \
     (SOC_RASTER_SUBPIXEL_SCALE / 2)
 #define SOC_RASTER_BLOCK_SIZE SOC_KERNEL_RASTER_BLOCK_SIZE
+#define SOC_RASTER_UNTRACKED_TRIANGLE_SIZE UINT32_C(16)
 #define SOC_RASTER_DEPTH_GUARD_ULPS 1u
 #define SOC_RASTER_EVALUATION_ERROR_SCALE 256.0
 
@@ -98,6 +99,7 @@ typedef struct soc_raster_depth_block_candidate {
     float depth_step_x;
     float depth_step_y;
     float nearest_depth;
+    float farthest_depth;
     soc_bool is_constant;
 } soc_raster_depth_block_candidate;
 
@@ -133,12 +135,12 @@ static soc_bool checked_size_multiply(
     return SOC_TRUE;
 }
 
-static soc_bool calculate_block_depth_summary_grid(
+static soc_bool calculate_early_z_block_grid(
     uint32_t width,
     uint32_t height,
     uint32_t* out_column_count,
     uint32_t* out_row_count,
-    size_t* out_summary_count
+    size_t* out_block_count
 )
 {
     const uint32_t column_count =
@@ -147,38 +149,49 @@ static soc_bool calculate_block_depth_summary_grid(
     const uint32_t row_count =
         height / SOC_RASTER_BLOCK_SIZE +
         (height % SOC_RASTER_BLOCK_SIZE != 0u ? 1u : 0u);
-    size_t summary_count;
+    size_t block_count;
 
     if (out_column_count == NULL ||
         out_row_count == NULL ||
-        out_summary_count == NULL ||
+        out_block_count == NULL ||
         !checked_size_multiply(
             (size_t)column_count,
             (size_t)row_count,
-            &summary_count
+            &block_count
         )) {
         return SOC_FALSE;
     }
 
     *out_column_count = column_count;
     *out_row_count = row_count;
-    *out_summary_count = summary_count;
+    *out_block_count = block_count;
     return SOC_TRUE;
 }
 
-static float* allocate_block_depth_summaries(size_t summary_count)
+static void* allocate_early_z_storage(
+    size_t block_count,
+    size_t tile_count,
+    float** out_farthest_depths,
+    float** out_tile_farthest_depths
+)
 {
-    size_t allocation_size;
+    const size_t farthest_bytes = block_count * sizeof(float);
+    const size_t tile_offset =
+        (farthest_bytes + 63u) & ~(size_t)63u;
+    const size_t allocation_size =
+        tile_offset + tile_count * sizeof(float);
+    uint8_t* storage = soc_aligned_alloc(64u, allocation_size);
 
-    if (summary_count == 0u ||
-        !checked_size_multiply(
-            summary_count,
-            sizeof(float),
-            &allocation_size
-        )) {
-        return NULL;
+    if (storage != NULL) {
+        *out_farthest_depths = (float*)storage;
+        *out_tile_farthest_depths = (float*)(storage + tile_offset);
     }
-    return soc_aligned_alloc(64u, allocation_size);
+    return storage;
+}
+
+static uint64_t* allocate_early_z_pending_masks(size_t block_count)
+{
+    return soc_aligned_alloc(64u, block_count * sizeof(uint64_t));
 }
 
 static soc_bool prepared_list_is_valid(
@@ -1075,6 +1088,23 @@ static float make_far_biased_plane_depth(
     return depth;
 }
 
+static float make_depth_plane_block_origin(
+    const soc_raster_triangle_setup* setup,
+    uint32_t block_x,
+    uint32_t block_y,
+    soc_depth_direction depth_direction
+)
+{
+    double block_depth = setup->depth_sample_origin +
+        setup->depth_step_x * (double)block_x +
+        setup->depth_step_y * (double)block_y;
+
+    block_depth = depth_direction == SOC_DEPTH_REVERSED
+        ? block_depth - setup->depth_error_bound
+        : block_depth + setup->depth_error_bound;
+    return (float)block_depth;
+}
+
 /*
  * Reproduce the depth kernel's f32 origin/step conversion, two-stage FMA and
  * far bias at all four rectangle corners.  Rounded FMA and the monotonic bias
@@ -1090,9 +1120,6 @@ static void configure_depth_block_candidate(
     soc_raster_depth_block_candidate* out_candidate
 )
 {
-    double block_depth = setup->depth_sample_origin +
-        setup->depth_step_x * (double)block_x +
-        setup->depth_step_y * (double)block_y;
     const soc_depth_direction depth_direction =
         rasterizer->frame.depth_direction;
     float x_offsets[2];
@@ -1100,6 +1127,8 @@ static void configure_depth_block_candidate(
     uint32_t corner_y;
 
     if (setup->depth_step_x == 0.0 && setup->depth_step_y == 0.0) {
+        const double block_depth = setup->depth_sample_origin;
+
         out_candidate->depth_origin = make_conservative_depth(
             rasterizer,
             block_depth,
@@ -1108,17 +1137,21 @@ static void configure_depth_block_candidate(
         out_candidate->depth_step_x = 0.0f;
         out_candidate->depth_step_y = 0.0f;
         out_candidate->nearest_depth = out_candidate->depth_origin;
+        out_candidate->farthest_depth = out_candidate->depth_origin;
         out_candidate->is_constant = SOC_TRUE;
         return;
     }
 
-    block_depth = depth_direction == SOC_DEPTH_REVERSED
-        ? block_depth - setup->depth_error_bound
-        : block_depth + setup->depth_error_bound;
-    out_candidate->depth_origin = (float)block_depth;
+    out_candidate->depth_origin = make_depth_plane_block_origin(
+        setup,
+        block_x,
+        block_y,
+        depth_direction
+    );
     out_candidate->depth_step_x = (float)setup->depth_step_x;
     out_candidate->depth_step_y = (float)setup->depth_step_y;
     out_candidate->nearest_depth = 0.0f;
+    out_candidate->farthest_depth = 0.0f;
     out_candidate->is_constant = SOC_FALSE;
     x_offsets[0] = 0.0f;
     x_offsets[1] = (float)(block_width - 1u);
@@ -1145,35 +1178,191 @@ static void configure_depth_block_candidate(
 
             if (corner_x == 0u && corner_y == 0u) {
                 out_candidate->nearest_depth = candidate;
+                out_candidate->farthest_depth = candidate;
             } else if (depth_direction == SOC_DEPTH_REVERSED) {
                 if (candidate > out_candidate->nearest_depth) {
                     out_candidate->nearest_depth = candidate;
                 }
+                if (candidate < out_candidate->farthest_depth) {
+                    out_candidate->farthest_depth = candidate;
+                }
             } else if (candidate < out_candidate->nearest_depth) {
                 out_candidate->nearest_depth = candidate;
+            } else if (candidate > out_candidate->farthest_depth) {
+                out_candidate->farthest_depth = candidate;
             }
         }
     }
 }
 
-static float* find_block_depth_summary(
-    soc_rasterizer* rasterizer,
-    uint32_t block_x,
-    uint32_t block_y,
-    uint32_t block_width,
-    uint32_t block_height
+/*
+ * Bound every 8x8 fine-kernel rebase covered by a coarse region.  Binary32
+ * conversion and FMA are monotonic, so the four endpoint block origins plus
+ * the complete [0,7] local-offset envelope contain every fine candidate.
+ */
+static void configure_coarse_depth_candidate(
+    const soc_rasterizer* rasterizer,
+    const soc_raster_triangle_setup* setup,
+    const soc_raster_region* region,
+    soc_raster_depth_block_candidate* out_candidate
 )
 {
-    const uint32_t last_x = block_x + block_width - 1u;
-    const uint32_t last_y = block_y + block_height - 1u;
+    const soc_depth_direction depth_direction =
+        rasterizer->frame.depth_direction;
+    uint32_t last_block_x =
+        (region->end_x - 1u) & ~(SOC_RASTER_BLOCK_SIZE - 1u);
+    uint32_t last_block_y =
+        (region->end_y - 1u) & ~(SOC_RASTER_BLOCK_SIZE - 1u);
+    float minimum_origin;
+    float maximum_origin;
+    float origins[2];
+    uint32_t origin_index;
+
+    if (setup->depth_step_x == 0.0 && setup->depth_step_y == 0.0) {
+        configure_depth_block_candidate(
+            rasterizer,
+            setup,
+            region->minimum_x,
+            region->minimum_y,
+            1u,
+            1u,
+            out_candidate
+        );
+        return;
+    }
+    if (last_block_x < region->minimum_x) {
+        last_block_x = region->minimum_x;
+    }
+    if (last_block_y < region->minimum_y) {
+        last_block_y = region->minimum_y;
+    }
+    minimum_origin = make_depth_plane_block_origin(
+        setup,
+        region->minimum_x,
+        region->minimum_y,
+        depth_direction
+    );
+    maximum_origin = minimum_origin;
+    {
+        const uint32_t block_x[2] = {
+            region->minimum_x,
+            last_block_x,
+        };
+        const uint32_t block_y[2] = {
+            region->minimum_y,
+            last_block_y,
+        };
+        uint32_t y_index;
+
+        for (y_index = 0u; y_index < 2u; ++y_index) {
+            uint32_t x_index;
+
+            for (x_index = 0u; x_index < 2u; ++x_index) {
+                const float origin = make_depth_plane_block_origin(
+                    setup,
+                    block_x[x_index],
+                    block_y[y_index],
+                    depth_direction
+                );
+
+                if (origin < minimum_origin) {
+                    minimum_origin = origin;
+                }
+                if (origin > maximum_origin) {
+                    maximum_origin = origin;
+                }
+            }
+        }
+    }
+    out_candidate->depth_origin = minimum_origin;
+    out_candidate->depth_step_x = (float)setup->depth_step_x;
+    out_candidate->depth_step_y = (float)setup->depth_step_y;
+    out_candidate->is_constant = SOC_FALSE;
+    origins[0] = minimum_origin;
+    origins[1] = maximum_origin;
+    for (origin_index = 0u; origin_index < 2u; ++origin_index) {
+        uint32_t offset_y_index;
+
+        for (offset_y_index = 0u;
+             offset_y_index < 2u;
+             ++offset_y_index) {
+            const float offset_y = offset_y_index == 0u
+                ? 0.0f
+                : (float)(SOC_RASTER_BLOCK_SIZE - 1u);
+            const float row_depth = fmaf(
+                out_candidate->depth_step_y,
+                offset_y,
+                origins[origin_index]
+            );
+            uint32_t offset_x_index;
+
+            for (offset_x_index = 0u;
+                 offset_x_index < 2u;
+                 ++offset_x_index) {
+                const float offset_x = offset_x_index == 0u
+                    ? 0.0f
+                    : (float)(SOC_RASTER_BLOCK_SIZE - 1u);
+                const float candidate = make_far_biased_plane_depth(
+                    fmaf(
+                        out_candidate->depth_step_x,
+                        offset_x,
+                        row_depth
+                    ),
+                    depth_direction
+                );
+
+                if (origin_index == 0u && offset_y_index == 0u &&
+                    offset_x_index == 0u) {
+                    out_candidate->nearest_depth = candidate;
+                    out_candidate->farthest_depth = candidate;
+                } else if (depth_direction == SOC_DEPTH_REVERSED) {
+                    if (candidate > out_candidate->nearest_depth) {
+                        out_candidate->nearest_depth = candidate;
+                    }
+                    if (candidate < out_candidate->farthest_depth) {
+                        out_candidate->farthest_depth = candidate;
+                    }
+                } else {
+                    if (candidate < out_candidate->nearest_depth) {
+                        out_candidate->nearest_depth = candidate;
+                    }
+                    if (candidate > out_candidate->farthest_depth) {
+                        out_candidate->farthest_depth = candidate;
+                    }
+                }
+            }
+        }
+    }
+}
+
+static size_t find_early_z_block_index(
+    const soc_rasterizer* rasterizer,
+    uint32_t block_x,
+    uint32_t block_y
+)
+{
     const uint32_t block_column = block_x / SOC_RASTER_BLOCK_SIZE;
     const uint32_t block_row = block_y / SOC_RASTER_BLOCK_SIZE;
 
-    if (last_x / SOC_RASTER_BLOCK_SIZE != block_column ||
-        last_y / SOC_RASTER_BLOCK_SIZE != block_row) {
+    return (size_t)block_row * rasterizer->block_column_count +
+        block_column;
+}
+
+static const float* find_small_early_z_farthest_depth(
+    const soc_rasterizer* rasterizer,
+    const soc_raster_region* region
+)
+{
+    const uint32_t block_column =
+        region->minimum_x / SOC_RASTER_BLOCK_SIZE;
+    const uint32_t block_row =
+        region->minimum_y / SOC_RASTER_BLOCK_SIZE;
+
+    if ((region->end_x - 1u) / SOC_RASTER_BLOCK_SIZE != block_column ||
+        (region->end_y - 1u) / SOC_RASTER_BLOCK_SIZE != block_row) {
         return NULL;
     }
-    return &rasterizer->block_depth_summaries[
+    return &rasterizer->early_z_farthest_depths[
         (size_t)block_row * rasterizer->block_column_count + block_column
     ];
 }
@@ -1181,126 +1370,20 @@ static float* find_block_depth_summary(
 static soc_bool depth_block_is_early_z_rejected(
     const soc_rasterizer* rasterizer,
     const soc_raster_depth_block_candidate* candidate,
-    const float* block_depth_summary
+    float farthest_depth
 )
 {
     if (rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED) {
-        return candidate->nearest_depth <= *block_depth_summary
+        return candidate->nearest_depth <= farthest_depth
             ? SOC_TRUE
             : SOC_FALSE;
     }
-    return candidate->nearest_depth >= *block_depth_summary
+    return candidate->nearest_depth >= farthest_depth
         ? SOC_TRUE
         : SOC_FALSE;
 }
 
-/*
- * A fragment may test against a whole-cell conservative summary, but only a
- * kernel which saw the complete physical cell may replace it.  Leaving the
- * old value after fragment writes is safe because depth updates move only
- * toward the near plane.
- */
-static soc_bool depth_rectangle_covers_complete_block(
-    const soc_rasterizer* rasterizer,
-    uint32_t block_x,
-    uint32_t block_y,
-    uint32_t block_width,
-    uint32_t block_height
-)
-{
-    const uint32_t aligned_x =
-        block_x & ~(SOC_RASTER_BLOCK_SIZE - 1u);
-    const uint32_t aligned_y =
-        block_y & ~(SOC_RASTER_BLOCK_SIZE - 1u);
-    const uint32_t physical_end_x =
-        aligned_x + SOC_RASTER_BLOCK_SIZE < rasterizer->width
-            ? aligned_x + SOC_RASTER_BLOCK_SIZE
-            : rasterizer->width;
-    const uint32_t physical_end_y =
-        aligned_y + SOC_RASTER_BLOCK_SIZE < rasterizer->height
-            ? aligned_y + SOC_RASTER_BLOCK_SIZE
-            : rasterizer->height;
-
-    return block_x == aligned_x &&
-        block_y == aligned_y &&
-        block_x + block_width == physical_end_x &&
-        block_y + block_height == physical_end_y
-        ? SOC_TRUE
-        : SOC_FALSE;
-}
-
-static float* find_target_block_depth_summary(
-    const soc_raster_target* target,
-    uint32_t block_x,
-    uint32_t block_y,
-    uint32_t block_width,
-    uint32_t block_height
-)
-{
-    const uint32_t last_x = block_x + block_width - 1u;
-    const uint32_t last_y = block_y + block_height - 1u;
-    const uint32_t first_block_column =
-        target->origin_x / SOC_RASTER_BLOCK_SIZE;
-    const uint32_t first_block_row =
-        target->origin_y / SOC_RASTER_BLOCK_SIZE;
-    const uint32_t block_column =
-        block_x / SOC_RASTER_BLOCK_SIZE;
-    const uint32_t block_row = block_y / SOC_RASTER_BLOCK_SIZE;
-    const uint32_t block_column_count = (uint32_t)(
-        ((uint64_t)(target->origin_x % SOC_RASTER_BLOCK_SIZE) +
-            (uint64_t)target->width + SOC_RASTER_BLOCK_SIZE - 1u) /
-        SOC_RASTER_BLOCK_SIZE
-    );
-
-    if (target->block_depth_summaries == NULL ||
-        last_x / SOC_RASTER_BLOCK_SIZE != block_column ||
-        last_y / SOC_RASTER_BLOCK_SIZE != block_row) {
-        return NULL;
-    }
-    return &target->block_depth_summaries[
-        (size_t)(block_row - first_block_row) * block_column_count +
-            (block_column - first_block_column)
-    ];
-}
-
-static soc_bool target_depth_rectangle_covers_complete_block(
-    const soc_raster_target* target,
-    uint32_t block_x,
-    uint32_t block_y,
-    uint32_t block_width,
-    uint32_t block_height
-)
-{
-    const uint32_t aligned_x =
-        block_x & ~(SOC_RASTER_BLOCK_SIZE - 1u);
-    const uint32_t aligned_y =
-        block_y & ~(SOC_RASTER_BLOCK_SIZE - 1u);
-    const uint32_t target_end_x = target->origin_x + target->width;
-    const uint32_t target_end_y = target->origin_y + target->height;
-    const uint32_t physical_begin_x = aligned_x > target->origin_x
-        ? aligned_x
-        : target->origin_x;
-    const uint32_t physical_begin_y = aligned_y > target->origin_y
-        ? aligned_y
-        : target->origin_y;
-    const uint32_t physical_end_x =
-        aligned_x + SOC_RASTER_BLOCK_SIZE < target_end_x
-            ? aligned_x + SOC_RASTER_BLOCK_SIZE
-            : target_end_x;
-    const uint32_t physical_end_y =
-        aligned_y + SOC_RASTER_BLOCK_SIZE < target_end_y
-            ? aligned_y + SOC_RASTER_BLOCK_SIZE
-            : target_end_y;
-
-    return block_x == physical_begin_x &&
-        block_y == physical_begin_y &&
-        block_x + block_width == physical_end_x &&
-        block_y + block_height == physical_end_y
-        ? SOC_TRUE
-        : SOC_FALSE;
-}
-
-static void store_depth_candidate(
+static void store_small_constant_depth(
     soc_rasterizer* rasterizer,
     uint32_t pixel_x,
     uint32_t pixel_y,
@@ -1320,6 +1403,7 @@ static void store_depth_candidate(
     }
 }
 
+/* Small constant triangles do not amortize 8x8 state maintenance. */
 static void rasterize_small_constant_triangle(
     soc_rasterizer* rasterizer,
     const soc_raster_triangle_setup* setup
@@ -1331,35 +1415,18 @@ static void rasterize_small_constant_triangle(
         setup->depth_sample_origin,
         setup->depth_error_bound
     );
-    float* block_depth_summary = find_block_depth_summary(
-        rasterizer,
-        region->minimum_x,
-        region->minimum_y,
-        region->end_x - region->minimum_x,
-        region->end_y - region->minimum_y
-    );
+    const float* early_z_farthest_depth =
+        find_small_early_z_farthest_depth(rasterizer, region);
     int64_t row_edges[3];
     uint32_t edge_index;
     uint32_t pixel_y;
 
-    if (block_depth_summary != NULL) {
-        const soc_raster_depth_block_candidate candidate = {
-            candidate_depth,
-            0.0f,
-            0.0f,
-            candidate_depth,
-            SOC_TRUE,
-        };
-
-        if (depth_block_is_early_z_rejected(
-                rasterizer,
-                &candidate,
-                block_depth_summary
-            ) == SOC_TRUE) {
-            return;
-        }
+    if (early_z_farthest_depth != NULL &&
+        (rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
+            ? candidate_depth <= *early_z_farthest_depth
+            : candidate_depth >= *early_z_farthest_depth)) {
+        return;
     }
-
     for (edge_index = 0u; edge_index < 3u; ++edge_index) {
         row_edges[edge_index] = fixed_edge_value_at_pixel(
             &setup->edges[edge_index],
@@ -1367,7 +1434,6 @@ static void rasterize_small_constant_triangle(
             region->minimum_y
         );
     }
-
     for (pixel_y = region->minimum_y; pixel_y < region->end_y; ++pixel_y) {
         int64_t edge0 = row_edges[0];
         int64_t edge1 = row_edges[1];
@@ -1378,7 +1444,7 @@ static void rasterize_small_constant_triangle(
              pixel_x < region->end_x;
              ++pixel_x) {
             if (edge0 >= 0 && edge1 >= 0 && edge2 >= 0) {
-                store_depth_candidate(
+                store_small_constant_depth(
                     rasterizer,
                     pixel_x,
                     pixel_y,
@@ -1393,6 +1459,419 @@ static void rasterize_small_constant_triangle(
         row_edges[1] += setup->edges[1].step_y;
         row_edges[2] += setup->edges[2].step_y;
     }
+}
+
+static soc_raster_block_classification classify_raster_block(
+    const soc_raster_triangle_setup* setup,
+    const int64_t edge_values[3],
+    uint32_t block_width,
+    uint32_t block_height
+);
+
+static uint64_t make_raster_block_mask(
+    const soc_raster_triangle_setup* setup,
+    const int64_t edge_values[3],
+    uint32_t block_width,
+    uint32_t block_height,
+    soc_raster_block_classification classification
+);
+
+static void rasterize_depth_block(
+    soc_rasterizer* rasterizer,
+    const soc_raster_depth_block_candidate* candidate,
+    uint32_t block_x,
+    uint32_t block_y,
+    uint32_t block_width,
+    uint32_t block_height,
+    uint64_t coverage_mask
+);
+
+/* A <=8x8 varying triangle is cheaper as one rectangular kernel call. */
+static void rasterize_small_plane_triangle_untracked(
+    soc_rasterizer* rasterizer,
+    const soc_raster_triangle_setup* setup
+)
+{
+    const soc_raster_region* region = &setup->bounds;
+    const uint32_t block_width = region->end_x - region->minimum_x;
+    const uint32_t block_height = region->end_y - region->minimum_y;
+    int64_t edge_values[3];
+    soc_raster_depth_block_candidate depth_candidate;
+    uint64_t coverage_mask;
+    uint32_t edge_index;
+
+    for (edge_index = 0u; edge_index < 3u; ++edge_index) {
+        edge_values[edge_index] = fixed_edge_value_at_pixel(
+            &setup->edges[edge_index],
+            region->minimum_x,
+            region->minimum_y
+        );
+    }
+    depth_candidate.depth_origin = make_depth_plane_block_origin(
+        setup,
+        region->minimum_x,
+        region->minimum_y,
+        rasterizer->frame.depth_direction
+    );
+    depth_candidate.depth_step_x = (float)setup->depth_step_x;
+    depth_candidate.depth_step_y = (float)setup->depth_step_y;
+    depth_candidate.is_constant = SOC_FALSE;
+    coverage_mask = make_raster_block_mask(
+        setup,
+        edge_values,
+        block_width,
+        block_height,
+        SOC_RASTER_BLOCK_PARTIAL
+    );
+    if (coverage_mask != 0u) {
+        rasterize_depth_block(
+            rasterizer,
+            &depth_candidate,
+            region->minimum_x,
+            region->minimum_y,
+            block_width,
+            block_height,
+            coverage_mask
+        );
+    }
+}
+
+static void rasterize_small_triangle_blocks_untracked(
+    soc_rasterizer* rasterizer,
+    const soc_raster_triangle_setup* setup
+)
+{
+    const soc_raster_region* region = &setup->bounds;
+    uint32_t aligned_y = region->minimum_y &
+        ~(SOC_RASTER_BLOCK_SIZE - 1u);
+
+    for (; aligned_y < region->end_y;
+         aligned_y += SOC_RASTER_BLOCK_SIZE) {
+        const uint32_t block_y = aligned_y < region->minimum_y
+            ? region->minimum_y
+            : aligned_y;
+        const uint32_t block_end_y = aligned_y + SOC_RASTER_BLOCK_SIZE <
+                region->end_y
+            ? aligned_y + SOC_RASTER_BLOCK_SIZE
+            : region->end_y;
+        const uint32_t block_height = block_end_y - block_y;
+        uint32_t aligned_x = region->minimum_x &
+            ~(SOC_RASTER_BLOCK_SIZE - 1u);
+
+        for (; aligned_x < region->end_x;
+             aligned_x += SOC_RASTER_BLOCK_SIZE) {
+            const uint32_t block_x = aligned_x < region->minimum_x
+                ? region->minimum_x
+                : aligned_x;
+            const uint32_t block_end_x = aligned_x +
+                    SOC_RASTER_BLOCK_SIZE < region->end_x
+                ? aligned_x + SOC_RASTER_BLOCK_SIZE
+                : region->end_x;
+            const uint32_t block_width = block_end_x - block_x;
+            int64_t edge_values[3];
+            soc_raster_block_classification classification;
+            soc_raster_depth_block_candidate depth_candidate;
+            uint64_t coverage_mask;
+            uint32_t edge_index;
+
+            for (edge_index = 0u; edge_index < 3u; ++edge_index) {
+                edge_values[edge_index] = fixed_edge_value_at_pixel(
+                    &setup->edges[edge_index],
+                    block_x,
+                    block_y
+                );
+            }
+            classification = classify_raster_block(
+                setup,
+                edge_values,
+                block_width,
+                block_height
+            );
+            if (classification == SOC_RASTER_BLOCK_OUTSIDE) {
+                continue;
+            }
+            if (setup->depth_step_x == 0.0 &&
+                setup->depth_step_y == 0.0) {
+                depth_candidate.depth_origin = make_conservative_depth(
+                    rasterizer,
+                    setup->depth_sample_origin,
+                    setup->depth_error_bound
+                );
+                depth_candidate.depth_step_x = 0.0f;
+                depth_candidate.depth_step_y = 0.0f;
+                depth_candidate.is_constant = SOC_TRUE;
+            } else {
+                depth_candidate.depth_origin =
+                    make_depth_plane_block_origin(
+                        setup,
+                        block_x,
+                        block_y,
+                        rasterizer->frame.depth_direction
+                    );
+                depth_candidate.depth_step_x =
+                    (float)setup->depth_step_x;
+                depth_candidate.depth_step_y =
+                    (float)setup->depth_step_y;
+                depth_candidate.is_constant = SOC_FALSE;
+            }
+            coverage_mask = make_raster_block_mask(
+                setup,
+                edge_values,
+                block_width,
+                block_height,
+                classification
+            );
+            if (coverage_mask != 0u) {
+                rasterize_depth_block(
+                    rasterizer,
+                    &depth_candidate,
+                    block_x,
+                    block_y,
+                    block_width,
+                    block_height,
+                    coverage_mask
+                );
+            }
+        }
+    }
+}
+
+static uint64_t make_physical_block_mask(
+    uint32_t block_width,
+    uint32_t block_height
+)
+{
+    if (block_width == SOC_RASTER_BLOCK_SIZE &&
+        block_height == SOC_RASTER_BLOCK_SIZE) {
+        return UINT64_MAX;
+    }
+
+    const uint64_t row_mask =
+        (UINT64_C(1) << block_width) - UINT64_C(1);
+    uint64_t mask = 0u;
+    uint32_t row;
+
+    for (row = 0u; row < block_height; ++row) {
+        mask |= row_mask << (row * SOC_RASTER_BLOCK_SIZE);
+    }
+    return mask;
+}
+
+static size_t find_target_early_z_block_index(
+    const soc_raster_target* target,
+    uint32_t block_x,
+    uint32_t block_y
+)
+{
+    const uint32_t first_block_column =
+        target->origin_x / SOC_RASTER_BLOCK_SIZE;
+    const uint32_t first_block_row =
+        target->origin_y / SOC_RASTER_BLOCK_SIZE;
+    const uint32_t block_column =
+        block_x / SOC_RASTER_BLOCK_SIZE;
+    const uint32_t block_row = block_y / SOC_RASTER_BLOCK_SIZE;
+
+    return (size_t)(block_row - first_block_row) *
+        target->early_z_column_count +
+        (block_column - first_block_column);
+}
+
+static float scan_depth_block_summary(
+    const float* depth,
+    size_t row_stride,
+    uint32_t block_width,
+    uint32_t block_height,
+    soc_depth_direction depth_direction
+)
+{
+    float summary = depth[0];
+    uint32_t row;
+
+    for (row = 0u; row < block_height; ++row) {
+        const float* depth_row = depth + (size_t)row * row_stride;
+        uint32_t column = row == 0u ? 1u : 0u;
+
+        for (; column < block_width; ++column) {
+            const float candidate = depth_row[column];
+
+            if (depth_direction == SOC_DEPTH_REVERSED) {
+                if (candidate < summary) {
+                    summary = candidate;
+                }
+            } else if (candidate > summary) {
+                summary = candidate;
+            }
+        }
+    }
+    return summary == 0.0f ? 0.0f : summary;
+}
+
+static soc_bool update_early_z_after_store(
+    const soc_rasterizer* rasterizer,
+    float* farthest_depth,
+    uint64_t* pending_mask_storage,
+    const soc_raster_depth_block_candidate* candidate,
+    uint64_t coverage_mask,
+    const float* physical_depth,
+    size_t row_stride,
+    uint32_t physical_width,
+    uint32_t physical_height
+)
+{
+    const float untouched_depth =
+        rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
+            ? -1.0f
+            : 2.0f;
+    const float clear_depth =
+        rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
+            ? 0.0f
+            : 1.0f;
+    const float previous_farthest_depth = *farthest_depth;
+    const soc_bool replaces_farthest =
+        rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
+            ? (candidate->farthest_depth > previous_farthest_depth
+                ? SOC_TRUE
+                : SOC_FALSE)
+            : (candidate->farthest_depth < previous_farthest_depth
+                ? SOC_TRUE
+                : SOC_FALSE);
+    uint64_t pending_mask;
+    uint64_t physical_mask;
+
+    if (replaces_farthest != SOC_TRUE) {
+        return SOC_FALSE;
+    }
+    physical_mask = make_physical_block_mask(
+        physical_width,
+        physical_height
+    );
+    if (coverage_mask == physical_mask) {
+        *farthest_depth = candidate->farthest_depth;
+        if (previous_farthest_depth == untouched_depth ||
+            *pending_mask_storage != 0u) {
+            *pending_mask_storage = 0u;
+        }
+        return SOC_TRUE;
+    }
+    pending_mask = (previous_farthest_depth == untouched_depth
+            ? physical_mask
+            : (*pending_mask_storage == 0u
+                ? physical_mask
+                : *pending_mask_storage)) &
+        ~coverage_mask;
+    if (pending_mask != 0u) {
+        *pending_mask_storage = pending_mask;
+        if (previous_farthest_depth == untouched_depth) {
+            *farthest_depth = clear_depth;
+        }
+        return SOC_FALSE;
+    }
+
+    *farthest_depth = scan_depth_block_summary(
+        physical_depth,
+        row_stride,
+        physical_width,
+        physical_height,
+        rasterizer->frame.depth_direction
+    );
+    *pending_mask_storage = 0u;
+    return SOC_TRUE;
+}
+
+static void rebuild_coarse_early_z(soc_rasterizer* rasterizer)
+{
+    const float clear_depth =
+        rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
+            ? 0.0f
+            : 1.0f;
+    const float untouched_depth =
+        rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
+            ? -1.0f
+            : 2.0f;
+    uint32_t tile_row;
+
+    if (rasterizer->early_z_coarse_dirty != SOC_TRUE) {
+        return;
+    }
+    rasterizer->early_z_ready_tile_count = 0u;
+    for (tile_row = 0u;
+         tile_row < rasterizer->early_z_tile_row_count;
+         ++tile_row) {
+        const uint32_t first_block_row = tile_row * 4u;
+        const uint32_t block_row_count =
+            rasterizer->block_row_count - first_block_row < 4u
+                ? rasterizer->block_row_count - first_block_row
+                : 4u;
+        uint32_t tile_column;
+
+        for (tile_column = 0u;
+             tile_column < rasterizer->early_z_tile_column_count;
+             ++tile_column) {
+            const uint32_t first_block_column = tile_column * 4u;
+            const uint32_t block_column_count =
+                rasterizer->block_column_count - first_block_column < 4u
+                    ? rasterizer->block_column_count - first_block_column
+                    : 4u;
+            const size_t tile_index =
+                (size_t)tile_row *
+                    rasterizer->early_z_tile_column_count +
+                tile_column;
+            float summary = rasterizer->early_z_farthest_depths[
+                (size_t)first_block_row * rasterizer->block_column_count +
+                first_block_column
+            ];
+            uint32_t row;
+
+            for (row = 0u; row < block_row_count; ++row) {
+                uint32_t column = row == 0u ? 1u : 0u;
+
+                for (; column < block_column_count; ++column) {
+                    const float candidate =
+                        rasterizer->early_z_farthest_depths[
+                        (size_t)(first_block_row + row) *
+                            rasterizer->block_column_count +
+                        first_block_column + column
+                    ];
+
+                    if (rasterizer->frame.depth_direction ==
+                        SOC_DEPTH_REVERSED) {
+                        if (candidate < summary) {
+                            summary = candidate;
+                        }
+                    } else if (candidate > summary) {
+                        summary = candidate;
+                    }
+                }
+            }
+            rasterizer->early_z_tile_farthest_depths[tile_index] =
+                summary;
+            if (summary != clear_depth && summary != untouched_depth) {
+                ++rasterizer->early_z_ready_tile_count;
+            }
+        }
+    }
+    if (rasterizer->early_z_ready_tile_count ==
+        rasterizer->early_z_tile_count) {
+        size_t tile_index;
+        float summary = rasterizer->early_z_tile_farthest_depths[0];
+
+        for (tile_index = 1u;
+             tile_index < rasterizer->early_z_tile_count;
+             ++tile_index) {
+            const float candidate =
+                rasterizer->early_z_tile_farthest_depths[tile_index];
+
+            if (rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED) {
+                if (candidate < summary) {
+                    summary = candidate;
+                }
+            } else if (candidate > summary) {
+                summary = candidate;
+            }
+        }
+        rasterizer->early_z_frame_farthest_depth = summary;
+    }
+    rasterizer->early_z_coarse_dirty = SOC_FALSE;
 }
 
 static soc_raster_block_classification classify_raster_block(
@@ -1488,128 +1967,45 @@ static void rasterize_depth_block(
     uint32_t block_y,
     uint32_t block_width,
     uint32_t block_height,
-    uint64_t coverage_mask,
-    float* out_block_depth_summary
+    uint64_t coverage_mask
 )
 {
     if (candidate->is_constant == SOC_TRUE) {
-        const float block_depth_summary =
-            rasterizer->kernels->store_constant_depth_block_f32(
-                rasterizer->depth +
-                    (size_t)block_y * rasterizer->width + block_x,
-                rasterizer->width,
-                block_width,
-                block_height,
-                coverage_mask,
-                candidate->depth_origin,
-                rasterizer->frame.depth_direction
-            );
-        if (out_block_depth_summary != NULL) {
-            *out_block_depth_summary = block_depth_summary;
-        }
+        rasterizer->kernels->store_constant_depth_block_f32(
+            rasterizer->depth +
+                (size_t)block_y * rasterizer->width + block_x,
+            rasterizer->width,
+            block_width,
+            block_height,
+            coverage_mask,
+            candidate->depth_origin,
+            rasterizer->frame.depth_direction
+        );
         return;
     }
 
-    {
-        const float block_depth_summary =
-            rasterizer->kernels->store_depth_plane_block_f32(
-                rasterizer->depth +
-                    (size_t)block_y * rasterizer->width + block_x,
-                rasterizer->width,
-                block_width,
-                block_height,
-                coverage_mask,
-                candidate->depth_origin,
-                candidate->depth_step_x,
-                candidate->depth_step_y,
-                rasterizer->frame.depth_direction
-            );
-        if (out_block_depth_summary != NULL) {
-            *out_block_depth_summary = block_depth_summary;
-        }
-    }
+    rasterizer->kernels->store_depth_plane_block_f32(
+        rasterizer->depth +
+            (size_t)block_y * rasterizer->width + block_x,
+        rasterizer->width,
+        block_width,
+        block_height,
+        coverage_mask,
+        candidate->depth_origin,
+        candidate->depth_step_x,
+        candidate->depth_step_y,
+        rasterizer->frame.depth_direction
+    );
 }
 
-static void rasterize_triangle_blocks(
+static void rasterize_triangle_blocks_fine(
     soc_rasterizer* rasterizer,
     const soc_raster_triangle_setup* setup,
     const soc_raster_region* region
 )
 {
-    const uint32_t bounds_width = region->end_x - region->minimum_x;
-    const uint32_t bounds_height = region->end_y - region->minimum_y;
     uint32_t aligned_y = region->minimum_y &
         ~(SOC_RASTER_BLOCK_SIZE - 1u);
-
-    if (bounds_width <= SOC_RASTER_BLOCK_SIZE &&
-        bounds_height <= SOC_RASTER_BLOCK_SIZE) {
-        int64_t edge_values[3];
-        float* block_depth_summary;
-        soc_raster_depth_block_candidate depth_candidate;
-        uint64_t coverage_mask;
-        uint32_t edge_index;
-
-        for (edge_index = 0u; edge_index < 3u; ++edge_index) {
-            edge_values[edge_index] = fixed_edge_value_at_pixel(
-                &setup->edges[edge_index],
-                region->minimum_x,
-                region->minimum_y
-            );
-        }
-        block_depth_summary = find_block_depth_summary(
-            rasterizer,
-            region->minimum_x,
-            region->minimum_y,
-            bounds_width,
-            bounds_height
-        );
-        configure_depth_block_candidate(
-            rasterizer,
-            setup,
-            region->minimum_x,
-            region->minimum_y,
-            bounds_width,
-            bounds_height,
-            &depth_candidate
-        );
-        if (block_depth_summary != NULL &&
-            depth_block_is_early_z_rejected(
-                rasterizer,
-                &depth_candidate,
-                block_depth_summary
-            ) == SOC_TRUE) {
-            return;
-        }
-        coverage_mask = make_raster_block_mask(
-            setup,
-            edge_values,
-            bounds_width,
-            bounds_height,
-            SOC_RASTER_BLOCK_PARTIAL
-        );
-        if (coverage_mask != 0u) {
-            rasterize_depth_block(
-                rasterizer,
-                &depth_candidate,
-                region->minimum_x,
-                region->minimum_y,
-                bounds_width,
-                bounds_height,
-                coverage_mask,
-                block_depth_summary != NULL &&
-                    depth_rectangle_covers_complete_block(
-                        rasterizer,
-                        region->minimum_x,
-                        region->minimum_y,
-                        bounds_width,
-                        bounds_height
-                    ) == SOC_TRUE
-                    ? block_depth_summary
-                    : NULL
-            );
-        }
-        return;
-    }
 
     for (; aligned_y < region->end_y;
          aligned_y += SOC_RASTER_BLOCK_SIZE) {
@@ -1636,11 +2032,22 @@ static void rasterize_triangle_blocks(
                 ? aligned_end_x
                 : region->end_x;
             const uint32_t block_width = block_end_x - block_x;
+            const uint32_t physical_end_x = aligned_end_x <
+                    rasterizer->width
+                ? aligned_end_x
+                : rasterizer->width;
+            const uint32_t physical_end_y = aligned_end_y <
+                    rasterizer->height
+                ? aligned_end_y
+                : rasterizer->height;
+            const uint32_t physical_width = physical_end_x - aligned_x;
+            const uint32_t physical_height = physical_end_y - aligned_y;
             int64_t edge_values[3];
             soc_raster_block_classification classification;
-            float* block_depth_summary;
+            size_t early_z_index;
             soc_raster_depth_block_candidate depth_candidate;
             uint64_t coverage_mask;
+            uint64_t cell_coverage_mask;
             uint32_t edge_index;
 
             for (edge_index = 0u; edge_index < 3u; ++edge_index) {
@@ -1659,12 +2066,10 @@ static void rasterize_triangle_blocks(
             if (classification == SOC_RASTER_BLOCK_OUTSIDE) {
                 continue;
             }
-            block_depth_summary = find_block_depth_summary(
+            early_z_index = find_early_z_block_index(
                 rasterizer,
-                block_x,
-                block_y,
-                block_width,
-                block_height
+                aligned_x,
+                aligned_y
             );
             configure_depth_block_candidate(
                 rasterizer,
@@ -1675,11 +2080,10 @@ static void rasterize_triangle_blocks(
                 block_height,
                 &depth_candidate
             );
-            if (block_depth_summary != NULL &&
-                depth_block_is_early_z_rejected(
+            if (depth_block_is_early_z_rejected(
                     rasterizer,
                     &depth_candidate,
-                    block_depth_summary
+                    rasterizer->early_z_farthest_depths[early_z_index]
                 ) == SOC_TRUE) {
                 continue;
             }
@@ -1691,6 +2095,10 @@ static void rasterize_triangle_blocks(
                 classification
             );
             if (coverage_mask != 0u) {
+                cell_coverage_mask = coverage_mask << (
+                    (block_y - aligned_y) * SOC_RASTER_BLOCK_SIZE +
+                    block_x - aligned_x
+                );
                 rasterize_depth_block(
                     rasterizer,
                     &depth_candidate,
@@ -1698,19 +2106,140 @@ static void rasterize_triangle_blocks(
                     block_y,
                     block_width,
                     block_height,
-                    coverage_mask,
-                    block_depth_summary != NULL &&
-                        depth_rectangle_covers_complete_block(
-                            rasterizer,
-                            block_x,
-                            block_y,
-                            block_width,
-                            block_height
-                        ) == SOC_TRUE
-                        ? block_depth_summary
-                        : NULL
+                    coverage_mask
                 );
+                if (update_early_z_after_store(
+                        rasterizer,
+                        &rasterizer->early_z_farthest_depths[
+                            early_z_index
+                        ],
+                        &rasterizer->early_z_pending_masks[early_z_index],
+                        &depth_candidate,
+                        cell_coverage_mask,
+                        rasterizer->depth +
+                            (size_t)aligned_y * rasterizer->width +
+                            aligned_x,
+                        rasterizer->width,
+                        physical_width,
+                        physical_height
+                    ) == SOC_TRUE) {
+                    if (rasterizer->early_z_coarse_dirty != SOC_TRUE) {
+                        rasterizer->early_z_coarse_dirty = SOC_TRUE;
+                    }
+                }
             }
+        }
+    }
+}
+
+static void rasterize_triangle_blocks(
+    soc_rasterizer* rasterizer,
+    const soc_raster_triangle_setup* setup,
+    const soc_raster_region* region
+)
+{
+    const float clear_depth =
+        rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED
+            ? 0.0f
+            : 1.0f;
+    soc_raster_depth_block_candidate frame_candidate;
+    uint32_t tile_y = region->minimum_y &
+        ~(SOC_RASTER_LOCK_TILE_SIZE - 1u);
+
+    if (rasterizer->early_z_pending_masks == NULL) {
+        rasterizer->early_z_pending_masks =
+            allocate_early_z_pending_masks(
+                rasterizer->early_z_block_count
+            );
+    }
+    if (rasterizer->early_z_ready_tile_count !=
+        rasterizer->early_z_tile_count) {
+        rasterize_triangle_blocks_fine(rasterizer, setup, region);
+        return;
+    }
+    configure_coarse_depth_candidate(
+        rasterizer,
+        setup,
+        region,
+        &frame_candidate
+    );
+    if (rasterizer->frame.depth_direction == SOC_DEPTH_REVERSED) {
+        if (frame_candidate.nearest_depth <=
+            rasterizer->early_z_frame_farthest_depth) {
+            return;
+        }
+        if (frame_candidate.farthest_depth >
+            rasterizer->early_z_frame_farthest_depth) {
+            rasterize_triangle_blocks_fine(rasterizer, setup, region);
+            return;
+        }
+    } else {
+        if (frame_candidate.nearest_depth >=
+            rasterizer->early_z_frame_farthest_depth) {
+            return;
+        }
+        if (frame_candidate.farthest_depth <
+            rasterizer->early_z_frame_farthest_depth) {
+            rasterize_triangle_blocks_fine(rasterizer, setup, region);
+            return;
+        }
+    }
+
+    for (; tile_y < region->end_y; tile_y += SOC_RASTER_LOCK_TILE_SIZE) {
+        const uint32_t tile_end_y = tile_y + SOC_RASTER_LOCK_TILE_SIZE <
+                region->end_y
+            ? tile_y + SOC_RASTER_LOCK_TILE_SIZE
+            : region->end_y;
+        const uint32_t minimum_y = tile_y < region->minimum_y
+            ? region->minimum_y
+            : tile_y;
+        uint32_t tile_x = region->minimum_x &
+            ~(SOC_RASTER_LOCK_TILE_SIZE - 1u);
+
+        for (; tile_x < region->end_x;
+             tile_x += SOC_RASTER_LOCK_TILE_SIZE) {
+            const uint32_t tile_end_x = tile_x +
+                    SOC_RASTER_LOCK_TILE_SIZE < region->end_x
+                ? tile_x + SOC_RASTER_LOCK_TILE_SIZE
+                : region->end_x;
+            const uint32_t minimum_x = tile_x < region->minimum_x
+                ? region->minimum_x
+                : tile_x;
+            const float early_z_farthest_depth =
+                rasterizer->early_z_tile_farthest_depths[
+                    (size_t)(tile_y / SOC_RASTER_LOCK_TILE_SIZE) *
+                        rasterizer->early_z_tile_column_count +
+                    tile_x / SOC_RASTER_LOCK_TILE_SIZE
+                ];
+            soc_raster_region tile_region;
+
+            tile_region.minimum_x = minimum_x;
+            tile_region.minimum_y = minimum_y;
+            tile_region.end_x = tile_end_x;
+            tile_region.end_y = tile_end_y;
+            if (early_z_farthest_depth != clear_depth) {
+                soc_raster_depth_block_candidate candidate;
+
+                configure_coarse_depth_candidate(
+                    rasterizer,
+                    setup,
+                    &tile_region,
+                    &candidate
+                );
+                if (rasterizer->frame.depth_direction ==
+                        SOC_DEPTH_REVERSED
+                        ? candidate.nearest_depth <=
+                            early_z_farthest_depth
+                        : candidate.nearest_depth >=
+                            early_z_farthest_depth) {
+                    continue;
+                }
+            }
+            rasterize_triangle_blocks_fine(
+                rasterizer,
+                setup,
+                &tile_region
+            );
         }
     }
 }
@@ -1723,8 +2252,7 @@ static void rasterize_depth_block_to_target(
     uint32_t block_y,
     uint32_t block_width,
     uint32_t block_height,
-    uint64_t coverage_mask,
-    float* out_block_depth_summary
+    uint64_t coverage_mask
 )
 {
     const size_t local_x = (size_t)(block_x - target->origin_x);
@@ -1733,39 +2261,29 @@ static void rasterize_depth_block_to_target(
         local_y * target->row_stride + local_x;
 
     if (candidate->is_constant == SOC_TRUE) {
-        const float block_depth_summary =
-            rasterizer->kernels->store_constant_depth_block_f32(
-                destination,
-                target->row_stride,
-                block_width,
-                block_height,
-                coverage_mask,
-                candidate->depth_origin,
-                rasterizer->frame.depth_direction
-            );
-        if (out_block_depth_summary != NULL) {
-            *out_block_depth_summary = block_depth_summary;
-        }
+        rasterizer->kernels->store_constant_depth_block_f32(
+            destination,
+            target->row_stride,
+            block_width,
+            block_height,
+            coverage_mask,
+            candidate->depth_origin,
+            rasterizer->frame.depth_direction
+        );
         return;
     }
 
-    {
-        const float block_depth_summary =
-            rasterizer->kernels->store_depth_plane_block_f32(
-                destination,
-                target->row_stride,
-                block_width,
-                block_height,
-                coverage_mask,
-                candidate->depth_origin,
-                candidate->depth_step_x,
-                candidate->depth_step_y,
-                rasterizer->frame.depth_direction
-            );
-        if (out_block_depth_summary != NULL) {
-            *out_block_depth_summary = block_depth_summary;
-        }
-    }
+    rasterizer->kernels->store_depth_plane_block_f32(
+        destination,
+        target->row_stride,
+        block_width,
+        block_height,
+        coverage_mask,
+        candidate->depth_origin,
+        candidate->depth_step_x,
+        candidate->depth_step_y,
+        rasterizer->frame.depth_direction
+    );
 }
 
 static void rasterize_triangle_blocks_to_target(
@@ -1775,81 +2293,10 @@ static void rasterize_triangle_blocks_to_target(
     const soc_raster_target* target
 )
 {
-    const uint32_t bounds_width = region->end_x - region->minimum_x;
-    const uint32_t bounds_height = region->end_y - region->minimum_y;
+    const uint32_t target_end_x = target->origin_x + target->width;
+    const uint32_t target_end_y = target->origin_y + target->height;
     uint32_t aligned_y = region->minimum_y &
         ~(SOC_RASTER_BLOCK_SIZE - 1u);
-
-    if (bounds_width <= SOC_RASTER_BLOCK_SIZE &&
-        bounds_height <= SOC_RASTER_BLOCK_SIZE) {
-        int64_t edge_values[3];
-        float* block_depth_summary;
-        soc_raster_depth_block_candidate depth_candidate;
-        uint64_t coverage_mask;
-        uint32_t edge_index;
-
-        for (edge_index = 0u; edge_index < 3u; ++edge_index) {
-            edge_values[edge_index] = fixed_edge_value_at_pixel(
-                &setup->edges[edge_index],
-                region->minimum_x,
-                region->minimum_y
-            );
-        }
-        block_depth_summary = find_target_block_depth_summary(
-            target,
-            region->minimum_x,
-            region->minimum_y,
-            bounds_width,
-            bounds_height
-        );
-        configure_depth_block_candidate(
-            rasterizer,
-            setup,
-            region->minimum_x,
-            region->minimum_y,
-            bounds_width,
-            bounds_height,
-            &depth_candidate
-        );
-        if (block_depth_summary != NULL &&
-            depth_block_is_early_z_rejected(
-                rasterizer,
-                &depth_candidate,
-                block_depth_summary
-            ) == SOC_TRUE) {
-            return;
-        }
-        coverage_mask = make_raster_block_mask(
-            setup,
-            edge_values,
-            bounds_width,
-            bounds_height,
-            SOC_RASTER_BLOCK_PARTIAL
-        );
-        if (coverage_mask != 0u) {
-            rasterize_depth_block_to_target(
-                rasterizer,
-                &depth_candidate,
-                target,
-                region->minimum_x,
-                region->minimum_y,
-                bounds_width,
-                bounds_height,
-                coverage_mask,
-                block_depth_summary != NULL &&
-                    target_depth_rectangle_covers_complete_block(
-                        target,
-                        region->minimum_x,
-                        region->minimum_y,
-                        bounds_width,
-                        bounds_height
-                    ) == SOC_TRUE
-                    ? block_depth_summary
-                    : NULL
-            );
-        }
-        return;
-    }
 
     for (; aligned_y < region->end_y;
          aligned_y += SOC_RASTER_BLOCK_SIZE) {
@@ -1876,11 +2323,20 @@ static void rasterize_triangle_blocks_to_target(
                 ? aligned_end_x
                 : region->end_x;
             const uint32_t block_width = block_end_x - block_x;
+            const uint32_t physical_end_x = aligned_end_x < target_end_x
+                ? aligned_end_x
+                : target_end_x;
+            const uint32_t physical_end_y = aligned_end_y < target_end_y
+                ? aligned_end_y
+                : target_end_y;
+            const uint32_t physical_width = physical_end_x - aligned_x;
+            const uint32_t physical_height = physical_end_y - aligned_y;
             int64_t edge_values[3];
             soc_raster_block_classification classification;
-            float* block_depth_summary;
+            size_t early_z_index;
             soc_raster_depth_block_candidate depth_candidate;
             uint64_t coverage_mask;
+            uint64_t cell_coverage_mask;
             uint32_t edge_index;
 
             for (edge_index = 0u; edge_index < 3u; ++edge_index) {
@@ -1899,12 +2355,10 @@ static void rasterize_triangle_blocks_to_target(
             if (classification == SOC_RASTER_BLOCK_OUTSIDE) {
                 continue;
             }
-            block_depth_summary = find_target_block_depth_summary(
+            early_z_index = find_target_early_z_block_index(
                 target,
-                block_x,
-                block_y,
-                block_width,
-                block_height
+                aligned_x,
+                aligned_y
             );
             configure_depth_block_candidate(
                 rasterizer,
@@ -1915,11 +2369,10 @@ static void rasterize_triangle_blocks_to_target(
                 block_height,
                 &depth_candidate
             );
-            if (block_depth_summary != NULL &&
-                depth_block_is_early_z_rejected(
+            if (depth_block_is_early_z_rejected(
                     rasterizer,
                     &depth_candidate,
-                    block_depth_summary
+                    target->early_z_farthest_depths[early_z_index]
                 ) == SOC_TRUE) {
                 continue;
             }
@@ -1931,6 +2384,10 @@ static void rasterize_triangle_blocks_to_target(
                 classification
             );
             if (coverage_mask != 0u) {
+                cell_coverage_mask = coverage_mask << (
+                    (block_y - aligned_y) * SOC_RASTER_BLOCK_SIZE +
+                    block_x - aligned_x
+                );
                 rasterize_depth_block_to_target(
                     rasterizer,
                     &depth_candidate,
@@ -1939,17 +2396,21 @@ static void rasterize_triangle_blocks_to_target(
                     block_y,
                     block_width,
                     block_height,
-                    coverage_mask,
-                    block_depth_summary != NULL &&
-                        target_depth_rectangle_covers_complete_block(
-                            target,
-                            block_x,
-                            block_y,
-                            block_width,
-                            block_height
-                        ) == SOC_TRUE
-                        ? block_depth_summary
-                        : NULL
+                    coverage_mask
+                );
+                (void)update_early_z_after_store(
+                    rasterizer,
+                    &target->early_z_farthest_depths[early_z_index],
+                    &target->early_z_pending_masks[early_z_index],
+                    &depth_candidate,
+                    cell_coverage_mask,
+                    target->depth +
+                        (size_t)(aligned_y - target->origin_y) *
+                            target->row_stride +
+                        (aligned_x - target->origin_x),
+                    target->row_stride,
+                    physical_width,
+                    physical_height
                 );
             }
         }
@@ -1982,6 +2443,10 @@ static soc_bool try_rasterize_single_tile_locked(
 )
 {
     soc_raster_tile_locks* tile_locks = rasterizer->tile_locks;
+    const uint32_t bounds_width =
+        setup->bounds.end_x - setup->bounds.minimum_x;
+    const uint32_t bounds_height =
+        setup->bounds.end_y - setup->bounds.minimum_y;
     const uint32_t first_tile_x =
         setup->bounds.minimum_x / SOC_RASTER_LOCK_TILE_SIZE;
     const uint32_t first_tile_y =
@@ -2001,12 +2466,19 @@ static soc_bool try_rasterize_single_tile_locked(
         (size_t)first_tile_y * tile_locks->column_count + first_tile_x;
     lock = &tile_locks->locks[lock_index];
     acquire_tile_lock(lock);
-    if (setup->bounds.end_x - setup->bounds.minimum_x <=
-            SOC_RASTER_BLOCK_SIZE &&
-        setup->bounds.end_y - setup->bounds.minimum_y <=
-            SOC_RASTER_BLOCK_SIZE &&
-        setup->depth_step_x == 0.0 && setup->depth_step_y == 0.0) {
-        rasterize_small_constant_triangle(rasterizer, setup);
+    if (bounds_width <= SOC_RASTER_BLOCK_SIZE &&
+        bounds_height <= SOC_RASTER_BLOCK_SIZE) {
+        if (setup->depth_step_x == 0.0 && setup->depth_step_y == 0.0) {
+            rasterize_small_constant_triangle(rasterizer, setup);
+        } else {
+            rasterize_small_plane_triangle_untracked(
+                rasterizer,
+                setup
+            );
+        }
+    } else if (bounds_width <= SOC_RASTER_UNTRACKED_TRIANGLE_SIZE &&
+        bounds_height <= SOC_RASTER_UNTRACKED_TRIANGLE_SIZE) {
+        rasterize_small_triangle_blocks_untracked(rasterizer, setup);
     } else {
         rasterize_triangle_blocks(rasterizer, setup, &setup->bounds);
     }
@@ -2072,15 +2544,28 @@ static void rasterize_triangle_setup_unlocked(
     const soc_raster_triangle_setup* setup
 )
 {
-    if (setup->bounds.end_x - setup->bounds.minimum_x <=
-            SOC_RASTER_BLOCK_SIZE &&
-        setup->bounds.end_y - setup->bounds.minimum_y <=
-            SOC_RASTER_BLOCK_SIZE &&
-        setup->depth_step_x == 0.0 && setup->depth_step_y == 0.0) {
-        rasterize_small_constant_triangle(rasterizer, setup);
+    const uint32_t bounds_width =
+        setup->bounds.end_x - setup->bounds.minimum_x;
+    const uint32_t bounds_height =
+        setup->bounds.end_y - setup->bounds.minimum_y;
+
+    if (bounds_width <= SOC_RASTER_BLOCK_SIZE &&
+        bounds_height <= SOC_RASTER_BLOCK_SIZE) {
+        if (setup->depth_step_x == 0.0 && setup->depth_step_y == 0.0) {
+            rasterize_small_constant_triangle(rasterizer, setup);
+        } else {
+            rasterize_small_plane_triangle_untracked(
+                rasterizer,
+                setup
+            );
+        }
         return;
     }
-
+    if (bounds_width <= SOC_RASTER_UNTRACKED_TRIANGLE_SIZE &&
+        bounds_height <= SOC_RASTER_UNTRACKED_TRIANGLE_SIZE) {
+        rasterize_small_triangle_blocks_untracked(rasterizer, setup);
+        return;
+    }
     rasterize_triangle_blocks(rasterizer, setup, &setup->bounds);
 }
 
@@ -2239,8 +2724,13 @@ soc_result soc_rasterizer_initialize(
     size_t required_element_count;
     uint32_t block_column_count;
     uint32_t block_row_count;
-    size_t block_depth_summary_count;
-    float* block_depth_summaries;
+    size_t early_z_block_count;
+    uint32_t early_z_tile_column_count;
+    uint32_t early_z_tile_row_count;
+    size_t early_z_tile_count;
+    void* early_z_storage;
+    float* early_z_farthest_depths;
+    float* early_z_tile_farthest_depths;
 
     if (rasterizer == NULL ||
         width == 0u ||
@@ -2258,21 +2748,31 @@ soc_result soc_rasterizer_initialize(
             (size_t)height,
             &required_element_count
         ) ||
-        !calculate_block_depth_summary_grid(
+        !calculate_early_z_block_grid(
             width,
             height,
             &block_column_count,
             &block_row_count,
-            &block_depth_summary_count
+            &early_z_block_count
+        ) ||
+        !calculate_tile_lock_grid(
+            width,
+            height,
+            &early_z_tile_column_count,
+            &early_z_tile_row_count,
+            &early_z_tile_count
         ) ||
         depth_element_count < required_element_count) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
 
-    block_depth_summaries = allocate_block_depth_summaries(
-        block_depth_summary_count
+    early_z_storage = allocate_early_z_storage(
+        early_z_block_count,
+        early_z_tile_count,
+        &early_z_farthest_depths,
+        &early_z_tile_farthest_depths
     );
-    if (block_depth_summaries == NULL) {
+    if (early_z_storage == NULL) {
         return SOC_RESULT_OUT_OF_MEMORY;
     }
 
@@ -2283,8 +2783,14 @@ soc_result soc_rasterizer_initialize(
     rasterizer->depth = depth;
     rasterizer->block_column_count = block_column_count;
     rasterizer->block_row_count = block_row_count;
-    rasterizer->block_depth_summary_count = block_depth_summary_count;
-    rasterizer->block_depth_summaries = block_depth_summaries;
+    rasterizer->early_z_block_count = early_z_block_count;
+    rasterizer->early_z_storage = early_z_storage;
+    rasterizer->early_z_farthest_depths = early_z_farthest_depths;
+    rasterizer->early_z_tile_column_count = early_z_tile_column_count;
+    rasterizer->early_z_tile_row_count = early_z_tile_row_count;
+    rasterizer->early_z_tile_count = early_z_tile_count;
+    rasterizer->early_z_tile_farthest_depths =
+        early_z_tile_farthest_depths;
     rasterizer->kernels = kernels;
     rasterizer->clipped_triangle_count = 0u;
     rasterizer->rasterized_triangle_count = 0u;
@@ -2301,7 +2807,8 @@ void soc_rasterizer_shutdown(soc_rasterizer* rasterizer)
     }
 
     if (rasterizer->initialized == SOC_TRUE) {
-        soc_aligned_free(rasterizer->block_depth_summaries);
+        soc_aligned_free(rasterizer->early_z_storage);
+        soc_aligned_free(rasterizer->early_z_pending_masks);
     }
     memset(rasterizer, 0, sizeof(*rasterizer));
 }
@@ -2317,8 +2824,14 @@ soc_result soc_rasterizer_resize(
     size_t required_element_count;
     uint32_t block_column_count;
     uint32_t block_row_count;
-    size_t block_depth_summary_count;
-    float* block_depth_summaries;
+    size_t early_z_block_count;
+    uint32_t early_z_tile_column_count;
+    uint32_t early_z_tile_row_count;
+    size_t early_z_tile_count;
+    void* early_z_storage;
+    float* early_z_farthest_depths;
+    uint64_t* early_z_pending_masks;
+    float* early_z_tile_farthest_depths;
 
     if (rasterizer == NULL ||
         rasterizer->initialized != SOC_TRUE ||
@@ -2332,12 +2845,19 @@ soc_result soc_rasterizer_resize(
             (size_t)height,
             &required_element_count
         ) ||
-        !calculate_block_depth_summary_grid(
+        !calculate_early_z_block_grid(
             width,
             height,
             &block_column_count,
             &block_row_count,
-            &block_depth_summary_count
+            &early_z_block_count
+        ) ||
+        !calculate_tile_lock_grid(
+            width,
+            height,
+            &early_z_tile_column_count,
+            &early_z_tile_row_count,
+            &early_z_tile_count
         ) ||
         depth_element_count < required_element_count) {
         return SOC_RESULT_INVALID_ARGUMENT;
@@ -2346,19 +2866,34 @@ soc_result soc_rasterizer_resize(
         return SOC_RESULT_INVALID_STATE;
     }
 
-    block_depth_summaries = rasterizer->block_depth_summaries;
-    if (block_depth_summary_count !=
-        rasterizer->block_depth_summary_count) {
-        block_depth_summaries = allocate_block_depth_summaries(
-            block_depth_summary_count
+    early_z_storage = rasterizer->early_z_storage;
+    early_z_farthest_depths = rasterizer->early_z_farthest_depths;
+    early_z_pending_masks = rasterizer->early_z_pending_masks;
+    early_z_tile_farthest_depths =
+        rasterizer->early_z_tile_farthest_depths;
+    if (early_z_block_count != rasterizer->early_z_block_count ||
+        early_z_tile_count != rasterizer->early_z_tile_count) {
+        early_z_storage = allocate_early_z_storage(
+            early_z_block_count,
+            early_z_tile_count,
+            &early_z_farthest_depths,
+            &early_z_tile_farthest_depths
         );
-        if (block_depth_summaries == NULL) {
+        if (early_z_storage == NULL) {
             return SOC_RESULT_OUT_OF_MEMORY;
         }
-    }
-
-    if (block_depth_summaries != rasterizer->block_depth_summaries) {
-        soc_aligned_free(rasterizer->block_depth_summaries);
+        if (early_z_pending_masks != NULL &&
+            early_z_block_count != rasterizer->early_z_block_count) {
+            early_z_pending_masks = allocate_early_z_pending_masks(
+                early_z_block_count
+            );
+            if (early_z_pending_masks == NULL) {
+                soc_aligned_free(early_z_storage);
+                return SOC_RESULT_OUT_OF_MEMORY;
+            }
+            soc_aligned_free(rasterizer->early_z_pending_masks);
+        }
+        soc_aligned_free(rasterizer->early_z_storage);
     }
     rasterizer->width = width;
     rasterizer->height = height;
@@ -2366,8 +2901,15 @@ soc_result soc_rasterizer_resize(
     rasterizer->depth = depth;
     rasterizer->block_column_count = block_column_count;
     rasterizer->block_row_count = block_row_count;
-    rasterizer->block_depth_summary_count = block_depth_summary_count;
-    rasterizer->block_depth_summaries = block_depth_summaries;
+    rasterizer->early_z_block_count = early_z_block_count;
+    rasterizer->early_z_storage = early_z_storage;
+    rasterizer->early_z_farthest_depths = early_z_farthest_depths;
+    rasterizer->early_z_pending_masks = early_z_pending_masks;
+    rasterizer->early_z_tile_column_count = early_z_tile_column_count;
+    rasterizer->early_z_tile_row_count = early_z_tile_row_count;
+    rasterizer->early_z_tile_count = early_z_tile_count;
+    rasterizer->early_z_tile_farthest_depths =
+        early_z_tile_farthest_depths;
     rasterizer->tile_locks = NULL;
     return SOC_RESULT_OK;
 }
@@ -2415,7 +2957,8 @@ static soc_result begin_frame(
     soc_bool clear_depth
 )
 {
-    float initial_block_depth;
+    float initial_depth;
+    float untouched_depth;
 
     if (rasterizer == NULL ||
         rasterizer->initialized != SOC_TRUE ||
@@ -2427,31 +2970,26 @@ static soc_result begin_frame(
         return SOC_RESULT_INVALID_STATE;
     }
 
+    initial_depth =
+        desc->depth_direction == SOC_DEPTH_REVERSED ? 0.0f : 1.0f;
+    untouched_depth =
+        desc->depth_direction == SOC_DEPTH_REVERSED ? -1.0f : 2.0f;
     rasterizer->frame = *desc;
     if (clear_depth == SOC_TRUE) {
-        const float initial_depth =
-            desc->depth_direction == SOC_DEPTH_REVERSED ? 0.0f : 1.0f;
-
         rasterizer->kernels->clear_f32(
             rasterizer->depth,
             rasterizer->depth_element_count,
             initial_depth
         );
-        initial_block_depth = initial_depth;
-    } else {
-        /* Unknown caller-owned depth: fail open until a complete block write
-         * produces an exact summary without scanning possibly uninitialized
-         * storage (the prepare-only selector uses this path). */
-        initial_block_depth =
-            desc->depth_direction == SOC_DEPTH_REVERSED
-                ? -FLT_MAX
-                : FLT_MAX;
     }
     rasterizer->kernels->clear_f32(
-        rasterizer->block_depth_summaries,
-        rasterizer->block_depth_summary_count,
-        initial_block_depth
+        rasterizer->early_z_farthest_depths,
+        rasterizer->early_z_block_count,
+        untouched_depth
     );
+    rasterizer->early_z_ready_tile_count = 0u;
+    rasterizer->early_z_frame_farthest_depth = initial_depth;
+    rasterizer->early_z_coarse_dirty = SOC_FALSE;
     rasterizer->clipped_triangle_count = 0u;
     rasterizer->rasterized_triangle_count = 0u;
     rasterizer->frame_active = SOC_TRUE;
@@ -2819,9 +3357,6 @@ static soc_bool raster_target_is_valid(
 {
     size_t last_row_offset;
     size_t required_elements;
-    uint32_t block_column_count;
-    uint32_t block_row_count;
-    size_t required_block_summary_count;
 
     if (target == NULL ||
         target->depth == NULL ||
@@ -2843,32 +3378,23 @@ static soc_bool raster_target_is_valid(
     if (target->element_count < required_elements) {
         return SOC_FALSE;
     }
-    if (target->block_depth_summaries == NULL) {
-        return target->block_depth_summary_count == 0u
-            ? SOC_TRUE
-            : SOC_FALSE;
+    return SOC_TRUE;
+}
+
+void soc_raster_target_reset_early_z_unchecked(
+    soc_raster_target* target,
+    soc_depth_direction depth_direction
+)
+{
+    const float untouched_depth =
+        depth_direction == SOC_DEPTH_REVERSED ? -1.0f : 2.0f;
+    size_t block_index;
+
+    for (block_index = 0u;
+         block_index < target->early_z_block_count;
+         ++block_index) {
+        target->early_z_farthest_depths[block_index] = untouched_depth;
     }
-    block_column_count = (uint32_t)(
-        ((uint64_t)(target->origin_x % SOC_RASTER_BLOCK_SIZE) +
-            (uint64_t)target->width + SOC_RASTER_BLOCK_SIZE - 1u) /
-        SOC_RASTER_BLOCK_SIZE
-    );
-    block_row_count = (uint32_t)(
-        ((uint64_t)(target->origin_y % SOC_RASTER_BLOCK_SIZE) +
-            (uint64_t)target->height + SOC_RASTER_BLOCK_SIZE - 1u) /
-        SOC_RASTER_BLOCK_SIZE
-    );
-    if (!checked_size_multiply(
-            (size_t)block_column_count,
-            (size_t)block_row_count,
-            &required_block_summary_count
-        )) {
-        return SOC_FALSE;
-    }
-    return target->block_depth_summary_count >=
-            required_block_summary_count
-        ? SOC_TRUE
-        : SOC_FALSE;
 }
 
 void soc_rasterizer_rasterize_prepared_region_to_target_unchecked(
@@ -2994,6 +3520,10 @@ soc_result soc_rasterizer_submit_occluders(
         )) {
         return SOC_RESULT_INVALID_ARGUMENT;
     }
+    if (rasterizer->early_z_ready_tile_count !=
+        rasterizer->early_z_tile_count) {
+        rebuild_coarse_early_z(rasterizer);
+    }
 
     for (instance = 0u; instance < instance_count; ++instance) {
         const soc_result result =
@@ -3007,6 +3537,11 @@ soc_result soc_rasterizer_submit_occluders(
 
         if (result != SOC_RESULT_OK) {
             return result;
+        }
+        if (instance + 1u < instance_count &&
+            rasterizer->early_z_ready_tile_count !=
+                rasterizer->early_z_tile_count) {
+            rebuild_coarse_early_z(rasterizer);
         }
     }
 

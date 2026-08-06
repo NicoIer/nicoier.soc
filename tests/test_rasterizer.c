@@ -51,7 +51,7 @@ typedef struct locked_raster_state {
 
 static size_t counted_depth_block_store_calls;
 
-static float count_store_constant_depth_block_f32(
+static void count_store_constant_depth_block_f32(
     float* destination,
     size_t row_stride,
     uint32_t block_width,
@@ -62,7 +62,7 @@ static float count_store_constant_depth_block_f32(
 )
 {
     ++counted_depth_block_store_calls;
-    return soc_kernel_store_constant_depth_block_f32_scalar(
+    soc_kernel_store_constant_depth_block_f32_scalar(
         destination,
         row_stride,
         block_width,
@@ -73,7 +73,7 @@ static float count_store_constant_depth_block_f32(
     );
 }
 
-static float count_store_depth_plane_block_f32(
+static void count_store_depth_plane_block_f32(
     float* destination,
     size_t row_stride,
     uint32_t block_width,
@@ -86,7 +86,7 @@ static float count_store_depth_plane_block_f32(
 )
 {
     ++counted_depth_block_store_calls;
-    return soc_kernel_store_depth_plane_block_f32_scalar(
+    soc_kernel_store_depth_plane_block_f32_scalar(
         destination,
         row_stride,
         block_width,
@@ -2673,6 +2673,12 @@ static int check_prepared_target_replay(
             (LOCAL_HEIGHT - 1) * LOCAL_STRIDE + LOCAL_WIDTH,
         LOCAL_STORAGE_COUNT =
             LOCAL_ELEMENT_COUNT + CANARY_WORD_COUNT * 2u,
+        LOCAL_EARLY_Z_COLUMN_COUNT =
+            LOCAL_WIDTH / SOC_KERNEL_RASTER_BLOCK_SIZE,
+        LOCAL_EARLY_Z_ROW_COUNT =
+            LOCAL_HEIGHT / SOC_KERNEL_RASTER_BLOCK_SIZE,
+        LOCAL_EARLY_Z_BLOCK_COUNT =
+            LOCAL_EARLY_Z_COLUMN_COUNT * LOCAL_EARLY_Z_ROW_COUNT,
     };
     static const screen_vertex constant_triangle[3] = {
         {1.0, 1.0, 0.62f},
@@ -2707,6 +2713,8 @@ static int check_prepared_target_replay(
     soc_raster_prepared_region region;
     soc_raster_target target;
     soc_raster_target invalid_target;
+    float local_early_z_farthest_depths[LOCAL_EARLY_Z_BLOCK_COUNT];
+    uint64_t local_early_z_pending_masks[LOCAL_EARLY_Z_BLOCK_COUNT];
     size_t local_index;
     size_t pixel;
     uint32_t tile_y;
@@ -2780,6 +2788,10 @@ static int check_prepared_target_replay(
     target.element_count = LOCAL_ELEMENT_COUNT;
     target.width = LOCAL_WIDTH;
     target.height = LOCAL_HEIGHT;
+    target.early_z_farthest_depths = local_early_z_farthest_depths;
+    target.early_z_pending_masks = local_early_z_pending_masks;
+    target.early_z_block_count = LOCAL_EARLY_Z_BLOCK_COUNT;
+    target.early_z_column_count = LOCAL_EARLY_Z_COLUMN_COUNT;
     for (tile_y = 0u; tile_y < HEIGHT; tile_y += LOCAL_HEIGHT) {
         uint32_t tile_x;
 
@@ -2811,6 +2823,10 @@ static int check_prepared_target_replay(
                 : HEIGHT;
             target.origin_x = tile_x;
             target.origin_y = tile_y;
+            soc_raster_target_reset_early_z_unchecked(
+                &target,
+                depth_direction
+            );
             for (prepared_index = 0u;
                  prepared_index < prepared.count;
                  ++prepared_index) {
@@ -2895,6 +2911,10 @@ static int check_prepared_target_replay(
                 : HEIGHT;
             target.origin_x = tile_x;
             target.origin_y = tile_y;
+            soc_raster_target_reset_early_z_unchecked(
+                &target,
+                depth_direction
+            );
             for (prepared_index = 0u;
                  prepared_index < prepared.count;
                  ++prepared_index) {
@@ -3115,12 +3135,12 @@ static int check_prepared_target_block_early_z(
 )
 {
     enum {
-        FRAMEBUFFER_WIDTH = 16,
-        FRAMEBUFFER_HEIGHT = 16,
+        FRAMEBUFFER_WIDTH = 24,
+        FRAMEBUFFER_HEIGHT = 24,
         FRAMEBUFFER_PIXEL_COUNT =
             FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT,
-        TARGET_ORIGIN_X = 3,
-        TARGET_ORIGIN_Y = 5,
+        TARGET_ORIGIN_X = 8,
+        TARGET_ORIGIN_Y = 8,
         TARGET_WIDTH = 9,
         TARGET_HEIGHT = 9,
         TARGET_ROW_STRIDE = 12,
@@ -3131,7 +3151,7 @@ static int check_prepared_target_block_early_z(
         TARGET_BLOCK_ROW_COUNT = 2,
         TARGET_BLOCK_COUNT =
             TARGET_BLOCK_COLUMN_COUNT * TARGET_BLOCK_ROW_COUNT,
-        SUMMARY_STORAGE_COUNT =
+        EARLY_Z_STORAGE_COUNT =
             CANARY_WORD_COUNT + TARGET_BLOCK_COUNT + CANARY_WORD_COUNT,
     };
     const uint32_t canary_bits = UINT32_C(0x7fc12345);
@@ -3141,6 +3161,9 @@ static int check_prepared_target_block_early_z(
         depth_direction
     );
     const float clear_depth = clear_depth_for(depth_direction);
+    const float untouched_depth = depth_direction == SOC_DEPTH_REVERSED
+        ? -1.0f
+        : 2.0f;
     const float seed_depth = depth_direction == SOC_DEPTH_REVERSED
         ? 0.75f
         : 0.25f;
@@ -3186,9 +3209,13 @@ static int check_prepared_target_block_early_z(
     float framebuffer_depth[FRAMEBUFFER_PIXEL_COUNT];
     float target_storage[TARGET_STORAGE_COUNT];
     float seed_snapshot[TARGET_STORAGE_COUNT];
-    float summary_storage[SUMMARY_STORAGE_COUNT];
+    float farthest_depth_storage[EARLY_Z_STORAGE_COUNT];
+    uint64_t pending_mask_storage[EARLY_Z_STORAGE_COUNT];
     float* target_depth = target_storage + CANARY_WORD_COUNT;
-    float* summaries = summary_storage + CANARY_WORD_COUNT;
+    float* early_z_farthest_depths =
+        farthest_depth_storage + CANARY_WORD_COUNT;
+    uint64_t* early_z_pending_masks =
+        pending_mask_storage + CANARY_WORD_COUNT;
     size_t store_calls_before;
     size_t index;
     uint32_t y;
@@ -3203,11 +3230,9 @@ static int check_prepared_target_block_early_z(
             target_depth[(size_t)y * TARGET_ROW_STRIDE + x] = clear_depth;
         }
     }
-    for (index = 0u; index < SUMMARY_STORAGE_COUNT; ++index) {
-        summary_storage[index] = canary;
-    }
-    for (index = 0u; index < TARGET_BLOCK_COUNT; ++index) {
-        summaries[index] = clear_depth;
+    for (index = 0u; index < EARLY_Z_STORAGE_COUNT; ++index) {
+        farthest_depth_storage[index] = canary;
+        pending_mask_storage[index] = UINT64_C(0xa5a5a5a5a5a5a5a5);
     }
 
     memset(&target, 0, sizeof(target));
@@ -3218,8 +3243,15 @@ static int check_prepared_target_block_early_z(
     target.origin_y = TARGET_ORIGIN_Y;
     target.width = TARGET_WIDTH;
     target.height = TARGET_HEIGHT;
-    target.block_depth_summaries = summaries;
-    target.block_depth_summary_count = TARGET_BLOCK_COUNT;
+    target.early_z_farthest_depths = early_z_farthest_depths;
+    target.early_z_pending_masks = early_z_pending_masks;
+    target.early_z_block_count = TARGET_BLOCK_COUNT;
+    target.early_z_column_count = TARGET_BLOCK_COLUMN_COUNT;
+    soc_raster_target_reset_early_z_unchecked(&target, depth_direction);
+    for (index = 0u; index < TARGET_BLOCK_COUNT; ++index) {
+        CHECK(float_bits(early_z_farthest_depths[index]) ==
+            float_bits(untouched_depth));
+    }
 
     counted_depth_block_store_calls = 0u;
     CHECK(soc_rasterizer_initialize(
@@ -3231,16 +3263,6 @@ static int check_prepared_target_block_early_z(
         &kernels
     ) == SOC_RESULT_OK);
     CHECK(soc_rasterizer_begin_frame(&rasterizer, &frame) == SOC_RESULT_OK);
-
-    target.block_depth_summary_count = TARGET_BLOCK_COUNT - 1u;
-    CHECK(soc_rasterizer_rasterize_prepared_region_to_target(
-        &rasterizer,
-        &seed,
-        &region,
-        &target
-    ) == SOC_RESULT_INVALID_ARGUMENT);
-    CHECK(counted_depth_block_store_calls == 0u);
-    target.block_depth_summary_count = TARGET_BLOCK_COUNT;
 
     CHECK(soc_rasterizer_rasterize_prepared_region_to_target(
         &rasterizer,
@@ -3262,7 +3284,14 @@ static int check_prepared_target_block_early_z(
         }
     }
     for (index = 0u; index < TARGET_BLOCK_COUNT; ++index) {
-        CHECK(float_bits(summaries[index]) == float_bits(target_depth[0]));
+        CHECK(early_z_pending_masks[index] == 0u);
+        CHECK(float_bits(early_z_farthest_depths[index]) !=
+            float_bits(untouched_depth));
+        if (depth_direction == SOC_DEPTH_REVERSED) {
+            CHECK(early_z_farthest_depths[index] <= target_depth[0]);
+        } else {
+            CHECK(early_z_farthest_depths[index] >= target_depth[0]);
+        }
     }
     memcpy(seed_snapshot, target_storage, sizeof(seed_snapshot));
 
@@ -3314,17 +3343,27 @@ static int check_prepared_target_block_early_z(
         }
     }
     for (index = 0u; index < TARGET_BLOCK_COUNT; ++index) {
-        CHECK(float_bits(summaries[index]) == float_bits(target_depth[0]));
+        CHECK(early_z_pending_masks[index] == 0u);
+        if (depth_direction == SOC_DEPTH_REVERSED) {
+            CHECK(early_z_farthest_depths[index] <= target_depth[0]);
+        } else {
+            CHECK(early_z_farthest_depths[index] >= target_depth[0]);
+        }
     }
     for (index = 0u; index < CANARY_WORD_COUNT; ++index) {
         CHECK(float_bits(target_storage[index]) == canary_bits);
         CHECK(float_bits(target_storage[
             CANARY_WORD_COUNT + TARGET_ELEMENT_COUNT + index
         ]) == canary_bits);
-        CHECK(float_bits(summary_storage[index]) == canary_bits);
-        CHECK(float_bits(summary_storage[
+        CHECK(float_bits(farthest_depth_storage[index]) == canary_bits);
+        CHECK(pending_mask_storage[index] ==
+            UINT64_C(0xa5a5a5a5a5a5a5a5));
+        CHECK(float_bits(farthest_depth_storage[
             CANARY_WORD_COUNT + TARGET_BLOCK_COUNT + index
         ]) == canary_bits);
+        CHECK(pending_mask_storage[
+            CANARY_WORD_COUNT + TARGET_BLOCK_COUNT + index
+        ] == UINT64_C(0xa5a5a5a5a5a5a5a5));
     }
     for (y = 0u; y < TARGET_HEIGHT; ++y) {
         uint32_t x;
@@ -3353,17 +3392,23 @@ static int test_prepared_target_block_early_z(void)
 }
 
 static soc_raster_prepared_triangle make_full_early_z_prepared_plane(
+    uint32_t width,
+    uint32_t height,
     float kernel_origin,
     double depth_error_bound,
     soc_depth_direction depth_direction
 )
 {
     soc_raster_prepared_triangle prepared =
-        make_full_early_z_prepared_triangle(kernel_origin);
+        make_sized_full_early_z_prepared_triangle(
+            width,
+            height,
+            kernel_origin
+        );
 
     /* The directional error adjustment reconstructs kernel_origin exactly.
      * Keep a nonzero plane slope while making its contribution far smaller
-     * than one binary32 ULP across the complete 16-pixel extent. */
+     * than one binary32 ULP across the complete test extent. */
     prepared.depth_sample_origin = depth_direction == SOC_DEPTH_REVERSED
         ? (double)kernel_origin + depth_error_bound
         : (double)kernel_origin - depth_error_bound;
@@ -3377,10 +3422,10 @@ static int check_prepared_plane_early_z_numeric_boundary(
 )
 {
     enum {
-        WIDTH = 16,
-        HEIGHT = 16,
+        WIDTH = 24,
+        HEIGHT = 24,
         PIXEL_COUNT = WIDTH * HEIGHT,
-        BLOCK_COUNT = 4,
+        BLOCK_COUNT = 9,
     };
     const double depth_error_bound = 0x1p-20;
     const soc_frame_desc frame = make_frame_desc(
@@ -3388,7 +3433,11 @@ static int check_prepared_plane_early_z_numeric_boundary(
         depth_direction
     );
     const soc_raster_prepared_triangle seed =
-        make_full_early_z_prepared_triangle(0.5f);
+        make_sized_full_early_z_prepared_triangle(
+            WIDTH,
+            HEIGHT,
+            0.5f
+        );
     soc_kernel_table kernels = make_counting_scalar_kernel_table();
     soc_rasterizer rasterizer;
     soc_raster_prepared_triangle equal_candidate;
@@ -3432,11 +3481,15 @@ static int check_prepared_plane_early_z_numeric_boundary(
         nearer_stored_bits = stored_bits - 1u;
     }
     equal_candidate = make_full_early_z_prepared_plane(
+        WIDTH,
+        HEIGHT,
         float_from_bits(equal_origin_bits),
         depth_error_bound,
         depth_direction
     );
     nearer_candidate = make_full_early_z_prepared_plane(
+        WIDTH,
+        HEIGHT,
         float_from_bits(nearer_origin_bits),
         depth_error_bound,
         depth_direction
@@ -3480,15 +3533,134 @@ static int test_prepared_plane_early_z_numeric_boundary(void)
     return 0;
 }
 
-static int check_block_early_z_and_summary_lifecycle(
+static int check_coarse_rebase_numeric_regression(
     soc_depth_direction depth_direction
 )
 {
     enum {
-        WIDTH = 16,
-        HEIGHT = 16,
+        WIDTH = 32,
+        HEIGHT = 32,
         PIXEL_COUNT = WIDTH * HEIGHT,
-        BLOCK_COUNT = 4,
+    };
+    const soc_frame_desc frame = make_frame_desc(
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        depth_direction
+    );
+    const double depth_origin = depth_direction == SOC_DEPTH_REVERSED
+        ? 0.41411303565308344
+        : 0.8063541982981466;
+    const double depth_step_x = depth_direction == SOC_DEPTH_REVERSED
+        ? 0.028578003279574778
+        : -0.014355072299262427;
+    const uint32_t summary_bits = depth_direction == SOC_DEPTH_REVERSED
+        ? UINT32_C(0x3f248a66)
+        : UINT32_C(0x3f31070e);
+    const float summary = float_from_bits(summary_bits);
+    const soc_raster_prepared_region probe_region = {
+        7u, 0u, 9u, 1u,
+    };
+    soc_kernel_table kernels = make_counting_scalar_kernel_table();
+    soc_rasterizer rasterizer;
+    soc_raster_prepared_triangle prepared;
+    const soc_raster_prepared_triangle allocation_seed =
+        make_sized_full_early_z_prepared_triangle(
+            WIDTH,
+            HEIGHT,
+            0.5f
+        );
+    float depth[PIXEL_COUNT];
+    size_t index;
+    uint32_t edge;
+
+    memset(&prepared, 0, sizeof(prepared));
+    for (edge = 0u; edge < 3u; ++edge) {
+        prepared.edges[edge].sample_origin = 1;
+    }
+    prepared.bounds.minimum_x = 0u;
+    prepared.bounds.minimum_y = 0u;
+    prepared.bounds.end_x = WIDTH;
+    prepared.bounds.end_y = HEIGHT;
+    prepared.depth_sample_origin = depth_origin;
+    prepared.depth_step_x = depth_step_x;
+    prepared.depth_step_y = 0.0;
+    prepared.depth_error_bound = 0.0;
+    prepared.first_tile_column = 0u;
+    prepared.first_tile_row = 0u;
+    prepared.end_tile_column = 1u;
+    prepared.end_tile_row = 1u;
+
+    counted_depth_block_store_calls = 0u;
+    CHECK(soc_rasterizer_initialize(
+        &rasterizer,
+        WIDTH,
+        HEIGHT,
+        depth,
+        PIXEL_COUNT,
+        &kernels
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_begin_frame(&rasterizer, &frame) == SOC_RESULT_OK);
+    CHECK(rasterizer.early_z_block_count == 16u);
+    CHECK(rasterizer.early_z_tile_count == 1u);
+    CHECK(rasterizer.early_z_pending_masks == NULL);
+    CHECK(soc_rasterizer_rasterize_prepared_triangles(
+        &rasterizer,
+        &allocation_seed,
+        1u
+    ) == SOC_RESULT_OK);
+    CHECK(rasterizer.early_z_pending_masks != NULL);
+    CHECK(soc_rasterizer_end_frame(&rasterizer) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_begin_frame(&rasterizer, &frame) == SOC_RESULT_OK);
+    counted_depth_block_store_calls = 0u;
+    for (index = 0u; index < PIXEL_COUNT; ++index) {
+        depth[index] = summary;
+    }
+    for (index = 0u;
+         index < rasterizer.early_z_block_count;
+         ++index) {
+        rasterizer.early_z_farthest_depths[index] = summary;
+        rasterizer.early_z_pending_masks[index] = 0u;
+    }
+    rasterizer.early_z_tile_farthest_depths[0] = summary;
+    rasterizer.early_z_frame_farthest_depth = summary;
+    rasterizer.early_z_ready_tile_count = rasterizer.early_z_tile_count;
+
+    CHECK(soc_rasterizer_rasterize_prepared_region(
+        &rasterizer,
+        &prepared,
+        &probe_region
+    ) == SOC_RESULT_OK);
+    CHECK(counted_depth_block_store_calls != 0u);
+    if (depth_direction == SOC_DEPTH_REVERSED) {
+        CHECK(depth[8] > summary);
+    } else {
+        CHECK(depth[8] < summary);
+    }
+
+    CHECK(soc_rasterizer_end_frame(&rasterizer) == SOC_RESULT_OK);
+    soc_rasterizer_shutdown(&rasterizer);
+    return 0;
+}
+
+static int test_coarse_rebase_numeric_regression(void)
+{
+    CHECK(check_coarse_rebase_numeric_regression(
+        SOC_DEPTH_FORWARD
+    ) == 0);
+    CHECK(check_coarse_rebase_numeric_regression(
+        SOC_DEPTH_REVERSED
+    ) == 0);
+    return 0;
+}
+
+static int check_block_early_z_state_lifecycle(
+    soc_depth_direction depth_direction
+)
+{
+    enum {
+        WIDTH = 24,
+        HEIGHT = 24,
+        PIXEL_COUNT = WIDTH * HEIGHT,
+        BLOCK_COUNT = 9,
     };
     const soc_frame_desc frame = make_frame_desc(
         SOC_CLIP_DEPTH_ZERO_TO_ONE,
@@ -3509,13 +3681,29 @@ static int check_block_early_z_and_summary_lifecycle(
     const float no_clear_candidate_depth =
         depth_direction == SOC_DEPTH_REVERSED ? 0.125f : 0.875f;
     const soc_raster_prepared_triangle first =
-        make_full_early_z_prepared_triangle(first_depth);
+        make_sized_full_early_z_prepared_triangle(
+            WIDTH,
+            HEIGHT,
+            first_depth
+        );
     const soc_raster_prepared_triangle farther =
-        make_full_early_z_prepared_triangle(farther_depth);
+        make_sized_full_early_z_prepared_triangle(
+            WIDTH,
+            HEIGHT,
+            farther_depth
+        );
     const soc_raster_prepared_triangle closer =
-        make_full_early_z_prepared_triangle(closer_depth);
+        make_sized_full_early_z_prepared_triangle(
+            WIDTH,
+            HEIGHT,
+            closer_depth
+        );
     const soc_raster_prepared_triangle no_clear_candidate =
-        make_full_early_z_prepared_triangle(no_clear_candidate_depth);
+        make_sized_full_early_z_prepared_triangle(
+            WIDTH,
+            HEIGHT,
+            no_clear_candidate_depth
+        );
     soc_kernel_table kernels = make_counting_scalar_kernel_table();
     soc_rasterizer rasterizer;
     float depth[PIXEL_COUNT];
@@ -3628,14 +3816,144 @@ static int check_block_early_z_and_summary_lifecycle(
     return 0;
 }
 
-static int test_block_early_z_and_summary_lifecycle(void)
+static int test_block_early_z_state_lifecycle(void)
 {
-    CHECK(check_block_early_z_and_summary_lifecycle(
+    CHECK(check_block_early_z_state_lifecycle(
         SOC_DEPTH_FORWARD
     ) == 0);
-    CHECK(check_block_early_z_and_summary_lifecycle(
+    CHECK(check_block_early_z_state_lifecycle(
         SOC_DEPTH_REVERSED
     ) == 0);
+    return 0;
+}
+
+static int check_partial_block_pending_union(
+    soc_depth_direction depth_direction
+)
+{
+    enum {
+        WIDTH = 8,
+        HEIGHT = 8,
+        PIXEL_COUNT = WIDTH * HEIGHT,
+    };
+    const soc_frame_desc frame = make_frame_desc(
+        SOC_CLIP_DEPTH_ZERO_TO_ONE,
+        depth_direction
+    );
+    const float clear_depth = clear_depth_for(depth_direction);
+    const float untouched_depth = depth_direction == SOC_DEPTH_REVERSED
+        ? -1.0f
+        : 2.0f;
+    const float near_depth = depth_direction == SOC_DEPTH_REVERSED
+        ? 0.75f
+        : 0.25f;
+    const float farther_depth = depth_direction == SOC_DEPTH_REVERSED
+        ? 0.25f
+        : 0.75f;
+    const soc_raster_prepared_triangle near =
+        make_sized_full_early_z_prepared_triangle(
+            WIDTH,
+            HEIGHT,
+            near_depth
+        );
+    const soc_raster_prepared_triangle farther =
+        make_sized_full_early_z_prepared_triangle(
+            WIDTH,
+            HEIGHT,
+            farther_depth
+        );
+    const soc_raster_prepared_region left_region = {
+        0u, 0u, WIDTH / 2u, HEIGHT,
+    };
+    const soc_raster_prepared_region right_region = {
+        WIDTH / 2u, 0u, WIDTH, HEIGHT,
+    };
+    soc_kernel_table kernels = make_counting_scalar_kernel_table();
+    soc_rasterizer rasterizer;
+    float depth[PIXEL_COUNT];
+    float filled_depth[PIXEL_COUNT];
+    size_t store_calls_before;
+    uint32_t y;
+
+    counted_depth_block_store_calls = 0u;
+    CHECK(soc_rasterizer_initialize(
+        &rasterizer,
+        WIDTH,
+        HEIGHT,
+        depth,
+        PIXEL_COUNT,
+        &kernels
+    ) == SOC_RESULT_OK);
+    CHECK(soc_rasterizer_begin_frame(&rasterizer, &frame) == SOC_RESULT_OK);
+    CHECK(rasterizer.early_z_block_count == 1u);
+    CHECK(float_bits(rasterizer.early_z_farthest_depths[0]) ==
+        float_bits(untouched_depth));
+
+    CHECK(soc_rasterizer_rasterize_prepared_region(
+        &rasterizer,
+        &near,
+        &left_region
+    ) == SOC_RESULT_OK);
+    CHECK(counted_depth_block_store_calls == 1u);
+    CHECK(float_bits(rasterizer.early_z_farthest_depths[0]) ==
+        float_bits(clear_depth));
+    CHECK(rasterizer.early_z_pending_masks[0] != 0u);
+    for (y = 0u; y < HEIGHT; ++y) {
+        uint32_t x;
+
+        for (x = 0u; x < WIDTH; ++x) {
+            const float stored = depth[(size_t)y * WIDTH + x];
+
+            if (x < WIDTH / 2u) {
+                CHECK(float_bits(stored) != float_bits(clear_depth));
+            } else {
+                CHECK(float_bits(stored) == float_bits(clear_depth));
+            }
+        }
+    }
+
+    CHECK(soc_rasterizer_rasterize_prepared_region(
+        &rasterizer,
+        &near,
+        &right_region
+    ) == SOC_RESULT_OK);
+    CHECK(counted_depth_block_store_calls == 2u);
+    CHECK(rasterizer.early_z_pending_masks[0] == 0u);
+    CHECK(float_bits(rasterizer.early_z_farthest_depths[0]) !=
+        float_bits(clear_depth));
+    for (y = 0u; y < HEIGHT; ++y) {
+        uint32_t x;
+
+        for (x = 0u; x < WIDTH; ++x) {
+            CHECK(float_bits(depth[(size_t)y * WIDTH + x]) ==
+                float_bits(depth[0]));
+        }
+    }
+    if (depth_direction == SOC_DEPTH_REVERSED) {
+        CHECK(rasterizer.early_z_farthest_depths[0] <= depth[0]);
+    } else {
+        CHECK(rasterizer.early_z_farthest_depths[0] >= depth[0]);
+    }
+    memcpy(filled_depth, depth, sizeof(filled_depth));
+
+    store_calls_before = counted_depth_block_store_calls;
+    CHECK(soc_rasterizer_rasterize_prepared_triangles(
+        &rasterizer,
+        &farther,
+        1u
+    ) == SOC_RESULT_OK);
+    CHECK(counted_depth_block_store_calls == store_calls_before);
+    CHECK(memcmp(depth, filled_depth, sizeof(depth)) == 0);
+
+    CHECK(soc_rasterizer_end_frame(&rasterizer) == SOC_RESULT_OK);
+    soc_rasterizer_shutdown(&rasterizer);
+    return 0;
+}
+
+static int test_partial_block_pending_union(void)
+{
+    CHECK(check_partial_block_pending_union(SOC_DEPTH_FORWARD) == 0);
+    CHECK(check_partial_block_pending_union(SOC_DEPTH_REVERSED) == 0);
     return 0;
 }
 
@@ -3654,8 +3972,10 @@ static int rasterize_resized_early_z_surface(
     static const uint32_t canary_bits = UINT32_C(0x7fc12345);
     const float canary = float_from_bits(canary_bits);
     const float clear_depth = clear_depth_for(frame->depth_direction);
+    const float untouched_depth =
+        frame->depth_direction == SOC_DEPTH_REVERSED ? -1.0f : 2.0f;
     const size_t pixel_count = (size_t)width * height;
-    const size_t expected_summary_count =
+    const size_t expected_block_count =
         (size_t)expected_block_columns * expected_block_rows;
     const soc_raster_prepared_triangle prepared =
         make_sized_full_early_z_prepared_triangle(
@@ -3687,16 +4007,17 @@ static int rasterize_resized_early_z_surface(
     CHECK(rasterizer->depth_element_count == pixel_count);
     CHECK(rasterizer->block_column_count == expected_block_columns);
     CHECK(rasterizer->block_row_count == expected_block_rows);
-    CHECK(rasterizer->block_depth_summary_count == expected_summary_count);
-    CHECK(rasterizer->block_depth_summaries != NULL);
+    CHECK(rasterizer->early_z_block_count == expected_block_count);
+    CHECK(rasterizer->early_z_storage != NULL);
+    CHECK(rasterizer->early_z_farthest_depths != NULL);
 
     CHECK(soc_rasterizer_begin_frame(rasterizer, frame) == SOC_RESULT_OK);
     for (index = 0u; index < pixel_count; ++index) {
         CHECK(float_bits(depth[index]) == float_bits(clear_depth));
     }
-    for (index = 0u; index < expected_summary_count; ++index) {
-        CHECK(float_bits(rasterizer->block_depth_summaries[index]) ==
-            float_bits(clear_depth));
+    for (index = 0u; index < expected_block_count; ++index) {
+        CHECK(float_bits(rasterizer->early_z_farthest_depths[index]) ==
+            float_bits(untouched_depth));
     }
 
     store_calls_before = counted_depth_block_store_calls;
@@ -3705,15 +4026,20 @@ static int rasterize_resized_early_z_surface(
         &prepared,
         1u
     ) == SOC_RESULT_OK);
+    CHECK(rasterizer->early_z_pending_masks != NULL);
     CHECK(counted_depth_block_store_calls ==
-        store_calls_before + expected_summary_count);
+        store_calls_before + expected_block_count);
     for (index = 0u; index < pixel_count; ++index) {
         CHECK(float_bits(depth[index]) == float_bits(depth[0]));
         CHECK(float_bits(depth[index]) != float_bits(clear_depth));
     }
-    for (index = 0u; index < expected_summary_count; ++index) {
-        CHECK(float_bits(rasterizer->block_depth_summaries[index]) ==
-            float_bits(depth[0]));
+    for (index = 0u; index < expected_block_count; ++index) {
+        CHECK(rasterizer->early_z_pending_masks[index] == 0u);
+        if (frame->depth_direction == SOC_DEPTH_REVERSED) {
+            CHECK(rasterizer->early_z_farthest_depths[index] <= depth[0]);
+        } else {
+            CHECK(rasterizer->early_z_farthest_depths[index] >= depth[0]);
+        }
     }
     for (index = 0u; index < CANARY_WORD_COUNT; ++index) {
         CHECK(float_bits(storage[index]) == canary_bits);
@@ -3726,7 +4052,7 @@ static int rasterize_resized_early_z_surface(
     return 0;
 }
 
-static int check_rasterizer_resize_summary_lifecycle(
+static int check_rasterizer_resize_early_z_lifecycle(
     soc_depth_direction depth_direction
 )
 {
@@ -3769,8 +4095,10 @@ static int check_rasterizer_resize_summary_lifecycle(
     ) == SOC_RESULT_OK);
     CHECK(rasterizer.block_column_count == 2u);
     CHECK(rasterizer.block_row_count == 2u);
-    CHECK(rasterizer.block_depth_summary_count == 4u);
-    CHECK(rasterizer.block_depth_summaries != NULL);
+    CHECK(rasterizer.early_z_block_count == 4u);
+    CHECK(rasterizer.early_z_storage != NULL);
+    CHECK(rasterizer.early_z_farthest_depths != NULL);
+    CHECK(rasterizer.early_z_pending_masks == NULL);
 
     CHECK(rasterize_resized_early_z_surface(
         &rasterizer,
@@ -3796,18 +4124,22 @@ static int check_rasterizer_resize_summary_lifecycle(
     ) == 0);
 
     soc_rasterizer_shutdown(&rasterizer);
-    CHECK(rasterizer.block_depth_summaries == NULL);
-    CHECK(rasterizer.block_depth_summary_count == 0u);
+    CHECK(rasterizer.early_z_storage == NULL);
+    CHECK(rasterizer.early_z_farthest_depths == NULL);
+    CHECK(rasterizer.early_z_pending_masks == NULL);
+    CHECK(rasterizer.early_z_block_count == 0u);
+    CHECK(rasterizer.early_z_tile_farthest_depths == NULL);
+    CHECK(rasterizer.early_z_tile_count == 0u);
     CHECK(rasterizer.initialized == SOC_FALSE);
     return 0;
 }
 
-static int test_rasterizer_resize_summary_lifecycle(void)
+static int test_rasterizer_resize_early_z_lifecycle(void)
 {
-    CHECK(check_rasterizer_resize_summary_lifecycle(
+    CHECK(check_rasterizer_resize_early_z_lifecycle(
         SOC_DEPTH_FORWARD
     ) == 0);
-    CHECK(check_rasterizer_resize_summary_lifecycle(
+    CHECK(check_rasterizer_resize_early_z_lifecycle(
         SOC_DEPTH_REVERSED
     ) == 0);
     return 0;
@@ -4081,16 +4413,22 @@ int main(void)
     if (test_prepared_target_replay() != 0) {
         return 1;
     }
-    if (test_block_early_z_and_summary_lifecycle() != 0) {
+    if (test_block_early_z_state_lifecycle() != 0) {
+        return 1;
+    }
+    if (test_partial_block_pending_union() != 0) {
         return 1;
     }
     if (test_prepared_target_block_early_z() != 0) {
         return 1;
     }
-    if (test_rasterizer_resize_summary_lifecycle() != 0) {
+    if (test_rasterizer_resize_early_z_lifecycle() != 0) {
         return 1;
     }
     if (test_prepared_plane_early_z_numeric_boundary() != 0) {
+        return 1;
+    }
+    if (test_coarse_rebase_numeric_regression() != 0) {
         return 1;
     }
     if (test_shared_tile_locks_and_no_clear_begin() != 0) {

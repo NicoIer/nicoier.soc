@@ -197,7 +197,7 @@ void soc_kernel_merge_depth_planes_f32_scalar(
     }
 }
 
-float soc_kernel_store_constant_depth_block_f32_scalar(
+void soc_kernel_store_constant_depth_block_f32_scalar(
     float* destination,
     size_t row_stride,
     uint32_t block_width,
@@ -207,9 +207,6 @@ float soc_kernel_store_constant_depth_block_f32_scalar(
     soc_depth_direction depth_direction
 )
 {
-    float block_depth_summary = depth_direction == SOC_DEPTH_REVERSED
-        ? INFINITY
-        : -INFINITY;
     uint32_t row;
 
     for (row = 0u; row < block_height; ++row) {
@@ -219,7 +216,7 @@ float soc_kernel_store_constant_depth_block_f32_scalar(
         for (column = 0u; column < block_width; ++column) {
             const uint32_t bit =
                 row * SOC_KERNEL_RASTER_BLOCK_SIZE + column;
-            float stored_depth = destination_row[column];
+            const float stored_depth = destination_row[column];
 
             if ((coverage_mask & (UINT64_C(1) << bit)) != 0u) {
                 const soc_bool passes_depth =
@@ -233,19 +230,10 @@ float soc_kernel_store_constant_depth_block_f32_scalar(
 
                 if (passes_depth == SOC_TRUE) {
                     destination_row[column] = candidate_depth;
-                    stored_depth = candidate_depth;
                 }
-            }
-            if (depth_direction == SOC_DEPTH_REVERSED) {
-                if (stored_depth < block_depth_summary) {
-                    block_depth_summary = stored_depth;
-                }
-            } else if (stored_depth > block_depth_summary) {
-                block_depth_summary = stored_depth;
             }
         }
     }
-    return block_depth_summary == 0.0f ? 0.0f : block_depth_summary;
 }
 
 static float make_far_biased_plane_depth_scalar(
@@ -275,7 +263,7 @@ static float make_far_biased_plane_depth_scalar(
     return depth;
 }
 
-float soc_kernel_store_depth_plane_block_f32_scalar(
+void soc_kernel_store_depth_plane_block_f32_scalar(
     float* destination,
     size_t row_stride,
     uint32_t block_width,
@@ -287,9 +275,6 @@ float soc_kernel_store_depth_plane_block_f32_scalar(
     soc_depth_direction depth_direction
 )
 {
-    float block_depth_summary = depth_direction == SOC_DEPTH_REVERSED
-        ? INFINITY
-        : -INFINITY;
     uint32_t row;
 
     for (row = 0u; row < block_height; ++row) {
@@ -305,7 +290,7 @@ float soc_kernel_store_depth_plane_block_f32_scalar(
         uint32_t column;
 
         for (column = 0u; column < block_width; ++column) {
-            float stored_depth = destination_row[column];
+            const float stored_depth = destination_row[column];
 
             if ((row_mask & (UINT32_C(1) << column)) != 0u) {
                 const float candidate_depth =
@@ -324,19 +309,10 @@ float soc_kernel_store_depth_plane_block_f32_scalar(
 
                 if (passes_depth == SOC_TRUE) {
                     destination_row[column] = candidate_depth;
-                    stored_depth = candidate_depth;
                 }
-            }
-            if (depth_direction == SOC_DEPTH_REVERSED) {
-                if (stored_depth < block_depth_summary) {
-                    block_depth_summary = stored_depth;
-                }
-            } else if (stored_depth > block_depth_summary) {
-                block_depth_summary = stored_depth;
             }
         }
     }
-    return block_depth_summary == 0.0f ? 0.0f : block_depth_summary;
 }
 
 static const soc_kernel_table scalar_kernels = {
