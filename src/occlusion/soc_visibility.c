@@ -779,7 +779,6 @@ soc_result soc_occlusion_validate_aabb_test(
         hiz->levels[0].height == 0u ||
         query == NULL ||
         out_counts == NULL ||
-        (size_t)bounds_count > SIZE_MAX / sizeof(*world_bounds) ||
         (query->clip_depth_range != SOC_CLIP_DEPTH_ZERO_TO_ONE &&
             query->clip_depth_range !=
                 SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE)) {
