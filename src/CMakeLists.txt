@@ -53,6 +53,24 @@ elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     )
 endif()
 
+# The Android armeabi-v7a artifact targets NEON + VFPv4 hardware.  The NDK's
+# baseline ARMv7 flags enable NEON but not VFPv4, leaving scalar fmaf calls in
+# hot code.  Keep these options target- and configuration-local so Apple ARM64
+# code generation remains unchanged.
+if(
+    ANDROID
+    AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang"
+    AND "${CMAKE_ANDROID_ARCH_ABI}" STREQUAL "armeabi-v7a"
+)
+    target_compile_options(
+        soc_core
+        PRIVATE
+            $<$<CONFIG:Release>:-march=armv7-a>
+            $<$<CONFIG:Release>:-mfpu=neon-vfpv4>
+            $<$<CONFIG:Release>:-mfloat-abi=softfp>
+    )
+endif()
+
 set(_soc_native_apple_arm64 OFF)
 if(
     APPLE
