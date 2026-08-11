@@ -1,6 +1,6 @@
 #include "soc_cli_depth.h"
 
-#include <math.h>
+#include <float.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -25,7 +25,7 @@ static int test_reserved_values(void)
         0.0f,
         1.0f,
         0.344353855f,
-        nextafterf(0.0f, 1.0f),
+        FLT_MIN,
     };
     unsigned char pixels[
         sizeof(reversed_depth) / sizeof(reversed_depth[0])

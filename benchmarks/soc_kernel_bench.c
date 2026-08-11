@@ -122,6 +122,21 @@ typedef struct query_workload {
 
 static volatile uint64_t benchmark_sink;
 
+static soc_bool build_architecture_matches_neon(uint32_t architecture)
+{
+#if defined(__aarch64__) || defined(_M_ARM64)
+    return architecture == SOC_CPU_ARCHITECTURE_ARM64
+        ? SOC_TRUE : SOC_FALSE;
+#elif (defined(__arm__) || defined(_M_ARM)) && \
+    defined(SOC_BUILD_AARCH32_NEON_FMA)
+    return architecture == SOC_CPU_ARCHITECTURE_ARM32
+        ? SOC_TRUE : SOC_FALSE;
+#else
+    (void)architecture;
+    return SOC_FALSE;
+#endif
+}
+
 static void observe_memory(const void* pointer)
 {
 #if defined(_MSC_VER)
@@ -1845,7 +1860,7 @@ int main(int argc, char** argv)
         neon_kernels->store_constant_depth_block_f32 == NULL ||
         neon_kernels->reduce_hiz_level_f32 == NULL ||
         neon_kernels->test_aabbs == NULL ||
-        features.architecture != SOC_CPU_ARCHITECTURE_ARM64 ||
+        build_architecture_matches_neon(features.architecture) != SOC_TRUE ||
         !soc_cpu_features_has(&features, SOC_CPU_FEATURE_NEON)) {
         (void)printf(
             "soc_kernel_bench status=skip reason=neon_unavailable"

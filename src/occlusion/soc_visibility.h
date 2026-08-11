@@ -106,7 +106,8 @@ soc_result soc_occlusion_test_aabbs(
     soc_occlusion_query_counts* out_counts
 );
 
-#if defined(__aarch64__) || defined(_M_ARM64)
+#if defined(__aarch64__) || defined(_M_ARM64) || \
+    defined(SOC_BUILD_AARCH32_NEON_FMA)
 soc_result soc_occlusion_test_aabbs_neon(
     const soc_hiz* hiz,
     const soc_aabb_query_context* query,

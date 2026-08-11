@@ -69,6 +69,9 @@ static int test_native_detection(void)
     #endif
 #elif defined(_M_ARM) || defined(__arm__)
     CHECK(features.architecture == SOC_CPU_ARCHITECTURE_ARM32);
+    #if defined(SOC_BUILD_AARCH32_NEON_FMA)
+        CHECK(soc_cpu_features_has(&features, SOC_CPU_FEATURE_NEON));
+    #endif
 #else
     CHECK(features.architecture == SOC_CPU_ARCHITECTURE_UNKNOWN);
     CHECK(features.flags == SOC_CPU_FEATURE_NONE);

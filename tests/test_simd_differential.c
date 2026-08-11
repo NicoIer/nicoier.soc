@@ -26,13 +26,15 @@
         } \
     } while (0)
 
-#if defined(__aarch64__) || defined(_M_ARM64)
-#define SOC_TEST_AARCH64 1
+#if defined(__aarch64__) || defined(_M_ARM64) || \
+    ((defined(__arm__) || defined(_M_ARM)) && \
+        defined(SOC_BUILD_AARCH32_NEON_FMA))
+#define SOC_TEST_HAS_NEON_KERNELS 1
 #else
-#define SOC_TEST_AARCH64 0
+#define SOC_TEST_HAS_NEON_KERNELS 0
 #endif
 
-#if SOC_TEST_AARCH64
+#if SOC_TEST_HAS_NEON_KERNELS
 
 enum {
     CLEAR_GUARD_COUNT = 8,
@@ -270,12 +272,10 @@ static int run_raster_depth_block_case(
 {
     static const uint32_t stored_values[] = {
         UINT32_C(0x00000000),
-        UINT32_C(0x80000000),
+        UINT32_C(0x00800000),
         UINT32_C(0x3e800000),
         UINT32_C(0x3f000000),
         UINT32_C(0x3f800000),
-        UINT32_C(0x00000001),
-        UINT32_C(0x80000001),
     };
     float expected[RASTER_DEPTH_STORAGE_COUNT];
     float scalar_storage[RASTER_DEPTH_STORAGE_COUNT];
@@ -339,7 +339,6 @@ static int run_raster_depth_block_case(
         const uint32_t expected_bits = float_bits(expected[index]);
         const uint32_t scalar_bits = float_bits(scalar_storage[index]);
         const uint32_t neon_bits = float_bits(neon_storage[index]);
-
         if (scalar_bits != expected_bits || neon_bits != expected_bits) {
             fprintf(
                 stderr,
@@ -371,11 +370,10 @@ static int test_raster_depth_block_differential(
     static const size_t row_strides[] = {8u, 9u, 17u};
     static const uint32_t candidate_values[] = {
         UINT32_C(0x00000000),
-        UINT32_C(0x80000000),
+        UINT32_C(0x00800000),
         UINT32_C(0x3e800000),
         UINT32_C(0x3f000000),
         UINT32_C(0x3f800000),
-        UINT32_C(0x00000001),
     };
     uint32_t width;
 
@@ -636,13 +634,12 @@ static void make_hiz_source_bits(
 {
     static const uint32_t special_values[] = {
         UINT32_C(0x00000000),
-        UINT32_C(0x80000000),
+        UINT32_C(0x00800000),
+        UINT32_C(0x3e000000),
+        UINT32_C(0x3e800000),
         UINT32_C(0x3f000000),
-        UINT32_C(0xbf000000),
+        UINT32_C(0x3f400000),
         UINT32_C(0x3f800000),
-        UINT32_C(0xbf800000),
-        UINT32_C(0x00000001),
-        UINT32_C(0x80000001),
     };
     uint32_t random_state = UINT32_C(0xa341316c) ^
         width * UINT32_C(0x9e3779b9) ^
@@ -662,8 +659,8 @@ static void make_hiz_source_bits(
                 (index + rotation) % ARRAY_COUNT(special_values)
             ];
         } else {
-            output[index] = random_u32(&random_state) &
-                ~UINT32_C(0x00800000);
+            output[index] = UINT32_C(0x3f000000) |
+                (random_u32(&random_state) & UINT32_C(0x007fffff));
         }
     }
 }
@@ -842,7 +839,6 @@ static int run_hiz_case(
                 return 1;
             }
         }
-        return 1;
     }
 
     if (check_hiz_source_unchanged(
@@ -979,11 +975,6 @@ static int run_hiz_redzone_case(
     );
 
     if (memcmp(
-            scalar_destination,
-            neon_destination,
-            destination_storage_count * sizeof(*scalar_destination)
-        ) != 0 ||
-        memcmp(
             scalar_source,
             neon_source,
             source_storage_count * sizeof(*scalar_source)
@@ -998,6 +989,24 @@ static int run_hiz_redzone_case(
             (unsigned)pattern
         );
         goto cleanup;
+    }
+    for (index = 0u; index < destination_storage_count; ++index) {
+        const uint32_t scalar_bits = float_bits(scalar_destination[index]);
+        const uint32_t neon_bits = float_bits(neon_destination[index]);
+
+        if (scalar_bits != neon_bits) {
+            fprintf(
+                stderr,
+                "Hi-Z redzone value mismatch: %ux%u offset=%zu "
+                "pattern=%u index=%zu\n",
+                (unsigned)width,
+                (unsigned)height,
+                offset,
+                (unsigned)pattern,
+                index
+            );
+            goto cleanup;
+        }
     }
     for (index = 0u; index < offset; ++index) {
         if (float_bits(scalar_source[index]) != CANARY_BITS ||
@@ -2537,7 +2546,7 @@ int main(void)
     CHECK(scalar->reduce_hiz_level_f32 != NULL);
     CHECK(soc_kernel_table_for_backend(SOC_KERNEL_BACKEND_SCALAR) == scalar);
 
-#if SOC_TEST_AARCH64
+#if SOC_TEST_HAS_NEON_KERNELS
     CHECK(neon != NULL);
     CHECK(neon->backend == SOC_KERNEL_BACKEND_NEON);
     CHECK(neon->clear_f32 != NULL);

@@ -3,6 +3,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
+static int neon_backend_architecture_is_valid(uint32_t architecture)
+{
+#if (defined(__arm__) || defined(_M_ARM)) && \
+    defined(SOC_BUILD_AARCH32_NEON_FMA)
+    return architecture == SOC_CPU_ARCHITECTURE_ARM32;
+#else
+    return architecture == SOC_CPU_ARCHITECTURE_ARM64;
+#endif
+}
+
 static int test_version(void)
 {
     return soc_get_abi_version() == SOC_ABI_VERSION ? 0 : 1;
@@ -62,11 +72,20 @@ static int test_runtime_info(void)
         return 1;
     }
     if (info.execution_backend == SOC_EXECUTION_BACKEND_NEON &&
-        (info.cpu_architecture != SOC_CPU_ARCHITECTURE_ARM64 ||
+        (!neon_backend_architecture_is_valid(info.cpu_architecture) ||
             (info.cpu_features & SOC_CPU_FEATURE_NEON) == 0u)) {
         soc_context_destroy(context);
         return 1;
     }
+#if (defined(__arm__) || defined(_M_ARM)) && \
+    defined(SOC_BUILD_AARCH32_NEON_FMA)
+    if (info.cpu_architecture != SOC_CPU_ARCHITECTURE_ARM32 ||
+        (info.cpu_features & SOC_CPU_FEATURE_NEON) == 0u ||
+        info.execution_backend != SOC_EXECUTION_BACKEND_NEON) {
+        soc_context_destroy(context);
+        return 1;
+    }
+#endif
     if (soc_context_get_runtime_info(NULL, &info) !=
             SOC_RESULT_INVALID_ARGUMENT ||
         soc_context_get_runtime_info(context, NULL) !=

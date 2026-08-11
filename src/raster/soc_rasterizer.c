@@ -16,6 +16,13 @@
     #else
         #include <arm_neon.h>
     #endif
+#elif defined(SOC_BUILD_AARCH32_NEON_FMA)
+    #if !defined(__arm__) || \
+        !(defined(__ARM_NEON) || defined(__ARM_NEON__)) || \
+        !defined(__ARM_FEATURE_FMA)
+        #error "AArch32 SIMD requires ARM NEON with VFPv4 FMA"
+    #endif
+    #include <arm_neon.h>
 #endif
 
 #define SOC_CLIP_PLANE_COUNT 6u
@@ -409,6 +416,12 @@ static float reciprocal_f32(float value)
 
     reciprocal = vmul_f32(reciprocal, vrecps_f32(input, reciprocal));
     return vget_lane_f32(reciprocal, 0);
+#elif defined(SOC_BUILD_AARCH32_NEON_FMA)
+    const float32x2_t input = vdup_n_f32(value);
+    float32x2_t reciprocal = vrecpe_f32(input);
+
+    reciprocal = vmul_f32(reciprocal, vrecps_f32(input, reciprocal));
+    return vget_lane_f32(reciprocal, 0);
 #else
     return 1.0f / value;
 #endif
@@ -422,6 +435,20 @@ static void reciprocal3_f32(
 )
 {
 #if defined(__aarch64__) || defined(_M_ARM64)
+    const float values[4] = {value0, value1, value2, 1.0f};
+    const float32x4_t input = vld1q_f32(values);
+    float32x4_t reciprocal = vrecpeq_f32(input);
+    float results[4];
+
+    reciprocal = vmulq_f32(
+        reciprocal,
+        vrecpsq_f32(input, reciprocal)
+    );
+    vst1q_f32(results, reciprocal);
+    out_reciprocal[0] = results[0];
+    out_reciprocal[1] = results[1];
+    out_reciprocal[2] = results[2];
+#elif defined(SOC_BUILD_AARCH32_NEON_FMA)
     const float values[4] = {value0, value1, value2, 1.0f};
     const float32x4_t input = vld1q_f32(values);
     float32x4_t reciprocal = vrecpeq_f32(input);
@@ -2128,6 +2155,19 @@ static float tile_edge_value_at_column(
         (float)(column - group_column),
         group_value
     );
+#elif defined(SOC_BUILD_AARCH32_NEON_FMA)
+    const uint32_t group_column = column & ~UINT32_C(3);
+    const float group_value = fmaf(
+        edge->step_x,
+        (float)group_column,
+        row_value
+    );
+
+    return fmaf(
+        edge->step_x,
+        (float)(column - group_column),
+        group_value
+    );
 #else
     float value = row_value;
     uint32_t index;
@@ -2282,6 +2322,68 @@ static uint64_t make_raster_block_mask(
                 (vgetq_lane_u32(inside, 3) & UINT32_C(8));
 
             bits &= (UINT32_C(1) << lane_count) - UINT32_C(1);
+            coverage_mask |= (uint64_t)bits <<
+                (row * SOC_RASTER_BLOCK_SIZE + column);
+            column += lane_count;
+        }
+#elif defined(SOC_BUILD_AARCH32_NEON_FMA)
+        static const float lane_offsets_values[4] = {
+            0.0f, 1.0f, 2.0f, 3.0f,
+        };
+        static const uint16_t lane_weights_values[4] = {1u, 2u, 4u, 8u};
+        const float32x4_t lane_offsets =
+            vld1q_f32(lane_offsets_values);
+        const uint16x4_t lane_weights =
+            vld1_u16(lane_weights_values);
+        const float32x4_t zero = vdupq_n_f32(0.0f);
+        uint32_t column = 0u;
+
+        while (column < block_width) {
+            const uint32_t lane_count = block_width - column < 4u
+                ? block_width - column
+                : 4u;
+            const float column_offset = (float)column;
+            const float32x4_t edge0 = vfmaq_n_f32(
+                vdupq_n_f32(fmaf(
+                    edges[0].step_x,
+                    column_offset,
+                    row_edge0
+                )),
+                lane_offsets,
+                edges[0].step_x
+            );
+            const float32x4_t edge1 = vfmaq_n_f32(
+                vdupq_n_f32(fmaf(
+                    edges[1].step_x,
+                    column_offset,
+                    row_edge1
+                )),
+                lane_offsets,
+                edges[1].step_x
+            );
+            const float32x4_t edge2 = vfmaq_n_f32(
+                vdupq_n_f32(fmaf(
+                    edges[2].step_x,
+                    column_offset,
+                    row_edge2
+                )),
+                lane_offsets,
+                edges[2].step_x
+            );
+            const uint32x4_t inside = vandq_u32(
+                vandq_u32(vcgeq_f32(edge0, zero), vcgeq_f32(edge1, zero)),
+                vcgeq_f32(edge2, zero)
+            );
+            const uint16x4_t weighted = vmul_u16(
+                vmovn_u32(vshrq_n_u32(inside, 31)),
+                lane_weights
+            );
+            const uint16x4_t pair_sums = vpadd_u16(weighted, weighted);
+            const uint32_t bits = (uint32_t)vget_lane_u16(
+                vpadd_u16(pair_sums, pair_sums),
+                0
+            ) & ((UINT32_C(1) << lane_count) - UINT32_C(1));
+
             coverage_mask |= (uint64_t)bits <<
                 (row * SOC_RASTER_BLOCK_SIZE + column);
             column += lane_count;

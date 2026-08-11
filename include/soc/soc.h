@@ -25,10 +25,11 @@ extern "C" {
 #endif
 
 /*
- * All floating-point inputs to this API must be finite and within ranges that
- * keep the documented calculations representable. Passing NaN, infinity, or
- * values that overflow intermediate calculations violates the API contract
- * and results in undefined behavior.
+ * All floating-point inputs to this API must be zero or finite normal values
+ * within ranges that keep the documented calculations representable. Passing
+ * a subnormal value, NaN, infinity, or a value that overflows intermediate
+ * calculations violates the API contract and results in undefined behavior.
+ * Intermediate results in the subnormal range may be flushed to zero.
  */
 
 SOC_API uint32_t SOC_CALL soc_get_abi_version(void);

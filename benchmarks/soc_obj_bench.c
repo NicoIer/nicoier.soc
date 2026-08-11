@@ -47,6 +47,7 @@ typedef struct options {
     const char* input_path;
     uint32_t sample_count;
     uint32_t sample_ms;
+    uint32_t worker_count;
 } options;
 
 typedef struct validation_result {
@@ -59,8 +60,11 @@ static void print_usage(FILE* stream, const char* executable)
 {
     (void)fprintf(
         stream,
-        "Usage: %s --input benchmark.obj [--samples N] [--sample-ms N]\n"
+        "Usage: %s --input benchmark.obj [--samples N] [--sample-ms N] "
+        "[--workers N]\n"
         "\n"
+        "Omitting --workers uses the online logical CPU count; 1 is serial.\n"
+        "The worker count includes the thread which calls the build.\n"
         "The OBJ must contain the '# SOC benchmark OBJ v2' metadata header.\n"
         "Its camera matrix must use reversed Z (near = 1; far = 0 for ZO\n"
         "or -1 for negative-one-to-one clip depth).\n"
@@ -123,6 +127,12 @@ static int parse_options(
         } else if (strcmp(argv[argument], "--sample-ms") == 0) {
             if (++argument >= argc ||
                 !parse_uint32(argv[argument], &out_options->sample_ms)) {
+                return 0;
+            }
+        } else if (strcmp(argv[argument], "--workers") == 0) {
+            if (++argument >= argc ||
+                !parse_uint32(argv[argument], &out_options->worker_count) ||
+                out_options->worker_count > SOC_MAX_WORKER_COUNT) {
                 return 0;
             }
         } else {
@@ -621,6 +631,7 @@ int main(int argc, char** argv)
     soc_context* context = NULL;
     soc_mesh* mesh = NULL;
     soc_config config;
+    soc_runtime_info runtime_info;
     soc_mesh_desc mesh_desc;
     soc_frame_desc frame_desc;
     const soc_mat4 object_to_world = identity_matrix();
@@ -675,11 +686,18 @@ int main(int argc, char** argv)
         .struct_size = sizeof(config),
         .width = metadata.width,
         .height = metadata.height,
-        .worker_count = 0u,
+        .worker_count = opts.worker_count,
         .flags = SOC_CONFIG_FLAG_NONE,
     };
     if (soc_context_create(&config, &context) != SOC_RESULT_OK) {
         fprintf(stderr, "soc_obj_bench: context creation failed\n");
+        goto cleanup;
+    }
+    runtime_info = (soc_runtime_info){
+        .struct_size = sizeof(soc_runtime_info),
+    };
+    if (soc_context_get_runtime_info(context, &runtime_info) != SOC_RESULT_OK) {
+        fprintf(stderr, "soc_obj_bench: runtime info query failed\n");
         goto cleanup;
     }
     mesh_desc = (soc_mesh_desc){
@@ -791,10 +809,15 @@ int main(int argc, char** argv)
         samples[opts.sample_count - 1u]
     );
     printf(
+        "workers=%" PRIu32 " backend=%s "
         "size=%" PRIu32 "x%" PRIu32
         " vertices=%" PRIu32 " triangles=%" PRIu32
         " clipped=%" PRIu64 " rasterized=%" PRIu64
         " drawn_pixels=%" PRIu64 " checksum=%016" PRIx64 "\n",
+        runtime_info.worker_count,
+        runtime_info.execution_backend == SOC_EXECUTION_BACKEND_NEON
+            ? "neon"
+            : "scalar",
         metadata.width,
         metadata.height,
         object.vertex_count,

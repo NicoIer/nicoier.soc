@@ -137,7 +137,8 @@ void soc_kernel_transform_triangle_f32_scalar(
     soc_kernel_clip_metadata* out_metadata
 );
 
-#if defined(__aarch64__) || defined(_M_ARM64)
+#if defined(__aarch64__) || defined(_M_ARM64) || \
+    defined(SOC_BUILD_AARCH32_NEON_FMA)
 void soc_kernel_transform_triangle_f32_neon(
     const soc_kernel_mat4_f32* clip_from_object,
     const float* position0_xyz,
@@ -149,7 +150,7 @@ void soc_kernel_transform_triangle_f32_neon(
 );
 #endif
 
-/* Compile-time direct call: AArch64 always has Advanced SIMD. */
+/* Compile-time direct call for the selected Advanced SIMD build slice. */
 static inline void soc_kernel_transform_triangle_f32(
     const soc_kernel_mat4_f32* clip_from_object,
     const float* position0_xyz,
@@ -160,7 +161,8 @@ static inline void soc_kernel_transform_triangle_f32(
     soc_kernel_clip_metadata* out_metadata
 )
 {
-#if defined(__aarch64__) || defined(_M_ARM64)
+#if defined(__aarch64__) || defined(_M_ARM64) || \
+    defined(SOC_BUILD_AARCH32_NEON_FMA)
     soc_kernel_transform_triangle_f32_neon(
         clip_from_object,
         position0_xyz,
@@ -185,7 +187,7 @@ static inline void soc_kernel_transform_triangle_f32(
 
 const soc_kernel_table* soc_kernel_table_scalar(void);
 
-/* Returns null on build slices which do not contain AArch64 NEON kernels. */
+/* Returns null on build slices which do not contain NEON kernels. */
 const soc_kernel_table* soc_kernel_table_neon(void);
 
 const soc_kernel_table* soc_kernel_table_select(

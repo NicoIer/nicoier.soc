@@ -17,6 +17,21 @@
         } \
     } while (0)
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+#define SOC_TEST_HAS_NEON_KERNELS 1
+#define SOC_TEST_TARGET_AARCH64 1
+#define SOC_TEST_TARGET_AARCH32_NEON 0
+#elif (defined(__arm__) || defined(_M_ARM)) && \
+    defined(SOC_BUILD_AARCH32_NEON_FMA)
+#define SOC_TEST_HAS_NEON_KERNELS 1
+#define SOC_TEST_TARGET_AARCH64 0
+#define SOC_TEST_TARGET_AARCH32_NEON 1
+#else
+#define SOC_TEST_HAS_NEON_KERNELS 0
+#define SOC_TEST_TARGET_AARCH64 0
+#define SOC_TEST_TARGET_AARCH32_NEON 0
+#endif
+
 static soc_mat4 identity_matrix(void)
 {
     const soc_mat4 matrix = {
@@ -379,7 +394,7 @@ static int test_merge_depth_planes(void)
     const soc_kernel_table* scalar = soc_kernel_table_scalar();
 
     CHECK(test_merge_depth_planes_for_table(scalar) == 0);
-#if defined(__aarch64__) || defined(_M_ARM64)
+#if SOC_TEST_HAS_NEON_KERNELS
     const soc_kernel_table* neon = soc_kernel_table_neon();
 
     CHECK(neon != NULL);
@@ -403,7 +418,7 @@ static int test_scalar_table_contract(void)
     CHECK(soc_kernel_table_for_backend(SOC_KERNEL_BACKEND_SCALAR) == scalar);
     CHECK(soc_kernel_table_select(NULL) == scalar);
 
-#if defined(__aarch64__) || defined(_M_ARM64)
+#if SOC_TEST_HAS_NEON_KERNELS
     const soc_kernel_table* neon = soc_kernel_table_neon();
 
     CHECK(neon != NULL);
@@ -435,14 +450,22 @@ static int test_kernel_selection(void)
     CHECK(soc_kernel_table_select(&features) == scalar);
 
     features.architecture = SOC_CPU_ARCHITECTURE_ARM32;
+    features.flags = SOC_CPU_FEATURE_NONE;
     CHECK(soc_kernel_table_select(&features) == scalar);
+
+    features.flags = SOC_CPU_FEATURE_NEON;
+#if SOC_TEST_TARGET_AARCH32_NEON
+    CHECK(soc_kernel_table_select(&features) == soc_kernel_table_neon());
+#else
+    CHECK(soc_kernel_table_select(&features) == scalar);
+#endif
 
     features.architecture = SOC_CPU_ARCHITECTURE_ARM64;
     features.flags = SOC_CPU_FEATURE_NONE;
     CHECK(soc_kernel_table_select(&features) == scalar);
 
     features.flags = SOC_CPU_FEATURE_NEON;
-#if defined(__aarch64__) || defined(_M_ARM64)
+#if SOC_TEST_TARGET_AARCH64
     CHECK(soc_kernel_table_select(&features) == soc_kernel_table_neon());
 #else
     CHECK(soc_kernel_table_select(&features) == scalar);
@@ -478,7 +501,7 @@ static int test_context_backend_constructor(void)
     soc_context_destroy_internal(context);
     context = NULL;
 
-#if defined(__aarch64__) || defined(_M_ARM64)
+#if SOC_TEST_HAS_NEON_KERNELS
     CHECK(soc_context_create_for_backend_for_testing_internal(
         &config,
         SOC_KERNEL_BACKEND_NEON,

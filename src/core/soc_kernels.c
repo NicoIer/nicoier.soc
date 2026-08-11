@@ -212,9 +212,15 @@ const soc_kernel_table* soc_kernel_table_select(
 {
     const soc_kernel_table* neon = soc_kernel_table_neon();
 
+#if defined(SOC_BUILD_AARCH32_NEON_FMA)
+    if (features != NULL && neon != NULL &&
+        features->architecture == SOC_CPU_ARCHITECTURE_ARM32 &&
+        soc_cpu_features_has(features, SOC_CPU_FEATURE_NEON)) {
+#else
     if (features != NULL && neon != NULL &&
         features->architecture == SOC_CPU_ARCHITECTURE_ARM64 &&
         soc_cpu_features_has(features, SOC_CPU_FEATURE_NEON)) {
+#endif
         return neon;
     }
     return soc_kernel_table_scalar();
