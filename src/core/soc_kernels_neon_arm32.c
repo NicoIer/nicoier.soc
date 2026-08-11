@@ -486,6 +486,57 @@ void soc_kernel_transform_triangle_f32_neon(
     out_metadata->common_planes = common_planes;
 }
 
+void soc_kernel_transform_triangle_post_cache_f32_neon(
+    const soc_kernel_mat4_f32* clip_from_object,
+    const float* position0_xyz,
+    const float* position1_xyz,
+    const float* position2_xyz,
+    soc_clip_depth_range depth_range,
+    soc_kernel_clip_vertex out_clip[3],
+    soc_kernel_clip_metadata* out_metadata,
+    uint8_t out_outcodes[3],
+    uint8_t transform_mask
+)
+{
+    const float* positions[3] = {
+        position0_xyz,
+        position1_xyz,
+        position2_xyz,
+    };
+    const float32x4_t column0 =
+        vld1q_f32(&clip_from_object->columns[0][0]);
+    const float32x4_t column1 =
+        vld1q_f32(&clip_from_object->columns[1][0]);
+    const float32x4_t column2 =
+        vld1q_f32(&clip_from_object->columns[2][0]);
+    const float32x4_t column3 =
+        vld1q_f32(&clip_from_object->columns[3][0]);
+    uint8_t active_planes = 0u;
+    uint8_t common_planes = UINT8_C(0x3f);
+    size_t index;
+
+    for (index = 0u; index < 3u; ++index) {
+        float32x4_t clip = column3;
+        uint8_t outcode;
+
+        if ((transform_mask & (UINT8_C(1) << index)) == 0u) {
+            continue;
+        }
+        clip = vfmaq_n_f32(clip, column0, positions[index][0]);
+        clip = vfmaq_n_f32(clip, column1, positions[index][1]);
+        clip = vfmaq_n_f32(clip, column2, positions[index][2]);
+        vst1q_f32(&out_clip[index].x, clip);
+        outcode = compute_clip_outcode_f32_arm32(clip, depth_range);
+        out_outcodes[index] = outcode;
+    }
+    for (index = 0u; index < 3u; ++index) {
+        active_planes = (uint8_t)(active_planes | out_outcodes[index]);
+        common_planes = (uint8_t)(common_planes & out_outcodes[index]);
+    }
+    out_metadata->active_planes = active_planes;
+    out_metadata->common_planes = common_planes;
+}
+
 static const soc_kernel_table neon_kernels_arm32 = {
     .backend = SOC_KERNEL_BACKEND_NEON,
     .clear_f32 = soc_kernel_clear_f32_scalar,

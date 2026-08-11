@@ -110,7 +110,8 @@ typedef enum geometry_pattern {
     GEOMETRY_BACKFACE,
     GEOMETRY_DEGENERATE,
     GEOMETRY_OUTSIDE,
-    GEOMETRY_SHARED_GRID
+    GEOMETRY_SHARED_GRID,
+    GEOMETRY_SHARED_GRID_OUTSIDE
 } geometry_pattern;
 
 typedef enum query_pattern {
@@ -256,6 +257,12 @@ static const bench_case g_cases[] = {
      .triangle_count = 16384u, .instance_count = 1u,
      .geometry_pattern = GEOMETRY_SHARED_GRID,
      .index_type = SOC_INDEX_UINT32},
+    {.name = "geometry.shared_grid.outside.u16.16384",
+     .description = "Reject a shared grid outside the right clip plane",
+     .kind = BENCH_GEOMETRY, .tier = 1u, .width = 640u, .height = 360u,
+     .triangle_count = 16384u, .instance_count = 1u,
+     .geometry_pattern = GEOMETRY_SHARED_GRID_OUTSIDE,
+     .index_type = SOC_INDEX_UINT16},
     {.name = "geometry.near_clip.16384",
      .description = "Clip 16384 triangles crossing the near plane",
      .kind = BENCH_GEOMETRY, .tier = 1u, .width = 640u, .height = 360u,
@@ -857,8 +864,11 @@ static int create_shared_grid_mesh(workload* work)
             const uint32_t vertex = row * (columns + 1u) + column;
             float* position = &vertices[(size_t)vertex * 3u];
 
-            position[0] = -0.90f +
-                1.80f * (float)column / (float)columns;
+            position[0] =
+                definition->geometry_pattern == GEOMETRY_SHARED_GRID_OUTSIDE
+                    ? 2.0f + (float)column / (float)columns
+                    : -0.90f +
+                        1.80f * (float)column / (float)columns;
             position[1] = -0.90f +
                 1.80f * (float)row / (float)rows;
             position[2] = case_occluder_depth(definition);
@@ -914,7 +924,8 @@ static int create_geometry_mesh(workload* work)
     size_t vertex_bytes;
     size_t index_bytes;
 
-    if (definition->geometry_pattern == GEOMETRY_SHARED_GRID) {
+    if (definition->geometry_pattern == GEOMETRY_SHARED_GRID ||
+        definition->geometry_pattern == GEOMETRY_SHARED_GRID_OUTSIDE) {
         return create_shared_grid_mesh(work);
     }
     if (triangle_count == 0u ||
@@ -1745,6 +1756,15 @@ static int workload_validate(const workload* work)
                  definition->triangle_count)) {
             fprintf(stderr,
                 "%s: shared grid counters failed validation\n",
+                definition->name);
+            return 1;
+        }
+        if (definition->geometry_pattern == GEOMETRY_SHARED_GRID_OUTSIDE &&
+            (work->build_stats.clipped_triangle_count !=
+                 definition->triangle_count ||
+             work->build_stats.rasterized_triangle_count != 0u)) {
+            fprintf(stderr,
+                "%s: outside shared grid counters failed validation\n",
                 definition->name);
             return 1;
         }
@@ -2626,7 +2646,9 @@ static int write_json(
                 definition->large_queries ? "true" : "false",
                 definition->reverse_order ? "true" : "false",
                 definition->kind == BENCH_MESH_CREATE ||
-                    definition->geometry_pattern == GEOMETRY_SHARED_GRID
+                    (definition->geometry_pattern == GEOMETRY_SHARED_GRID ||
+                     definition->geometry_pattern ==
+                         GEOMETRY_SHARED_GRID_OUTSIDE)
                     ? definition->index_type : SOC_INDEX_UINT32,
                 definition->kind == BENCH_MESH_CREATE
                     ? definition->vertex_stride : 12u,

@@ -35,16 +35,23 @@
 #define SOC_RASTER_BLOCK_SIZE SOC_KERNEL_RASTER_BLOCK_SIZE
 #define SOC_RASTER_SUBTILE_HEIGHT (SOC_RASTER_BLOCK_SIZE / 2u)
 #define SOC_RASTER_UNTRACKED_TRIANGLE_SIZE UINT32_C(16)
+#define SOC_POST_TRANSFORM_CACHE_ENTRY_COUNT \
+    SOC_MESH_POST_TRANSFORM_CACHE_ENTRY_COUNT
+#define SOC_POST_TRANSFORM_CACHE_MINIMUM_TRIANGLES UINT32_C(32)
 
 #if defined(_MSC_VER)
 #define SOC_NOINLINE __declspec(noinline)
 #define SOC_MAYBE_UNUSED
+#define SOC_RASTER_FORCE_INLINE static __forceinline
 #elif defined(__clang__) || defined(__GNUC__)
 #define SOC_NOINLINE __attribute__((noinline))
 #define SOC_MAYBE_UNUSED __attribute__((unused))
+#define SOC_RASTER_FORCE_INLINE \
+    static inline __attribute__((always_inline))
 #else
 #define SOC_NOINLINE
 #define SOC_MAYBE_UNUSED
+#define SOC_RASTER_FORCE_INLINE static inline
 #endif
 
 _Static_assert(
@@ -76,6 +83,14 @@ typedef struct soc_screen_vertex {
     int64_t fixed_x;
     int64_t fixed_y;
 } soc_screen_vertex;
+
+typedef struct soc_post_transform_cache {
+    soc_clip_vertex vertices[SOC_POST_TRANSFORM_CACHE_ENTRY_COUNT];
+    soc_screen_vertex screens[SOC_POST_TRANSFORM_CACHE_ENTRY_COUNT];
+    uint32_t indices[SOC_POST_TRANSFORM_CACHE_ENTRY_COUNT];
+    soc_clip_outcode outcodes[SOC_POST_TRANSFORM_CACHE_ENTRY_COUNT];
+    uint8_t screen_valid[SOC_POST_TRANSFORM_CACHE_ENTRY_COUNT];
+} soc_post_transform_cache;
 
 typedef struct soc_fixed_vertex {
     int64_t x;
@@ -493,6 +508,147 @@ static float clip_plane_distance(
     }
 }
 
+static void initialize_post_transform_cache(soc_post_transform_cache* cache)
+{
+    uint32_t entry;
+
+    for (entry = 0u;
+         entry < SOC_POST_TRANSFORM_CACHE_ENTRY_COUNT;
+         ++entry) {
+        cache->indices[entry] = UINT32_MAX;
+    }
+}
+
+SOC_RASTER_FORCE_INLINE soc_bool find_post_transform_cache_vertex(
+    const soc_post_transform_cache* cache,
+    uint32_t mesh_index,
+    soc_clip_vertex* out_vertex,
+    soc_clip_outcode* out_outcode
+)
+{
+    const uint32_t entry =
+        (mesh_index ^ (mesh_index >> 4u)) &
+            (SOC_POST_TRANSFORM_CACHE_ENTRY_COUNT - 1u);
+
+    if (cache->indices[entry] == mesh_index) {
+        *out_vertex = cache->vertices[entry];
+        *out_outcode = cache->outcodes[entry];
+        return SOC_TRUE;
+    }
+    return SOC_FALSE;
+}
+
+SOC_RASTER_FORCE_INLINE void store_post_transform_cache_vertex(
+    soc_post_transform_cache* cache,
+    uint32_t mesh_index,
+    const soc_clip_vertex* vertex,
+    soc_clip_outcode outcode
+)
+{
+    const uint32_t entry =
+        (mesh_index ^ (mesh_index >> 4u)) &
+            (SOC_POST_TRANSFORM_CACHE_ENTRY_COUNT - 1u);
+
+    cache->vertices[entry] = *vertex;
+    cache->indices[entry] = mesh_index;
+    cache->outcodes[entry] = outcode;
+    cache->screen_valid[entry] = 0u;
+}
+
+SOC_RASTER_FORCE_INLINE soc_bool find_post_transform_cache_screen(
+    const soc_post_transform_cache* cache,
+    uint32_t mesh_index,
+    soc_screen_vertex* out_screen
+)
+{
+    const uint32_t entry =
+        (mesh_index ^ (mesh_index >> 4u)) &
+            (SOC_POST_TRANSFORM_CACHE_ENTRY_COUNT - 1u);
+
+    if (cache->indices[entry] == mesh_index &&
+        cache->screen_valid[entry] != 0u) {
+        *out_screen = cache->screens[entry];
+        return SOC_TRUE;
+    }
+    return SOC_FALSE;
+}
+
+SOC_RASTER_FORCE_INLINE void store_post_transform_cache_screen(
+    soc_post_transform_cache* cache,
+    uint32_t mesh_index,
+    const soc_screen_vertex* screen
+)
+{
+    const uint32_t entry =
+        (mesh_index ^ (mesh_index >> 4u)) &
+            (SOC_POST_TRANSFORM_CACHE_ENTRY_COUNT - 1u);
+
+    if (cache->indices[entry] == mesh_index) {
+        cache->screens[entry] = *screen;
+        cache->screen_valid[entry] = 1u;
+    }
+}
+
+SOC_RASTER_FORCE_INLINE void transform_triangle_with_post_cache(
+    const soc_kernel_mat4_f32* clip_from_object,
+    const soc_mesh* mesh,
+    const uint32_t mesh_indices[3],
+    soc_clip_depth_range depth_range,
+    soc_post_transform_cache* cache,
+    soc_clip_vertex out_clip[3],
+    soc_kernel_clip_metadata* out_metadata
+)
+{
+    soc_clip_outcode outcodes[3];
+    uint8_t transform_mask = 0u;
+    uint32_t index;
+
+    for (index = 0u; index < 3u; ++index) {
+        if (find_post_transform_cache_vertex(
+                cache,
+                mesh_indices[index],
+                &out_clip[index],
+                &outcodes[index]
+            ) != SOC_TRUE) {
+            transform_mask = (uint8_t)(
+                transform_mask | (UINT8_C(1) << index)
+            );
+        }
+    }
+    if (transform_mask == 0u) {
+        out_metadata->active_planes = (soc_clip_outcode)(
+            outcodes[0] | outcodes[1] | outcodes[2]
+        );
+        out_metadata->common_planes = (soc_clip_outcode)(
+            outcodes[0] & outcodes[1] & outcodes[2]
+        );
+        return;
+    }
+
+    soc_kernel_transform_triangle_post_cache_f32(
+        clip_from_object,
+        mesh->positions_xyz + (size_t)mesh_indices[0] * 3u,
+        mesh->positions_xyz + (size_t)mesh_indices[1] * 3u,
+        mesh->positions_xyz + (size_t)mesh_indices[2] * 3u,
+        depth_range,
+        out_clip,
+        out_metadata,
+        outcodes,
+        transform_mask
+    );
+    for (index = 0u; index < 3u; ++index) {
+        if ((transform_mask & (UINT8_C(1) << index)) == 0u) {
+            continue;
+        }
+        store_post_transform_cache_vertex(
+            cache,
+            mesh_indices[index],
+            &out_clip[index],
+            outcodes[index]
+        );
+    }
+}
+
 static soc_clip_vertex interpolate_clip_vertex(
     const soc_clip_vertex* start,
     const soc_clip_vertex* end,
@@ -603,7 +759,7 @@ static soc_bool polygon_inside_clip_plane(
     return SOC_TRUE;
 }
 
-static uint32_t clip_triangle(
+SOC_RASTER_FORCE_INLINE uint32_t clip_triangle(
     const soc_rasterizer* rasterizer,
     const soc_clip_vertex input_triangle[3],
     soc_clip_outcode active_planes,
@@ -908,6 +1064,108 @@ static soc_raster_setup_result prepare_screen_triangle(
             depth = fmaf(depth, 0.5f, 0.5f);
         }
         screen[index].depth = clamp_float(depth, 0.0f, 1.0f);
+    }
+    if (fixed_area < 0) {
+        swap_screen_vertices(&screen[1], &screen[2]);
+    }
+    return SOC_RASTER_SETUP_READY;
+}
+
+static soc_raster_setup_result prepare_cached_screen_triangle(
+    const soc_rasterizer* rasterizer,
+    const soc_clip_vertex clip[3],
+    const uint32_t mesh_indices[3],
+    soc_bool two_sided,
+    soc_post_transform_cache* cache,
+    soc_screen_vertex screen[3]
+)
+{
+    soc_bool screen_cached[3];
+    soc_bool all_screens_cached = SOC_TRUE;
+    int64_t fixed_area;
+    uint32_t index;
+
+    for (index = 0u; index < 3u; ++index) {
+        screen_cached[index] = find_post_transform_cache_screen(
+            cache,
+            mesh_indices[index],
+            &screen[index]
+        );
+        if (screen_cached[index] != SOC_TRUE) {
+            all_screens_cached = SOC_FALSE;
+        }
+    }
+    if (all_screens_cached != SOC_TRUE) {
+        float inverse_w[3];
+
+        for (index = 0u; index < 3u; ++index) {
+            if (clip[index].w <= 0.0f) {
+                return SOC_RASTER_SETUP_REJECTED;
+            }
+        }
+        reciprocal3_f32(
+            clip[0].w,
+            clip[1].w,
+            clip[2].w,
+            inverse_w
+        );
+        for (index = 0u; index < 3u; ++index) {
+            float depth;
+            float ndc_x;
+            float ndc_y;
+
+            if (screen_cached[index] == SOC_TRUE) {
+                continue;
+            }
+            ndc_x = clamp_float(
+                clip[index].x * inverse_w[index],
+                -1.0f,
+                1.0f
+            );
+            ndc_y = clamp_float(
+                clip[index].y * inverse_w[index],
+                -1.0f,
+                1.0f
+            );
+            screen[index].x =
+                fmaf(ndc_x, 0.5f, 0.5f) * (float)rasterizer->width;
+            screen[index].y =
+                fmaf(ndc_y, -0.5f, 0.5f) * (float)rasterizer->height;
+            screen[index].fixed_x =
+                quantize_screen_coordinate(screen[index].x);
+            screen[index].fixed_y =
+                quantize_screen_coordinate(screen[index].y);
+            depth = clip[index].z * inverse_w[index];
+            if (rasterizer->frame.clip_depth_range ==
+                SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) {
+                depth = fmaf(depth, 0.5f, 0.5f);
+            }
+            screen[index].depth = clamp_float(depth, 0.0f, 1.0f);
+            store_post_transform_cache_screen(
+                cache,
+                mesh_indices[index],
+                &screen[index]
+            );
+        }
+    }
+
+    fixed_area =
+        (screen[1].fixed_x - screen[0].fixed_x) *
+            (screen[2].fixed_y - screen[0].fixed_y) -
+        (screen[1].fixed_y - screen[0].fixed_y) *
+            (screen[2].fixed_x - screen[0].fixed_x);
+    if (fixed_area == 0) {
+        return SOC_RASTER_SETUP_REJECTED;
+    }
+    if (two_sided != SOC_TRUE) {
+        const soc_bool front_facing =
+            rasterizer->frame.front_face == SOC_FRONT_FACE_CCW
+                ? (fixed_area < 0 ? SOC_TRUE : SOC_FALSE)
+                : (fixed_area > 0 ? SOC_TRUE : SOC_FALSE);
+
+        if (front_facing != SOC_TRUE) {
+            return SOC_RASTER_SETUP_REJECTED;
+        }
     }
     if (fixed_area < 0) {
         swap_screen_vertices(&screen[1], &screen[2]);
@@ -3591,6 +3849,172 @@ soc_result soc_rasterizer_begin_frame_no_clear(
     return begin_frame(rasterizer, desc, SOC_FALSE);
 }
 
+static SOC_NOINLINE soc_result process_occluder_triangles_cached(
+    soc_rasterizer* rasterizer,
+    const soc_mesh* mesh,
+    const soc_mat4* object_to_world,
+    uint32_t triangle_begin,
+    uint32_t triangle_count,
+    soc_raster_prepared_list* prepared
+)
+{
+    soc_kernel_mat4_f32 clip_from_world;
+    soc_kernel_mat4_f32 object_to_world_f32;
+    soc_kernel_mat4_f32 clip_from_object;
+    soc_post_transform_cache post_transform_cache;
+    uint32_t triangle;
+    const uint32_t triangle_end = triangle_begin + triangle_count;
+    const soc_bool two_sided =
+        (mesh->flags & SOC_MESH_FLAG_TWO_SIDED) != 0u
+            ? SOC_TRUE
+            : SOC_FALSE;
+
+    soc_kernel_mat4_f32_from_f32(
+        &rasterizer->frame.clip_from_world,
+        &clip_from_world
+    );
+    soc_kernel_mat4_f32_from_f32(
+        object_to_world,
+        &object_to_world_f32
+    );
+    soc_kernel_mat4_f32_multiply(
+        &clip_from_world,
+        &object_to_world_f32,
+        &clip_from_object
+    );
+    initialize_post_transform_cache(&post_transform_cache);
+
+    for (triangle = triangle_begin; triangle < triangle_end; ++triangle) {
+        soc_clip_vertex clip_triangle_vertices[3];
+        soc_clip_vertex clipped_polygon[SOC_MAX_CLIPPED_VERTICES];
+        soc_raster_depth_plane fan_depth_plane;
+        const soc_raster_depth_plane* shared_depth_plane = NULL;
+        soc_clip_outcode active_planes;
+        soc_clip_classification clip_classification;
+        soc_kernel_clip_metadata clip_metadata;
+        uint32_t clipped_vertex_count;
+        uint32_t fan_index;
+        const uint32_t mesh_indices[3] = {
+            read_mesh_index(mesh, triangle * 3u),
+            read_mesh_index(mesh, triangle * 3u + 1u),
+            read_mesh_index(mesh, triangle * 3u + 2u),
+        };
+
+        transform_triangle_with_post_cache(
+            &clip_from_object,
+            mesh,
+            mesh_indices,
+            rasterizer->frame.clip_depth_range,
+            &post_transform_cache,
+            clip_triangle_vertices,
+            &clip_metadata
+        );
+        active_planes = clip_metadata.active_planes;
+        if (clip_metadata.common_planes != 0u) {
+            clip_classification = SOC_CLIP_CLASSIFICATION_REJECT;
+        } else {
+            clip_classification = active_planes == 0u
+                ? SOC_CLIP_CLASSIFICATION_ACCEPT
+                : SOC_CLIP_CLASSIFICATION_PARTIAL;
+        }
+        if (clip_classification == SOC_CLIP_CLASSIFICATION_REJECT) {
+            ++rasterizer->clipped_triangle_count;
+            continue;
+        }
+
+        if (clip_classification == SOC_CLIP_CLASSIFICATION_ACCEPT) {
+            soc_bool was_rasterized;
+            soc_result result;
+            soc_screen_vertex screen[3];
+            const soc_raster_setup_result setup_result =
+                prepare_cached_screen_triangle(
+                    rasterizer,
+                    clip_triangle_vertices,
+                    mesh_indices,
+                    two_sided,
+                    &post_transform_cache,
+                    screen
+                );
+
+            if (setup_result == SOC_RASTER_SETUP_REJECTED) {
+                continue;
+            }
+            result = process_screen_triangle(
+                rasterizer,
+                screen,
+                NULL,
+                prepared,
+                &was_rasterized
+            );
+
+            if (result != SOC_RESULT_OK) {
+                return result;
+            }
+            if (was_rasterized == SOC_TRUE) {
+                ++rasterizer->rasterized_triangle_count;
+            }
+            continue;
+        }
+
+        ++rasterizer->clipped_triangle_count;
+        clipped_vertex_count = clip_triangle(
+            rasterizer,
+            clip_triangle_vertices,
+            active_planes,
+            clipped_polygon
+        );
+        if (clipped_vertex_count < 3u) {
+            continue;
+        }
+
+        for (fan_index = 1u;
+             fan_index + 1u < clipped_vertex_count;
+             ++fan_index) {
+            soc_screen_vertex screen[3];
+            const soc_raster_setup_result setup_result =
+                prepare_screen_triangle(
+                    rasterizer,
+                    &clipped_polygon[0],
+                    &clipped_polygon[fan_index],
+                    &clipped_polygon[fan_index + 1u],
+                    two_sided,
+                    screen
+                );
+
+            if (setup_result == SOC_RASTER_SETUP_REJECTED) {
+                continue;
+            }
+            if (clipped_vertex_count > 3u &&
+                shared_depth_plane == NULL) {
+                configure_shared_fan_depth_plane(
+                    screen,
+                    &fan_depth_plane
+                );
+                shared_depth_plane = &fan_depth_plane;
+            }
+            {
+                soc_bool was_rasterized;
+                const soc_result result = process_screen_triangle(
+                    rasterizer,
+                    screen,
+                    shared_depth_plane,
+                    prepared,
+                    &was_rasterized
+                );
+
+                if (result != SOC_RESULT_OK) {
+                    return result;
+                }
+                if (was_rasterized == SOC_TRUE) {
+                    ++rasterizer->rasterized_triangle_count;
+                }
+            }
+        }
+    }
+
+    return SOC_RESULT_OK;
+}
+
 static soc_result process_occluder_triangles(
     soc_rasterizer* rasterizer,
     const soc_mesh* mesh,
@@ -3600,6 +4024,18 @@ static soc_result process_occluder_triangles(
     soc_raster_prepared_list* prepared
 )
 {
+    if (triangle_count >= SOC_POST_TRANSFORM_CACHE_MINIMUM_TRIANGLES &&
+        mesh->use_post_transform_cache == SOC_TRUE) {
+        return process_occluder_triangles_cached(
+            rasterizer,
+            mesh,
+            object_to_world,
+            triangle_begin,
+            triangle_count,
+            prepared
+        );
+    }
+
     soc_kernel_mat4_f32 clip_from_world;
     soc_kernel_mat4_f32 object_to_world_f32;
     soc_kernel_mat4_f32 clip_from_object;

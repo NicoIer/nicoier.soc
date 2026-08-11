@@ -321,6 +321,77 @@ static int test_invalid_indices_are_atomic(void)
     return 0;
 }
 
+static int test_post_transform_cache_locality_selection(void)
+{
+    float positions[64u * 3u];
+    uint16_t high_locality_indices[96];
+    uint16_t low_locality_indices[96];
+    uint32_t high_locality_indices32[96];
+    uint32_t low_locality_indices32[96];
+    soc_context* context;
+    soc_mesh_desc desc;
+    uint32_t index_type;
+    uint32_t index;
+
+    for (index = 0u; index < 64u; ++index) {
+        positions[index * 3u] = (float)(index & 7u) * 0.125f;
+        positions[index * 3u + 1u] = (float)(index >> 3u) * 0.125f;
+        positions[index * 3u + 2u] = 0.5f;
+    }
+    for (index = 0u; index < 32u; ++index) {
+        high_locality_indices[index * 3u] = 0u;
+        high_locality_indices[index * 3u + 1u] = 1u;
+        high_locality_indices[index * 3u + 2u] = 2u;
+        high_locality_indices32[index * 3u] = 0u;
+        high_locality_indices32[index * 3u + 1u] = 1u;
+        high_locality_indices32[index * 3u + 2u] = 2u;
+    }
+    for (index = 0u; index < 96u; ++index) {
+        low_locality_indices[index] = (uint16_t)(index & 63u);
+        low_locality_indices32[index] = index & 63u;
+    }
+
+    context = create_context();
+    CHECK(context != NULL);
+    for (index_type = 0u; index_type < 2u; ++index_type) {
+        soc_mesh* high_locality = NULL;
+        soc_mesh* low_locality = NULL;
+
+        desc = make_mesh_desc(
+            positions,
+            index_type == 0u
+                ? (const void*)high_locality_indices
+                : (const void*)high_locality_indices32,
+            64u,
+            3u * (uint32_t)sizeof(float),
+            0u,
+            96u,
+            index_type == 0u ? SOC_INDEX_UINT16 : SOC_INDEX_UINT32
+        );
+        CHECK_RESULT(
+            soc_mesh_create(context, &desc, &high_locality),
+            SOC_RESULT_OK
+        );
+        CHECK(high_locality != NULL);
+        CHECK(high_locality->use_post_transform_cache == SOC_TRUE);
+
+        desc.indices = index_type == 0u
+            ? (const void*)low_locality_indices
+            : (const void*)low_locality_indices32;
+        CHECK_RESULT(
+            soc_mesh_create(context, &desc, &low_locality),
+            SOC_RESULT_OK
+        );
+        CHECK(low_locality != NULL);
+        CHECK(low_locality->use_post_transform_cache == SOC_FALSE);
+
+        CHECK_RESULT(soc_mesh_destroy(high_locality), SOC_RESULT_OK);
+        CHECK_RESULT(soc_mesh_destroy(low_locality), SOC_RESULT_OK);
+    }
+    soc_context_destroy(context);
+    return 0;
+}
+
 static int test_invalid_layout_is_atomic(void)
 {
     const float positions[] = {
@@ -440,6 +511,9 @@ int main(void)
         return 1;
     }
     if (test_invalid_indices_are_atomic() != 0) {
+        return 1;
+    }
+    if (test_post_transform_cache_locality_selection() != 0) {
         return 1;
     }
     if (test_invalid_layout_is_atomic() != 0) {

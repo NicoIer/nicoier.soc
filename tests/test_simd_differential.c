@@ -1168,6 +1168,36 @@ static int transform_metadata_is_equal(
         left->common_planes == right->common_planes;
 }
 
+static uint8_t transform_reference_outcode(
+    const soc_kernel_clip_vertex* vertex,
+    soc_clip_depth_range depth_range
+)
+{
+    uint8_t outcode = 0u;
+
+    if (vertex->x + vertex->w < 0.0f) {
+        outcode = (uint8_t)(outcode | (UINT8_C(1) << 0u));
+    }
+    if (vertex->w - vertex->x < 0.0f) {
+        outcode = (uint8_t)(outcode | (UINT8_C(1) << 1u));
+    }
+    if (vertex->y + vertex->w < 0.0f) {
+        outcode = (uint8_t)(outcode | (UINT8_C(1) << 2u));
+    }
+    if (vertex->w - vertex->y < 0.0f) {
+        outcode = (uint8_t)(outcode | (UINT8_C(1) << 3u));
+    }
+    if ((depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE
+            ? vertex->z
+            : vertex->z + vertex->w) < 0.0f) {
+        outcode = (uint8_t)(outcode | (UINT8_C(1) << 4u));
+    }
+    if (vertex->w - vertex->z < 0.0f) {
+        outcode = (uint8_t)(outcode | (UINT8_C(1) << 5u));
+    }
+    return outcode;
+}
+
 static soc_mat4 transform_matrix_from_values(const float values[16])
 {
     const soc_mat4 matrix = {
@@ -1544,6 +1574,144 @@ static int test_transform_reference(void)
         !transform_metadata_is_equal(&scalar_metadata, &neon_metadata)) {
         fprintf(stderr, "transform composed reference mismatch\n");
         return 1;
+    }
+    return 0;
+}
+
+static int test_post_cache_transform_outputs(void)
+{
+    static const float positions[9] = {
+        0.25f, -0.50f, 0.75f,
+        2.00f, 0.25f, 0.50f,
+        0.00f, -2.00f, -0.50f,
+    };
+    const soc_mat4 transform = {
+        .col0 = {1.125f, -0.375f, 0.25f, 0.0625f},
+        .col1 = {0.1875f, 0.9375f, -0.3125f, 0.125f},
+        .col2 = {-0.4375f, 0.21875f, 1.0625f, -0.09375f},
+        .col3 = {0.25f, -0.5f, 0.625f, 1.25f},
+    };
+    soc_kernel_mat4_f32 matrix;
+    uint32_t range;
+
+    soc_kernel_mat4_f32_from_f32(&transform, &matrix);
+    for (range = 0u; range < 2u; ++range) {
+        const soc_clip_depth_range depth_range = range == 0u
+            ? SOC_CLIP_DEPTH_ZERO_TO_ONE
+            : SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE;
+        soc_kernel_clip_vertex scalar_baseline[3];
+        soc_kernel_clip_vertex scalar_cached[3];
+        soc_kernel_clip_vertex neon_baseline[3];
+        soc_kernel_clip_vertex neon_cached[3];
+        soc_kernel_clip_metadata scalar_baseline_metadata;
+        soc_kernel_clip_metadata scalar_cached_metadata;
+        soc_kernel_clip_metadata neon_baseline_metadata;
+        soc_kernel_clip_metadata neon_cached_metadata;
+        uint8_t scalar_outcodes[3];
+        uint8_t neon_outcodes[3];
+        uint32_t mask;
+        uint32_t vertex;
+
+        soc_kernel_transform_triangle_f32_scalar(
+            &matrix,
+            positions,
+            positions + 3u,
+            positions + 6u,
+            depth_range,
+            scalar_baseline,
+            &scalar_baseline_metadata
+        );
+        soc_kernel_transform_triangle_f32_neon(
+            &matrix,
+            positions,
+            positions + 3u,
+            positions + 6u,
+            depth_range,
+            neon_baseline,
+            &neon_baseline_metadata
+        );
+
+        for (mask = 0u; mask < 8u; ++mask) {
+            for (vertex = 0u; vertex < 3u; ++vertex) {
+                scalar_cached[vertex] = scalar_baseline[vertex];
+                neon_cached[vertex] = neon_baseline[vertex];
+                scalar_outcodes[vertex] = transform_reference_outcode(
+                    &scalar_cached[vertex],
+                    depth_range
+                );
+                neon_outcodes[vertex] = transform_reference_outcode(
+                    &neon_cached[vertex],
+                    depth_range
+                );
+                if ((mask & (1u << vertex)) != 0u) {
+                    memset(
+                        &scalar_cached[vertex],
+                        0xa5,
+                        sizeof(scalar_cached[vertex])
+                    );
+                    memset(
+                        &neon_cached[vertex],
+                        0x5a,
+                        sizeof(neon_cached[vertex])
+                    );
+                    scalar_outcodes[vertex] = 0xa5u;
+                    neon_outcodes[vertex] = 0x5au;
+                }
+            }
+            soc_kernel_transform_triangle_post_cache_f32_scalar(
+                &matrix,
+                positions,
+                positions + 3u,
+                positions + 6u,
+                depth_range,
+                scalar_cached,
+                &scalar_cached_metadata,
+                scalar_outcodes,
+                (uint8_t)mask
+            );
+            soc_kernel_transform_triangle_post_cache_f32_neon(
+                &matrix,
+                positions,
+                positions + 3u,
+                positions + 6u,
+                depth_range,
+                neon_cached,
+                &neon_cached_metadata,
+                neon_outcodes,
+                (uint8_t)mask
+            );
+
+            CHECK(memcmp(
+                scalar_baseline,
+                scalar_cached,
+                sizeof(scalar_baseline)
+            ) == 0);
+            CHECK(memcmp(
+                neon_baseline,
+                neon_cached,
+                sizeof(neon_baseline)
+            ) == 0);
+            CHECK(transform_metadata_is_equal(
+                &scalar_baseline_metadata,
+                &scalar_cached_metadata
+            ));
+            CHECK(transform_metadata_is_equal(
+                &neon_baseline_metadata,
+                &neon_cached_metadata
+            ));
+            CHECK(transform_vertices_are_close(scalar_cached, neon_cached));
+            for (vertex = 0u; vertex < 3u; ++vertex) {
+                CHECK(scalar_outcodes[vertex] == transform_reference_outcode(
+                    &scalar_cached[vertex],
+                    depth_range
+                ));
+                CHECK(neon_outcodes[vertex] == transform_reference_outcode(
+                    &neon_cached[vertex],
+                    depth_range
+                ));
+                CHECK(scalar_outcodes[vertex] == neon_outcodes[vertex]);
+            }
+        }
     }
     return 0;
 }
@@ -2582,6 +2750,9 @@ int main(void)
         return 1;
     }
     if (test_transform_differential() != 0) {
+        return 1;
+    }
+    if (test_post_cache_transform_outputs() != 0) {
         return 1;
     }
     if (test_aabb_query_differential(scalar, neon) != 0) {

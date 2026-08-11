@@ -1980,6 +1980,150 @@ static int test_triangle_range_submission_matches_full_mesh(void)
     return 0;
 }
 
+static int test_post_transform_cache_matches_uncached_path(void)
+{
+    enum {
+        WIDTH = 32,
+        HEIGHT = 24,
+        TRIANGLE_COUNT = 32,
+        INDEX_COUNT = TRIANGLE_COUNT * 3,
+    };
+    float positions[] = {
+        -0.8f, -0.8f, 0.35f,
+         0.8f, -0.8f, 0.55f,
+         0.8f,  0.8f, 0.75f,
+        -0.8f,  0.8f, 0.45f,
+
+         1.2f, -0.6f, 0.50f,
+         1.6f,  0.0f, 0.50f,
+         1.2f,  0.6f, 0.50f,
+
+         0.4f, -0.6f, 0.25f,
+         1.4f,  0.0f, 0.50f,
+         0.4f,  0.6f, 0.75f,
+    };
+    uint32_t indices32[INDEX_COUNT];
+    uint16_t indices16[INDEX_COUNT];
+    soc_mesh mesh32 = make_mesh(
+        positions,
+        10u,
+        indices32,
+        (uint32_t)ARRAY_COUNT(indices32)
+    );
+    soc_mesh mesh16 = mesh32;
+    soc_mesh* mesh_variants[2] = {&mesh16, &mesh32};
+    static const uint32_t triangle_patterns[4][3] = {
+        {0u, 1u, 2u},
+        {0u, 2u, 3u},
+        {4u, 5u, 6u},
+        {7u, 8u, 9u},
+    };
+    uint32_t index_type;
+    uint32_t triangle;
+
+    for (triangle = 0u; triangle < TRIANGLE_COUNT; ++triangle) {
+        const uint32_t pattern = triangle % 4u;
+        uint32_t vertex;
+
+        for (vertex = 0u; vertex < 3u; ++vertex) {
+            const uint32_t mesh_index = triangle_patterns[pattern][vertex];
+
+            indices32[triangle * 3u + vertex] = mesh_index;
+            indices16[triangle * 3u + vertex] = (uint16_t)mesh_index;
+        }
+    }
+    mesh16.index_type = SOC_INDEX_UINT16;
+    mesh16.indices = indices16;
+
+    for (index_type = 0u; index_type < 2u; ++index_type) {
+        soc_mesh* mesh = mesh_variants[index_type];
+        const soc_mesh* meshes[] = {mesh};
+        uint32_t range;
+
+        for (range = 0u; range < 2u; ++range) {
+            const soc_frame_desc frame = make_frame_desc(
+                range == 0u
+                    ? SOC_CLIP_DEPTH_ZERO_TO_ONE
+                    : SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE
+            );
+            raster_capture uncached_immediate;
+            raster_capture cached_immediate;
+            raster_capture uncached_prepared;
+            raster_capture cached_prepared;
+            size_t uncached_prepared_count;
+            size_t cached_prepared_count;
+
+            mesh->use_post_transform_cache = SOC_FALSE;
+            CHECK(run_mesh_sequence(
+                meshes,
+                1u,
+                &frame,
+                WIDTH,
+                HEIGHT,
+                &uncached_immediate
+            ) == 0);
+            CHECK(run_prepared_mesh_sequence(
+                meshes,
+                1u,
+                &frame,
+                WIDTH,
+                HEIGHT,
+                &uncached_prepared,
+                &uncached_prepared_count
+            ) == 0);
+
+            mesh->use_post_transform_cache = SOC_TRUE;
+            CHECK(run_mesh_sequence(
+                meshes,
+                1u,
+                &frame,
+                WIDTH,
+                HEIGHT,
+                &cached_immediate
+            ) == 0);
+            CHECK(run_prepared_mesh_sequence(
+                meshes,
+                1u,
+                &frame,
+                WIDTH,
+                HEIGHT,
+                &cached_prepared,
+                &cached_prepared_count
+            ) == 0);
+
+            CHECK(uncached_immediate.clipped_triangle_count == 16u);
+            CHECK(uncached_immediate.rasterized_triangle_count > 16u);
+            CHECK(uncached_prepared_count ==
+                uncached_prepared.rasterized_triangle_count);
+            CHECK(cached_prepared_count == uncached_prepared_count);
+            CHECK(cached_immediate.clipped_triangle_count ==
+                uncached_immediate.clipped_triangle_count);
+            CHECK(cached_immediate.rasterized_triangle_count ==
+                uncached_immediate.rasterized_triangle_count);
+            CHECK(cached_prepared.clipped_triangle_count ==
+                uncached_prepared.clipped_triangle_count);
+            CHECK(cached_prepared.rasterized_triangle_count ==
+                uncached_prepared.rasterized_triangle_count);
+            CHECK(memcmp(
+                cached_immediate.depth,
+                uncached_immediate.depth,
+                uncached_immediate.pixel_count * sizeof(float)
+            ) == 0);
+            CHECK(memcmp(
+                cached_prepared.depth,
+                uncached_prepared.depth,
+                uncached_prepared.pixel_count * sizeof(float)
+            ) == 0);
+
+            release_capture(&cached_prepared);
+            release_capture(&uncached_prepared);
+            release_capture(&cached_immediate);
+            release_capture(&uncached_immediate);
+        }
+    }
+    return 0;
+}
+
 static int test_triangle_range_submission_validates_bounds(void)
 {
     enum {
@@ -4627,6 +4771,9 @@ int main(void)
         return 1;
     }
     if (test_triangle_range_submission_matches_full_mesh() != 0) {
+        return 1;
+    }
+    if (test_post_transform_cache_matches_uncached_path() != 0) {
         return 1;
     }
     if (test_triangle_range_submission_validates_bounds() != 0) {

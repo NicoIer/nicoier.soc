@@ -3,6 +3,9 @@
 
 #include <soc/soc.h>
 
+#define SOC_MESH_POST_TRANSFORM_CACHE_ENTRY_COUNT UINT32_C(16)
+#define SOC_MESH_POST_TRANSFORM_CACHE_RESET_TRIANGLES UINT32_C(256)
+
 struct soc_mesh {
     soc_context* owner;
     soc_mesh* next;
@@ -10,6 +13,7 @@ struct soc_mesh {
     uint32_t vertex_count;
     uint32_t index_count;
     soc_index_type index_type;
+    soc_bool use_post_transform_cache;
     float* positions_xyz;
     void* indices;
 };

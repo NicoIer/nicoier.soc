@@ -155,6 +155,11 @@ soc_result soc_mesh_create_internal(
     soc_result result;
     size_t position_bytes;
     size_t index_bytes;
+    uint32_t post_transform_cache_indices[
+        SOC_MESH_POST_TRANSFORM_CACHE_ENTRY_COUNT
+    ];
+    uint32_t triangle_indices[3];
+    uint32_t post_transform_cache_hit_count = 0u;
     uint32_t index;
 
     if (out_mesh == NULL) {
@@ -198,10 +203,66 @@ soc_result soc_mesh_create_internal(
     memcpy(mesh->indices, desc->indices, index_bytes);
 
     for (index = 0u; index < mesh->index_count; ++index) {
-        if (read_mesh_index(mesh, index) >= mesh->vertex_count) {
+        const uint32_t mesh_index = read_mesh_index(mesh, index);
+
+        if (mesh_index >= mesh->vertex_count) {
             free_mesh(mesh);
             return SOC_RESULT_INVALID_ARGUMENT;
         }
+        if (mesh->index_count > mesh->vertex_count) {
+            const uint32_t triangle_vertex = index % 3u;
+
+            triangle_indices[triangle_vertex] = mesh_index;
+            if (triangle_vertex == 2u) {
+                const uint32_t triangle = index / 3u;
+                uint8_t miss_mask = 0u;
+                uint32_t vertex;
+
+                if (triangle %
+                        SOC_MESH_POST_TRANSFORM_CACHE_RESET_TRIANGLES == 0u) {
+                    uint32_t entry;
+
+                    for (entry = 0u;
+                         entry < SOC_MESH_POST_TRANSFORM_CACHE_ENTRY_COUNT;
+                         ++entry) {
+                        post_transform_cache_indices[entry] = UINT32_MAX;
+                    }
+                }
+                for (vertex = 0u; vertex < 3u; ++vertex) {
+                    const uint32_t vertex_index = triangle_indices[vertex];
+                    const uint32_t entry =
+                        (vertex_index ^ (vertex_index >> 4u)) &
+                            (SOC_MESH_POST_TRANSFORM_CACHE_ENTRY_COUNT - 1u);
+
+                    if (post_transform_cache_indices[entry] == vertex_index) {
+                        ++post_transform_cache_hit_count;
+                    } else {
+                        miss_mask = (uint8_t)(
+                            miss_mask | (UINT8_C(1) << vertex)
+                        );
+                    }
+                }
+                for (vertex = 0u; vertex < 3u; ++vertex) {
+                    const uint32_t vertex_index = triangle_indices[vertex];
+                    const uint32_t entry =
+                        (vertex_index ^ (vertex_index >> 4u)) &
+                            (SOC_MESH_POST_TRANSFORM_CACHE_ENTRY_COUNT - 1u);
+
+                    if ((miss_mask & (UINT8_C(1) << vertex)) != 0u) {
+                        post_transform_cache_indices[entry] = vertex_index;
+                    }
+                }
+            }
+        }
+    }
+    if (mesh->index_count > mesh->vertex_count) {
+        const uint32_t minimum_hit_count =
+            mesh->index_count / 2u + (mesh->index_count & 1u);
+
+        mesh->use_post_transform_cache =
+            post_transform_cache_hit_count >= minimum_hit_count
+                ? SOC_TRUE
+                : SOC_FALSE;
     }
 
     mesh->positions_xyz = malloc(position_bytes);

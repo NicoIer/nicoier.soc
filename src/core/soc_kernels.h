@@ -137,6 +137,18 @@ void soc_kernel_transform_triangle_f32_scalar(
     soc_kernel_clip_metadata* out_metadata
 );
 
+void soc_kernel_transform_triangle_post_cache_f32_scalar(
+    const soc_kernel_mat4_f32* clip_from_object,
+    const float* position0_xyz,
+    const float* position1_xyz,
+    const float* position2_xyz,
+    soc_clip_depth_range depth_range,
+    soc_kernel_clip_vertex out_clip[3],
+    soc_kernel_clip_metadata* out_metadata,
+    uint8_t out_outcodes[3],
+    uint8_t transform_mask
+);
+
 #if defined(__aarch64__) || defined(_M_ARM64) || \
     defined(SOC_BUILD_AARCH32_NEON_FMA)
 void soc_kernel_transform_triangle_f32_neon(
@@ -147,6 +159,18 @@ void soc_kernel_transform_triangle_f32_neon(
     soc_clip_depth_range depth_range,
     soc_kernel_clip_vertex out_clip[3],
     soc_kernel_clip_metadata* out_metadata
+);
+
+void soc_kernel_transform_triangle_post_cache_f32_neon(
+    const soc_kernel_mat4_f32* clip_from_object,
+    const float* position0_xyz,
+    const float* position1_xyz,
+    const float* position2_xyz,
+    soc_clip_depth_range depth_range,
+    soc_kernel_clip_vertex out_clip[3],
+    soc_kernel_clip_metadata* out_metadata,
+    uint8_t out_outcodes[3],
+    uint8_t transform_mask
 );
 #endif
 
@@ -181,6 +205,46 @@ static inline void soc_kernel_transform_triangle_f32(
         depth_range,
         out_clip,
         out_metadata
+    );
+#endif
+}
+
+static inline void soc_kernel_transform_triangle_post_cache_f32(
+    const soc_kernel_mat4_f32* clip_from_object,
+    const float* position0_xyz,
+    const float* position1_xyz,
+    const float* position2_xyz,
+    soc_clip_depth_range depth_range,
+    soc_kernel_clip_vertex out_clip[3],
+    soc_kernel_clip_metadata* out_metadata,
+    uint8_t out_outcodes[3],
+    uint8_t transform_mask
+)
+{
+#if defined(__aarch64__) || defined(_M_ARM64) || \
+    defined(SOC_BUILD_AARCH32_NEON_FMA)
+    soc_kernel_transform_triangle_post_cache_f32_neon(
+        clip_from_object,
+        position0_xyz,
+        position1_xyz,
+        position2_xyz,
+        depth_range,
+        out_clip,
+        out_metadata,
+        out_outcodes,
+        transform_mask
+    );
+#else
+    soc_kernel_transform_triangle_post_cache_f32_scalar(
+        clip_from_object,
+        position0_xyz,
+        position1_xyz,
+        position2_xyz,
+        depth_range,
+        out_clip,
+        out_metadata,
+        out_outcodes,
+        transform_mask
     );
 #endif
 }

@@ -162,3 +162,55 @@ void soc_kernel_transform_triangle_f32_scalar(
         );
     }
 }
+
+void soc_kernel_transform_triangle_post_cache_f32_scalar(
+    const soc_kernel_mat4_f32* clip_from_object,
+    const float* position0_xyz,
+    const float* position1_xyz,
+    const float* position2_xyz,
+    soc_clip_depth_range depth_range,
+    soc_kernel_clip_vertex out_clip[3],
+    soc_kernel_clip_metadata* out_metadata,
+    uint8_t out_outcodes[3],
+    uint8_t transform_mask
+)
+{
+    const float* positions[3] = {
+        position0_xyz,
+        position1_xyz,
+        position2_xyz,
+    };
+    size_t index;
+
+    out_metadata->active_planes = 0u;
+    out_metadata->common_planes = UINT8_C(0x3f);
+
+    for (index = 0u; index < 3u; ++index) {
+        if ((transform_mask & (UINT8_C(1) << index)) == 0u) {
+            continue;
+        }
+        const soc_kernel_clip_vertex object_position = {
+            positions[index][0],
+            positions[index][1],
+            positions[index][2],
+            1.0f,
+        };
+        out_clip[index] = transform_vertex_f32(
+            clip_from_object,
+            &object_position
+        );
+        const uint8_t outcode = compute_clip_outcode_f32(
+            &out_clip[index],
+            depth_range
+        );
+        out_outcodes[index] = outcode;
+    }
+    for (index = 0u; index < 3u; ++index) {
+        out_metadata->active_planes = (uint8_t)(
+            out_metadata->active_planes | out_outcodes[index]
+        );
+        out_metadata->common_planes = (uint8_t)(
+            out_metadata->common_planes & out_outcodes[index]
+        );
+    }
+}
