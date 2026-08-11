@@ -629,6 +629,141 @@ static int test_compact_prepared_edges_are_integer_exact(void)
     return 0;
 }
 
+static soc_bool prepared_region_is_edge_rejected_reference(
+    const soc_raster_prepared_triangle* prepared,
+    const soc_raster_prepared_region* region
+)
+{
+    uint32_t edge_index;
+
+    for (edge_index = 0u; edge_index < 3u; ++edge_index) {
+        const soc_raster_prepared_edge* edge =
+            &prepared->edges[edge_index];
+        soc_bool all_negative = SOC_TRUE;
+        uint32_t y;
+
+        for (y = region->minimum_y; y < region->end_y; ++y) {
+            uint32_t x;
+
+            for (x = region->minimum_x; x < region->end_x; ++x) {
+                const int64_t value = edge->sample_origin +
+                    edge->step_x * (int64_t)x +
+                    edge->step_y * (int64_t)y;
+
+                if (value >= 0) {
+                    all_negative = SOC_FALSE;
+                    break;
+                }
+            }
+            if (all_negative != SOC_TRUE) {
+                break;
+            }
+        }
+        if (all_negative == SOC_TRUE) {
+            return SOC_TRUE;
+        }
+    }
+    return SOC_FALSE;
+}
+
+static int test_prepared_region_edge_rejection_matches_samples(void)
+{
+    soc_raster_prepared_triangle prepared = {0};
+    soc_raster_prepared_region region = {0u, 0u, 1u, 1u};
+    uint32_t random_state = UINT32_C(0x58c913af);
+    uint32_t case_index;
+
+    prepared.edges[0].sample_origin = -1;
+    CHECK(soc_raster_prepared_region_is_edge_rejected(
+        &prepared,
+        &region
+    ) == SOC_TRUE);
+    prepared.edges[0].sample_origin = 0;
+    CHECK(soc_raster_prepared_region_is_edge_rejected(
+        &prepared,
+        &region
+    ) == SOC_FALSE);
+
+    region = (soc_raster_prepared_region){64u, 64u, 67u, 65u};
+    prepared.edges[0].sample_origin = -67;
+    prepared.edges[0].step_x = 1;
+    CHECK(soc_raster_prepared_region_is_edge_rejected(
+        &prepared,
+        &region
+    ) == SOC_TRUE);
+    prepared.edges[0].sample_origin = -66;
+    CHECK(soc_raster_prepared_region_is_edge_rejected(
+        &prepared,
+        &region
+    ) == SOC_FALSE);
+    prepared.edges[0].sample_origin = 63;
+    prepared.edges[0].step_x = -1;
+    CHECK(soc_raster_prepared_region_is_edge_rejected(
+        &prepared,
+        &region
+    ) == SOC_TRUE);
+    prepared.edges[0].sample_origin = 64;
+    CHECK(soc_raster_prepared_region_is_edge_rejected(
+        &prepared,
+        &region
+    ) == SOC_FALSE);
+
+    region = (soc_raster_prepared_region){0u, 0u, 1u, 32u};
+    prepared.edges[0].sample_origin = -32;
+    prepared.edges[0].step_x = 0;
+    prepared.edges[0].step_y = 1;
+    CHECK(soc_raster_prepared_region_is_edge_rejected(
+        &prepared,
+        &region
+    ) == SOC_TRUE);
+    prepared.edges[0].sample_origin = -31;
+    CHECK(soc_raster_prepared_region_is_edge_rejected(
+        &prepared,
+        &region
+    ) == SOC_FALSE);
+
+    for (case_index = 0u; case_index < 4096u; ++case_index) {
+        const uint32_t width = random_u32(&random_state) %
+            SOC_RASTER_LOCK_TILE_SIZE + 1u;
+        const uint32_t height = random_u32(&random_state) %
+            SOC_RASTER_LOCK_TILE_SIZE + 1u;
+        const uint32_t maximum_minimum_x =
+            SOC_MAX_RASTER_DIMENSION - width;
+        const uint32_t maximum_minimum_y =
+            SOC_MAX_RASTER_DIMENSION - height;
+        uint32_t edge_index;
+
+        region.minimum_x = (case_index & 1u) != 0u
+            ? maximum_minimum_x
+            : random_u32(&random_state) % (maximum_minimum_x + 1u);
+        region.minimum_y = (case_index & 2u) != 0u
+            ? maximum_minimum_y
+            : random_u32(&random_state) % (maximum_minimum_y + 1u);
+        region.end_x = region.minimum_x + width;
+        region.end_y = region.minimum_y + height;
+        prepared.bounds = region;
+        for (edge_index = 0u; edge_index < 3u; ++edge_index) {
+            prepared.edges[edge_index].sample_origin =
+                (int64_t)(random_u32(&random_state) & UINT32_C(0x1fffff)) -
+                INT64_C(0x100000);
+            prepared.edges[edge_index].step_x =
+                (int64_t)(random_u32(&random_state) & UINT32_C(0x1fffff)) -
+                INT64_C(0x100000);
+            prepared.edges[edge_index].step_y =
+                (int64_t)(random_u32(&random_state) & UINT32_C(0x1fffff)) -
+                INT64_C(0x100000);
+        }
+        CHECK(soc_raster_prepared_region_is_edge_rejected(
+            &prepared,
+            &region
+        ) == prepared_region_is_edge_rejected_reference(
+            &prepared,
+            &region
+        ));
+    }
+    return 0;
+}
+
 static double snap_screen_coordinate_q8(double coordinate)
 {
     return (double)(int64_t)(coordinate * 256.0 + 0.5) / 256.0;
@@ -4459,6 +4594,9 @@ static int test_shared_tile_locks_and_no_clear_begin(void)
 int main(void)
 {
     if (test_compact_prepared_edges_are_integer_exact() != 0) {
+        return 1;
+    }
+    if (test_prepared_region_edge_rejection_matches_samples() != 0) {
         return 1;
     }
     if (test_q8_snapped_coverage_and_depth_match_f32_math() != 0) {

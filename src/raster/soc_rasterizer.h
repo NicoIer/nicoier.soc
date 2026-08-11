@@ -73,6 +73,42 @@ typedef struct soc_raster_prepared_triangle {
     uint16_t end_tile_row;
 } soc_raster_prepared_triangle;
 
+/*
+ * Exact Q8 half-space rejection for a non-empty pixel-sample region. The
+ * prepared edge origins already include the top-left bias at sample
+ * (0.5, 0.5). Selecting each affine edge's maximizing corner preserves the
+ * -1/0 exclusion boundary exactly. A false result remains conservative: the
+ * three edges may attain their maxima at different samples.
+ */
+static inline soc_bool soc_raster_prepared_region_is_edge_rejected(
+    const soc_raster_prepared_triangle* prepared,
+    const soc_raster_prepared_region* region
+)
+{
+    const uint32_t maximum_x = region->end_x - 1u;
+    const uint32_t maximum_y = region->end_y - 1u;
+    uint32_t edge_index;
+
+    for (edge_index = 0u; edge_index < 3u; ++edge_index) {
+        const soc_raster_prepared_edge* edge =
+            &prepared->edges[edge_index];
+        const uint32_t edge_x = edge->step_x >= 0
+            ? maximum_x
+            : region->minimum_x;
+        const uint32_t edge_y = edge->step_y >= 0
+            ? maximum_y
+            : region->minimum_y;
+        const int64_t maximum = edge->sample_origin +
+            edge->step_x * (int64_t)edge_x +
+            edge->step_y * (int64_t)edge_y;
+
+        if (maximum < 0) {
+            return SOC_TRUE;
+        }
+    }
+    return SOC_FALSE;
+}
+
 /* Zero initialization produces an empty, usable list. */
 typedef struct soc_raster_prepared_list {
     soc_raster_prepared_triangle* data;

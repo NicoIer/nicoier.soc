@@ -200,6 +200,43 @@ static soc_result create_tiled_hot_mesh(
     return soc_mesh_create(context, &desc, out_mesh);
 }
 
+static soc_result create_long_thin_mesh(
+    soc_context* context,
+    soc_mesh** out_mesh
+)
+{
+    enum {
+        TRIANGLE_COUNT = 4096,
+        INDEX_COUNT = TRIANGLE_COUNT * 3,
+    };
+    static const float vertices[] = {
+        -0.95f, -0.95f, 0.6f,
+         0.95f,  0.95f, 0.6f,
+         0.95f,  0.94f, 0.6f,
+    };
+    uint16_t indices[INDEX_COUNT];
+    soc_mesh_desc desc;
+    uint32_t triangle;
+
+    for (triangle = 0u; triangle < TRIANGLE_COUNT; ++triangle) {
+        const uint32_t first_index = triangle * 3u;
+
+        indices[first_index] = 0u;
+        indices[first_index + 1u] = 1u;
+        indices[first_index + 2u] = 2u;
+    }
+    desc.struct_size = sizeof(desc);
+    desc.flags = SOC_MESH_FLAG_TWO_SIDED;
+    desc.vertices = vertices;
+    desc.indices = indices;
+    desc.vertex_count = 3u;
+    desc.vertex_stride = 3u * sizeof(float);
+    desc.position_offset = 0u;
+    desc.index_count = INDEX_COUNT;
+    desc.index_type = SOC_INDEX_UINT16;
+    return soc_mesh_create(context, &desc, out_mesh);
+}
+
 static soc_frame_desc make_frame(void)
 {
     const soc_frame_desc frame = {
@@ -587,12 +624,95 @@ static int test_tiled_hot_merge_results_match(void)
     return 0;
 }
 
+static int test_long_thin_tiled_results_match(void)
+{
+    enum { TRIANGLE_COUNT = 4096 };
+    const soc_mat4 transform = identity_matrix();
+    const soc_frame_desc frame = make_frame();
+    soc_occluder_group single_group;
+    soc_occluder_group parallel_group;
+    soc_occlusion_build_desc single_desc;
+    soc_occlusion_build_desc parallel_desc;
+    soc_build_stats stats = {
+        .struct_size = sizeof(soc_build_stats),
+    };
+    soc_context* single_context = NULL;
+    soc_context* parallel_context = NULL;
+    soc_mesh* single_mesh = NULL;
+    soc_mesh* parallel_mesh = NULL;
+    soc_snapshot* single_snapshot = NULL;
+    soc_snapshot* parallel_snapshot = NULL;
+
+    CHECK_RESULT(create_context(1u, &single_context), SOC_RESULT_OK);
+    CHECK_RESULT(create_context(4u, &parallel_context), SOC_RESULT_OK);
+    CHECK_RESULT(
+        create_long_thin_mesh(single_context, &single_mesh),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        create_long_thin_mesh(parallel_context, &parallel_mesh),
+        SOC_RESULT_OK
+    );
+
+    single_group.mesh = single_mesh;
+    single_group.object_to_world = &transform;
+    single_group.instance_count = 1u;
+    single_group.flags = SOC_OCCLUDER_GROUP_FLAG_NONE;
+    parallel_group = single_group;
+    parallel_group.mesh = parallel_mesh;
+
+    single_desc.struct_size = sizeof(single_desc);
+    single_desc.flags = SOC_OCCLUSION_BUILD_FLAG_NONE;
+    single_desc.frame = &frame;
+    single_desc.groups = &single_group;
+    single_desc.group_count = 1u;
+    single_desc.group_stride = sizeof(single_group);
+    parallel_desc = single_desc;
+    parallel_desc.groups = &parallel_group;
+
+    CHECK_RESULT(
+        soc_occlusion_build(
+            single_context,
+            &single_desc,
+            &single_snapshot
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        soc_occlusion_build(
+            parallel_context,
+            &parallel_desc,
+            &parallel_snapshot
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK(compare_snapshots(single_snapshot, parallel_snapshot) == 0);
+    CHECK_RESULT(
+        soc_snapshot_get_build_stats(parallel_snapshot, &stats),
+        SOC_RESULT_OK
+    );
+    CHECK(stats.input_triangle_count == TRIANGLE_COUNT);
+    CHECK(stats.clipped_triangle_count == 0u);
+    CHECK(stats.rasterized_triangle_count == TRIANGLE_COUNT);
+
+    soc_snapshot_destroy(parallel_snapshot);
+    soc_snapshot_destroy(single_snapshot);
+    CHECK_RESULT(soc_mesh_destroy(parallel_mesh), SOC_RESULT_OK);
+    CHECK_RESULT(soc_mesh_destroy(single_mesh), SOC_RESULT_OK);
+    soc_context_destroy(parallel_context);
+    soc_context_destroy(single_context);
+    return 0;
+}
+
 int main(void)
 {
     if (test_worker_results_match() != 0) {
         return 1;
     }
     if (test_chunked_mesh_results_match() != 0) {
+        return 1;
+    }
+    if (test_long_thin_tiled_results_match() != 0) {
         return 1;
     }
     return test_tiled_hot_merge_results_match();

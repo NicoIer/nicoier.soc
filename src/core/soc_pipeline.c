@@ -35,6 +35,7 @@
 #define SOC_PARALLEL_TILE_REFERENCE_CHUNK_CAPACITY UINT32_C(15)
 #define SOC_PARALLEL_TILE_REFERENCE_CHUNK_INITIAL_CAPACITY UINT32_C(64)
 #define SOC_PARALLEL_TILE_REFERENCE_CHUNK_INVALID UINT32_MAX
+#define SOC_PARALLEL_TILE_EDGE_TEST_MINIMUM_TILES ((size_t)64u)
 #define SOC_PARALLEL_TILED_MAX_LANE_COUNT UINT32_C(32)
 #define SOC_PARALLEL_DEPTH_SCRATCH_BUDGET_BYTES \
     ((size_t)256u * 1024u * 1024u)
@@ -793,6 +794,115 @@ SOC_PIPELINE_FORCE_INLINE soc_result append_parallel_tile_reference(
     return SOC_RESULT_OK;
 }
 
+SOC_PIPELINE_FORCE_INLINE soc_result bin_parallel_prepared_triangle(
+    soc_parallel_prepare_state* state,
+    size_t lane_tile_offset,
+    soc_parallel_tile_reference_arena* tile_reference_arena,
+    const soc_raster_prepared_triangle* prepared,
+    uint32_t prepared_index
+)
+{
+    soc_prepared_tile_range range;
+    size_t tile_column_count;
+    size_t tile_row_count;
+    soc_bool test_tile_edges;
+    size_t tile_row;
+
+    calculate_prepared_tile_range(prepared, &range);
+    tile_column_count = range.end_column - range.first_column;
+    tile_row_count = range.end_row - range.first_row;
+    test_tile_edges = tile_column_count * tile_row_count >=
+            SOC_PARALLEL_TILE_EDGE_TEST_MINIMUM_TILES
+        ? SOC_TRUE
+        : SOC_FALSE;
+    if (test_tile_edges != SOC_TRUE) {
+        for (tile_row = range.first_row;
+             tile_row < range.end_row;
+             ++tile_row) {
+            size_t tile_column;
+
+            for (tile_column = range.first_column;
+                 tile_column < range.end_column;
+                 ++tile_column) {
+                const size_t tile_index =
+                    tile_row * state->tile_column_count + tile_column;
+                const soc_result append_result =
+                    append_parallel_tile_reference(
+                        &state->tile_bins[
+                            lane_tile_offset + tile_index
+                        ],
+                        tile_reference_arena,
+                        prepared_index
+                    );
+
+                if (append_result != SOC_RESULT_OK) {
+                    return append_result;
+                }
+            }
+        }
+        return SOC_RESULT_OK;
+    }
+    for (tile_row = range.first_row;
+         tile_row < range.end_row;
+         ++tile_row) {
+        const uint32_t tile_minimum_y = (uint32_t)(
+            tile_row * (size_t)SOC_RASTER_LOCK_TILE_SIZE
+        );
+        const uint32_t tile_end_y =
+            tile_minimum_y + SOC_RASTER_LOCK_TILE_SIZE;
+        soc_raster_prepared_region region;
+        size_t tile_column;
+
+        region.minimum_y = prepared->bounds.minimum_y > tile_minimum_y
+            ? prepared->bounds.minimum_y
+            : tile_minimum_y;
+        region.end_y = prepared->bounds.end_y < tile_end_y
+            ? prepared->bounds.end_y
+            : tile_end_y;
+        for (tile_column = range.first_column;
+             tile_column < range.end_column;
+             ++tile_column) {
+            const uint32_t tile_minimum_x = (uint32_t)(
+                tile_column * (size_t)SOC_RASTER_LOCK_TILE_SIZE
+            );
+            const uint32_t tile_end_x =
+                tile_minimum_x + SOC_RASTER_LOCK_TILE_SIZE;
+            const size_t tile_index =
+                tile_row * state->tile_column_count + tile_column;
+            soc_parallel_tile_bin* bin = &state->tile_bins[
+                lane_tile_offset + tile_index
+            ];
+
+            region.minimum_x =
+                prepared->bounds.minimum_x > tile_minimum_x
+                ? prepared->bounds.minimum_x
+                : tile_minimum_x;
+            region.end_x = prepared->bounds.end_x < tile_end_x
+                ? prepared->bounds.end_x
+                : tile_end_x;
+            if (soc_raster_prepared_region_is_edge_rejected(
+                    prepared,
+                    &region
+                ) == SOC_TRUE) {
+                continue;
+            }
+            {
+                const soc_result append_result =
+                    append_parallel_tile_reference(
+                        bin,
+                        tile_reference_arena,
+                        prepared_index
+                    );
+
+                if (append_result != SOC_RESULT_OK) {
+                    return append_result;
+                }
+            }
+        }
+    }
+    return SOC_RESULT_OK;
+}
+
 typedef struct soc_parallel_tile_bin_iterator {
     const soc_parallel_tile_bin* bin;
     const soc_parallel_tile_reference_arena* arena;
@@ -922,43 +1032,23 @@ static soc_bool prepare_parallel_work_item_range(
              ++prepared_index) {
             const soc_raster_prepared_triangle* prepared =
                 &prepared_list->data[prepared_index];
-            soc_prepared_tile_range range;
-            size_t tile_row;
+            soc_result bin_result;
 
             if (prepared_index > (size_t)UINT32_MAX) {
                 state->lane_results[worker_index] =
                     SOC_RESULT_OUT_OF_MEMORY;
                 return SOC_FALSE;
             }
-            calculate_prepared_tile_range(prepared, &range);
-            for (tile_row = range.first_row;
-                 tile_row < range.end_row;
-                 ++tile_row) {
-                size_t tile_column;
-
-                for (tile_column = range.first_column;
-                     tile_column < range.end_column;
-                     ++tile_column) {
-                    const size_t tile_index =
-                        tile_row * state->tile_column_count +
-                        tile_column;
-                    soc_parallel_tile_bin* bin =
-                        &state->tile_bins[
-                            lane_tile_offset + tile_index
-                        ];
-                    const soc_result append_result =
-                        append_parallel_tile_reference(
-                            bin,
-                            tile_reference_arena,
-                            (uint32_t)prepared_index
-                        );
-
-                    if (append_result != SOC_RESULT_OK) {
-                        state->lane_results[worker_index] =
-                            append_result;
-                        return SOC_FALSE;
-                    }
-                }
+            bin_result = bin_parallel_prepared_triangle(
+                state,
+                lane_tile_offset,
+                tile_reference_arena,
+                prepared,
+                (uint32_t)prepared_index
+            );
+            if (bin_result != SOC_RESULT_OK) {
+                state->lane_results[worker_index] = bin_result;
+                return SOC_FALSE;
             }
         }
     }
@@ -1060,43 +1150,23 @@ static void parallel_prepare_work_items(
                  ++prepared_index) {
                 const soc_raster_prepared_triangle* prepared =
                     &prepared_list->data[prepared_index];
-                soc_prepared_tile_range range;
-                size_t tile_row;
+                soc_result bin_result;
 
                 if (prepared_index > (size_t)UINT32_MAX) {
                     state->lane_results[worker_index] =
                         SOC_RESULT_OUT_OF_MEMORY;
                     return;
                 }
-                calculate_prepared_tile_range(prepared, &range);
-                for (tile_row = range.first_row;
-                     tile_row < range.end_row;
-                     ++tile_row) {
-                    size_t tile_column;
-
-                    for (tile_column = range.first_column;
-                         tile_column < range.end_column;
-                         ++tile_column) {
-                        const size_t tile_index =
-                            tile_row * state->tile_column_count +
-                            tile_column;
-                        soc_parallel_tile_bin* bin =
-                            &state->tile_bins[
-                                lane_tile_offset + tile_index
-                            ];
-                        const soc_result append_result =
-                            append_parallel_tile_reference(
-                                bin,
-                                tile_reference_arena,
-                                (uint32_t)prepared_index
-                            );
-
-                        if (append_result != SOC_RESULT_OK) {
-                            state->lane_results[worker_index] =
-                                append_result;
-                            return;
-                        }
-                    }
+                bin_result = bin_parallel_prepared_triangle(
+                    state,
+                    lane_tile_offset,
+                    tile_reference_arena,
+                    prepared,
+                    (uint32_t)prepared_index
+                );
+                if (bin_result != SOC_RESULT_OK) {
+                    state->lane_results[worker_index] = bin_result;
+                    return;
                 }
             }
         }
