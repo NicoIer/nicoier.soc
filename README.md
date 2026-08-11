@@ -48,6 +48,29 @@ benchmark 默认不构建。使用
   --width 1280 --height 720 --fov 60
 ```
 
+## 通过 ADB 在 Android 上测试性能
+
+连接 `arm64-v8a` 设备并启用 USB 调试。benchmark 与 `soc` 静态链接，推送
+单个可执行文件即可运行：
+
+```sh
+export SOC_ANDROID_NDK="/absolute/path/to/android-ndk"
+
+cmake --preset android-arm64-v8a \
+  -DSOC_BUILD_SHARED=OFF \
+  -DSOC_BUILD_BENCHMARKS=ON
+cmake --build --preset android-arm64-v8a --target soc_bench --parallel
+
+adb wait-for-device
+adb shell getprop ro.product.cpu.abi
+adb push build/platform/android-arm64-v8a/benchmarks/soc_bench \
+  /data/local/tmp/soc_bench
+adb shell chmod 755 /data/local/tmp/soc_bench
+adb shell /data/local/tmp/soc_bench \
+  --suite full --samples 15 --sample-ms 200 \
+  --output /data/local/tmp/soc-bench.json
+adb pull /data/local/tmp/soc-bench.json ./soc-bench-android.json
+```
 
 ## 参考
 
