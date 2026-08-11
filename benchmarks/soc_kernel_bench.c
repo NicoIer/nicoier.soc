@@ -474,7 +474,7 @@ static uint64_t checksum_f32(const float* values, size_t count)
 }
 
 static uint64_t checksum_transform_outputs(
-    const soc_kernel_clip_vertex outputs[TRANSFORM_POSITION_SET_COUNT][3],
+    soc_kernel_clip_vertex outputs[TRANSFORM_POSITION_SET_COUNT][3],
     const soc_kernel_clip_metadata metadata[TRANSFORM_POSITION_SET_COUNT]
 )
 {
@@ -1431,8 +1431,15 @@ static int run_transform_case(
     int success = 0;
     const transform_triangle_fn scalar_transform =
         soc_kernel_transform_triangle_f32_scalar;
+#if defined(__aarch64__) || defined(_M_ARM64) || \
+    ((defined(__arm__) || defined(_M_ARM)) && \
+        defined(SOC_BUILD_AARCH32_NEON_FMA))
     const transform_triangle_fn neon_transform =
         soc_kernel_transform_triangle_f32_neon;
+#else
+    const transform_triangle_fn neon_transform =
+        soc_kernel_transform_triangle_f32_scalar;
+#endif
 
     initialize_transform_workload(&scalar_workload);
     initialize_transform_workload(&neon_workload);

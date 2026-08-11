@@ -573,9 +573,15 @@ static int test_compact_prepared_edges_are_integer_exact(void)
     uint32_t random_state = UINT32_C(0x91e10da5);
     size_t edge_index;
 
-    CHECK(sizeof(soc_raster_prepared_edge) == 24u);
-    CHECK(sizeof(soc_raster_prepared_triangle) == 108u ||
-        sizeof(soc_raster_prepared_triangle) == 112u);
+    _Static_assert(
+        sizeof(soc_raster_prepared_edge) == 24u,
+        "unexpected prepared edge size"
+    );
+    _Static_assert(
+        sizeof(soc_raster_prepared_triangle) == 108u ||
+            sizeof(soc_raster_prepared_triangle) == 112u,
+        "unexpected prepared triangle size"
+    );
     for (edge_index = 0u;
          edge_index < ARRAY_COUNT(boundary_edges);
          ++edge_index) {
@@ -815,7 +821,7 @@ static int test_q8_snapped_coverage_and_depth_match_f32_math(void)
                 {
                     const double point_x = (double)x + 0.5;
                     const double point_y = (double)y + 0.5;
-                    const double area = continuous_edge_value(
+                    const double triangle_area = continuous_edge_value(
                         &reconstructed[0],
                         &reconstructed[1],
                         reconstructed[2].x,
@@ -843,7 +849,7 @@ static int test_q8_snapped_coverage_and_depth_match_f32_math(void)
                         (float)weight0 * reconstructed[0].depth +
                         (float)weight1 * reconstructed[1].depth +
                         (float)weight2 * reconstructed[2].depth
-                    ) / (float)area;
+                    ) / (float)triangle_area;
 
                     CHECK(stored_depth >= 0.0f);
                     CHECK(stored_depth <= 1.0f);
@@ -2111,9 +2117,15 @@ static int test_prepared_list_and_invalid_state_semantics(void)
     uint64_t clipped_count;
     uint64_t rasterized_count;
 
-    CHECK(sizeof(soc_raster_prepared_edge) == 24u);
-    CHECK(sizeof(soc_raster_prepared_triangle) == 108u ||
-        sizeof(soc_raster_prepared_triangle) == 112u);
+    _Static_assert(
+        sizeof(soc_raster_prepared_edge) == 24u,
+        "unexpected prepared edge size"
+    );
+    _Static_assert(
+        sizeof(soc_raster_prepared_triangle) == 108u ||
+            sizeof(soc_raster_prepared_triangle) == 112u,
+        "unexpected prepared triangle size"
+    );
     CHECK(soc_raster_prepared_list_reserve(NULL, 1u) ==
         SOC_RESULT_INVALID_ARGUMENT);
     CHECK(soc_raster_prepared_list_reserve(&list, 2u) == SOC_RESULT_OK);

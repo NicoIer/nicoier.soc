@@ -1096,8 +1096,6 @@ static int allocate_queries(workload* work)
             ? 0.05f
             : (definition->large_queries ? 0.04f : 0.01f);
         float center_z = case_occluded_depth(definition);
-        float minimum_z;
-        float maximum_z;
 
         if (definition->query_pattern == QUERY_VISIBLE) {
             center_z = case_visible_depth(definition);
@@ -1117,16 +1115,12 @@ static int allocate_queries(workload* work)
                     center_z = 1.0f;
                     half_depth = 0.10f;
                 } else {
-                    minimum_z = 0.95f;
-                    maximum_z = 1.05f;
-                }
-                if (perspective != SOC_TRUE) {
                     work->bounds[index].min.x = x - radius;
                     work->bounds[index].min.y = y - radius;
-                    work->bounds[index].min.z = minimum_z;
+                    work->bounds[index].min.z = 0.95f;
                     work->bounds[index].max.x = x + radius;
                     work->bounds[index].max.y = y + radius;
-                    work->bounds[index].max.z = maximum_z;
+                    work->bounds[index].max.z = 1.05f;
                     continue;
                 }
             }
@@ -1136,14 +1130,12 @@ static int allocate_queries(workload* work)
             y *= center_z;
             radius *= center_z;
         }
-        minimum_z = center_z - half_depth;
-        maximum_z = center_z + half_depth;
         work->bounds[index].min.x = x - radius;
         work->bounds[index].min.y = y - radius;
-        work->bounds[index].min.z = minimum_z;
+        work->bounds[index].min.z = center_z - half_depth;
         work->bounds[index].max.x = x + radius;
         work->bounds[index].max.y = y + radius;
-        work->bounds[index].max.z = maximum_z;
+        work->bounds[index].max.z = center_z + half_depth;
     }
     return 0;
 }

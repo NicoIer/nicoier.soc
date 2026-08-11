@@ -472,11 +472,11 @@ static int test_masked_layout_clear_and_build(void)
     };
     const float level_two[] = {0.10f};
     soc_projected_aabb projected = {
-        .minimum_ndc_x = 0.10,
-        .maximum_ndc_x = 0.40,
-        .minimum_ndc_y = -0.40,
-        .maximum_ndc_y = -0.20,
-        .nearest_depth = 0.50,
+        .minimum_ndc_x = 0.10f,
+        .maximum_ndc_x = 0.40f,
+        .minimum_ndc_y = -0.40f,
+        .maximum_ndc_y = -0.20f,
+        .nearest_depth = 0.50f,
     };
     soc_hiz hiz = {0};
     size_t index;
@@ -505,7 +505,7 @@ static int test_masked_layout_clear_and_build(void)
         soc_test_projected_aabb_scalar(&hiz, &projected) ==
             SOC_VISIBILITY_OCCLUDED
     );
-    projected.minimum_ndc_x = -0.20;
+    projected.minimum_ndc_x = -0.20f;
     CHECK(
         soc_test_projected_aabb_scalar(&hiz, &projected) ==
             SOC_VISIBILITY_VISIBLE
@@ -659,8 +659,14 @@ static int test_split_band_build_matches_serial(void)
     };
     size_t shape_index;
 
-    CHECK(SOC_HIZ_LOWER_BAND_HEIGHT == 16u);
-    CHECK(SOC_HIZ_LOWER_LEVEL_COUNT == 4u);
+    _Static_assert(
+        SOC_HIZ_LOWER_BAND_HEIGHT == 16u,
+        "unexpected lower Hi-Z band height"
+    );
+    _Static_assert(
+        SOC_HIZ_LOWER_LEVEL_COUNT == 4u,
+        "unexpected lower Hi-Z level count"
+    );
     for (shape_index = 0u;
          shape_index < ARRAY_COUNT(shapes);
          ++shape_index) {
