@@ -5,6 +5,17 @@ soc_enable_warnings(soc_test_abi)
 
 add_test(NAME soc.abi COMMAND soc_test_abi)
 
+add_executable(soc_test_device_support test_device_support.c)
+target_link_libraries(soc_test_device_support PRIVATE soc::soc)
+target_include_directories(
+    soc_test_device_support
+    PRIVATE "${PROJECT_SOURCE_DIR}/src"
+)
+target_compile_features(soc_test_device_support PRIVATE c_std_17)
+soc_enable_warnings(soc_test_device_support)
+
+add_test(NAME soc.device_support COMMAND soc_test_device_support)
+
 add_executable(soc_test_types test_types.c)
 target_link_libraries(soc_test_types PRIVATE soc::soc)
 target_compile_features(soc_test_types PRIVATE c_std_17)

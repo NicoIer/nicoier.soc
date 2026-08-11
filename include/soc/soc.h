@@ -35,6 +35,15 @@ extern "C" {
 SOC_API uint32_t SOC_CALL soc_get_abi_version(void);
 
 /*
+ * Safe to call immediately after loading the library, before any other SOC
+ * operation. Returns SOC_TRUE when this library's ISA requirements are
+ * available to the current process. If it returns SOC_FALSE, only this
+ * function and soc_get_abi_version() may be called; all other SOC operations
+ * are unsupported.
+ */
+SOC_API soc_bool SOC_CALL soc_device_is_supported(void);
+
+/*
  * config->worker_count is the total execution lane count, including the
  * thread which calls build. Zero selects the online logical CPU count (clamped
  * to 1..SOC_MAX_WORKER_COUNT); one keeps build execution serial.

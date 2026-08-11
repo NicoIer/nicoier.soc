@@ -228,7 +228,15 @@ static int test_invalid_arguments(void)
 
 int main(void)
 {
+    const soc_bool device_supported = soc_device_is_supported();
+
     if (test_version() != 0) {
+        return 1;
+    }
+    if (device_supported == SOC_FALSE) {
+        return 0;
+    }
+    if (device_supported != SOC_TRUE) {
         return 1;
     }
     if (test_context_lifetime() != 0) {

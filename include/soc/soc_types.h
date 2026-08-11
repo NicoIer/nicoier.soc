@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define SOC_ABI_VERSION_MAJOR 3u
-#define SOC_ABI_VERSION_MINOR 0u
+#define SOC_ABI_VERSION_MINOR 1u
 #define SOC_ABI_VERSION \
     ((SOC_ABI_VERSION_MAJOR << 16u) | SOC_ABI_VERSION_MINOR)
 

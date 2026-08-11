@@ -33,7 +33,7 @@ endif()
 
 project(
     soc
-    VERSION 3.0.0
+    VERSION 3.1.0
     DESCRIPTION "CPU software rasterization and occlusion culling library"
     LANGUAGES C
 )

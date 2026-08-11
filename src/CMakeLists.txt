@@ -23,6 +23,50 @@ if(_soc_build_aarch32_neon_fma)
 endif()
 
 add_library(
+    soc_device_support
+    OBJECT
+        abi/soc_device_support.c
+)
+target_include_directories(
+    soc_device_support
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_compile_features(soc_device_support PRIVATE c_std_17)
+set_target_properties(
+    soc_device_support
+    PROPERTIES
+        C_VISIBILITY_PRESET hidden
+        INTERPROCEDURAL_OPTIMIZATION FALSE
+        POSITION_INDEPENDENT_CODE ON
+)
+soc_enable_warnings(soc_device_support)
+if(SOC_BUILD_SHARED)
+    target_compile_definitions(
+        soc_device_support
+        PRIVATE SOC_BUILDING_LIBRARY
+    )
+else()
+    target_compile_definitions(soc_device_support PRIVATE SOC_STATIC)
+endif()
+if(_soc_build_aarch32_neon_fma)
+    target_compile_definitions(
+        soc_device_support
+        PRIVATE
+            $<$<CONFIG:Release>:SOC_ABI_REQUIRES_ARM32_NEON_VFPV4=1>
+    )
+    target_compile_options(
+        soc_device_support
+        PRIVATE
+            $<$<CONFIG:Release>:-march=armv7-a>
+            $<$<CONFIG:Release>:-mfpu=vfpv3-d16>
+            $<$<CONFIG:Release>:-mfloat-abi=softfp>
+            $<$<CONFIG:Release>:-fno-lto>
+    )
+endif()
+
+add_library(
     soc_core
     OBJECT
         core/soc_context.c
@@ -123,6 +167,7 @@ if(SOC_BUILD_SHARED)
         soc
         SHARED
             abi/soc_api.c
+            $<TARGET_OBJECTS:soc_device_support>
             $<TARGET_OBJECTS:soc_core>
     )
     target_compile_definitions(soc PRIVATE SOC_BUILDING_LIBRARY)
@@ -131,6 +176,7 @@ else()
         soc
         STATIC
             abi/soc_api.c
+            $<TARGET_OBJECTS:soc_device_support>
             $<TARGET_OBJECTS:soc_core>
     )
     target_compile_definitions(soc PUBLIC SOC_STATIC)
