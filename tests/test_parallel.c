@@ -237,6 +237,100 @@ static soc_result create_long_thin_mesh(
     return soc_mesh_create(context, &desc, out_mesh);
 }
 
+static soc_result create_tiled_depth_sort_mesh(
+    soc_context* context,
+    soc_mesh** out_mesh
+)
+{
+    enum {
+        LAYERS_PER_WORK_ITEM = 8,
+        VISIBLE_TRIANGLES_PER_WORK_ITEM = LAYERS_PER_WORK_ITEM * 2,
+        VISIBLE_TRIANGLE_COUNT = VISIBLE_TRIANGLES_PER_WORK_ITEM * 2,
+        TRIANGLE_COUNT = 2049,
+        VERTEX_COUNT = TRIANGLE_COUNT * 3,
+        INDEX_COUNT = TRIANGLE_COUNT * 3,
+    };
+    float* vertices = (float*)malloc(
+        (size_t)VERTEX_COUNT * 3u * sizeof(float)
+    );
+    uint16_t* indices = (uint16_t*)malloc(
+        (size_t)INDEX_COUNT * sizeof(uint16_t)
+    );
+    soc_mesh_desc desc;
+    soc_result result;
+    uint32_t triangle;
+
+    if (vertices == NULL || indices == NULL) {
+        free(vertices);
+        free(indices);
+        return SOC_RESULT_OUT_OF_MEMORY;
+    }
+    for (triangle = 0u; triangle < TRIANGLE_COUNT; ++triangle) {
+        float* vertex = &vertices[(size_t)triangle * 9u];
+        uint32_t visible_triangle = UINT32_MAX;
+        float depth = 0.5f;
+
+        if (triangle < VISIBLE_TRIANGLES_PER_WORK_ITEM) {
+            visible_triangle = triangle;
+        } else if (triangle >= 1024u &&
+            triangle < 1024u + VISIBLE_TRIANGLES_PER_WORK_ITEM) {
+            visible_triangle = triangle - 1024u;
+        }
+        if (visible_triangle != UINT32_MAX) {
+            const uint32_t layer = visible_triangle / 2u;
+            const uint32_t depth_layer =
+                LAYERS_PER_WORK_ITEM - 1u - layer;
+            const float fraction = (float)depth_layer /
+                (float)(LAYERS_PER_WORK_ITEM - 1u);
+
+            depth = 0.95f + (0.35f - 0.95f) * fraction;
+            vertex[0] = -1.0f;
+            vertex[1] = -1.0f;
+            if ((visible_triangle & 1u) == 0u) {
+                vertex[3] = 1.0f;
+                vertex[4] = -1.0f;
+                vertex[6] = 1.0f;
+                vertex[7] = 1.0f;
+            } else {
+                vertex[3] = 1.0f;
+                vertex[4] = 1.0f;
+                vertex[6] = -1.0f;
+                vertex[7] = 1.0f;
+            }
+        } else {
+            vertex[0] = 2.0f;
+            vertex[1] = -1.0f;
+            vertex[3] = 4.0f;
+            vertex[4] = -1.0f;
+            vertex[6] = 2.0f;
+            vertex[7] = 3.0f;
+        }
+        vertex[2] = depth;
+        vertex[5] = depth;
+        vertex[8] = depth;
+        indices[(size_t)triangle * 3u + 0u] =
+            (uint16_t)(triangle * 3u + 0u);
+        indices[(size_t)triangle * 3u + 1u] =
+            (uint16_t)(triangle * 3u + 1u);
+        indices[(size_t)triangle * 3u + 2u] =
+            (uint16_t)(triangle * 3u + 2u);
+    }
+
+    desc.struct_size = sizeof(desc);
+    desc.flags = SOC_MESH_FLAG_TWO_SIDED;
+    desc.vertices = vertices;
+    desc.indices = indices;
+    desc.vertex_count = VERTEX_COUNT;
+    desc.vertex_stride = 3u * sizeof(float);
+    desc.position_offset = 0u;
+    desc.index_count = INDEX_COUNT;
+    desc.index_type = SOC_INDEX_UINT16;
+    result = soc_mesh_create(context, &desc, out_mesh);
+    free(vertices);
+    free(indices);
+    return result;
+}
+
 static soc_frame_desc make_frame(void)
 {
     const soc_frame_desc frame = {
@@ -704,6 +798,100 @@ static int test_long_thin_tiled_results_match(void)
     return 0;
 }
 
+static int test_tiled_depth_sort_results_match(void)
+{
+    enum {
+        TRIANGLE_COUNT = 2049,
+        VISIBLE_TRIANGLE_COUNT = 32,
+    };
+    const soc_mat4 transform = identity_matrix();
+    const soc_frame_desc frame = make_frame();
+    soc_occluder_group single_group;
+    soc_occluder_group parallel_group;
+    soc_occlusion_build_desc single_desc;
+    soc_occlusion_build_desc parallel_desc;
+    soc_build_stats stats = {
+        .struct_size = sizeof(soc_build_stats),
+    };
+    soc_context* single_context = NULL;
+    soc_context* parallel_context = NULL;
+    soc_mesh* single_mesh = NULL;
+    soc_mesh* parallel_mesh = NULL;
+    soc_snapshot* single_snapshot = NULL;
+    soc_snapshot* parallel_snapshot = NULL;
+
+    /*
+     * 2049 triangles select dense instead of masked. Nine 256-triangle
+     * private work items are below the four-worker private threshold, so
+     * the parallel build uses tiled dense replay. Visible layers are split
+     * between two 1024-triangle prepare items; each lane-local segment is
+     * far-to-near, so the 8..64 global tile sort path is exercised even when
+     * the items land on different prepare lanes.
+     */
+    CHECK_RESULT(create_context(1u, &single_context), SOC_RESULT_OK);
+    CHECK_RESULT(create_context(4u, &parallel_context), SOC_RESULT_OK);
+    CHECK_RESULT(
+        create_tiled_depth_sort_mesh(single_context, &single_mesh),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        create_tiled_depth_sort_mesh(parallel_context, &parallel_mesh),
+        SOC_RESULT_OK
+    );
+
+    single_group.mesh = single_mesh;
+    single_group.object_to_world = &transform;
+    single_group.instance_count = 1u;
+    single_group.flags = SOC_OCCLUDER_GROUP_FLAG_NONE;
+    parallel_group = single_group;
+    parallel_group.mesh = parallel_mesh;
+
+    single_desc.struct_size = sizeof(single_desc);
+    single_desc.flags = SOC_OCCLUSION_BUILD_FLAG_NONE;
+    single_desc.frame = &frame;
+    single_desc.groups = &single_group;
+    single_desc.group_count = 1u;
+    single_desc.group_stride = sizeof(single_group);
+    parallel_desc = single_desc;
+    parallel_desc.groups = &parallel_group;
+
+    CHECK_RESULT(
+        soc_occlusion_build(
+            single_context,
+            &single_desc,
+            &single_snapshot
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        soc_occlusion_build(
+            parallel_context,
+            &parallel_desc,
+            &parallel_snapshot
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK(compare_snapshots(single_snapshot, parallel_snapshot) == 0);
+    CHECK_RESULT(
+        soc_snapshot_get_build_stats(parallel_snapshot, &stats),
+        SOC_RESULT_OK
+    );
+    CHECK(stats.input_triangle_count == TRIANGLE_COUNT);
+    CHECK(
+        stats.clipped_triangle_count ==
+        TRIANGLE_COUNT - VISIBLE_TRIANGLE_COUNT
+    );
+    CHECK(stats.rasterized_triangle_count == VISIBLE_TRIANGLE_COUNT);
+
+    soc_snapshot_destroy(parallel_snapshot);
+    soc_snapshot_destroy(single_snapshot);
+    CHECK_RESULT(soc_mesh_destroy(parallel_mesh), SOC_RESULT_OK);
+    CHECK_RESULT(soc_mesh_destroy(single_mesh), SOC_RESULT_OK);
+    soc_context_destroy(parallel_context);
+    soc_context_destroy(single_context);
+    return 0;
+}
+
 int main(void)
 {
     if (test_worker_results_match() != 0) {
@@ -713,6 +901,9 @@ int main(void)
         return 1;
     }
     if (test_long_thin_tiled_results_match() != 0) {
+        return 1;
+    }
+    if (test_tiled_depth_sort_results_match() != 0) {
         return 1;
     }
     return test_tiled_hot_merge_results_match();

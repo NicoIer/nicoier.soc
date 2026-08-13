@@ -7,6 +7,7 @@
 #include "platform/soc_thread_pool.h"
 #include "raster/soc_rasterizer.h"
 
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdatomic.h>
@@ -17,9 +18,15 @@
     #define SOC_PIPELINE_FORCE_INLINE \
         static inline __attribute__((always_inline))
     #define SOC_PIPELINE_CACHE_ALIGNED __attribute__((aligned(64)))
+    #define SOC_PIPELINE_NOINLINE __attribute__((noinline))
+#elif defined(_MSC_VER)
+    #define SOC_PIPELINE_FORCE_INLINE static inline
+    #define SOC_PIPELINE_CACHE_ALIGNED
+    #define SOC_PIPELINE_NOINLINE __declspec(noinline)
 #else
     #define SOC_PIPELINE_FORCE_INLINE static inline
     #define SOC_PIPELINE_CACHE_ALIGNED
+    #define SOC_PIPELINE_NOINLINE
 #endif
 
 #define SOC_PARALLEL_TILED_TRIANGLES_PER_WORK_ITEM UINT32_C(1024)
@@ -36,6 +43,9 @@
 #define SOC_PARALLEL_TILE_REFERENCE_CHUNK_INITIAL_CAPACITY UINT32_C(64)
 #define SOC_PARALLEL_TILE_REFERENCE_CHUNK_INVALID UINT32_MAX
 #define SOC_PARALLEL_TILE_EDGE_TEST_MINIMUM_TILES ((size_t)64u)
+#define SOC_PARALLEL_TILE_SORT_MINIMUM_REFERENCES UINT32_C(8)
+#define SOC_PARALLEL_TILE_SORT_MAXIMUM_REFERENCES UINT32_C(64)
+#define SOC_PARALLEL_TILE_SORT_MINIMUM_DEPTH_SPAN 0.0625f
 #define SOC_PARALLEL_TILED_MAX_LANE_COUNT UINT32_C(32)
 #define SOC_PARALLEL_DEPTH_SCRATCH_BUDGET_BYTES \
     ((size_t)256u * 1024u * 1024u)
@@ -989,6 +999,237 @@ static uint32_t next_parallel_tile_bin_reference(
     return prepared_index;
 }
 
+SOC_PIPELINE_FORCE_INLINE uint32_t first_parallel_tile_bin_reference(
+    const soc_parallel_tile_bin* bin,
+    const soc_parallel_tile_reference_arena* arena
+)
+{
+    return bin->count <= SOC_PARALLEL_TILE_BIN_INLINE_REFERENCE_COUNT
+        ? bin->payload[0]
+        : arena->chunks[bin->payload[0]].prepared_indices[0];
+}
+
+SOC_PIPELINE_FORCE_INLINE uint32_t last_parallel_tile_bin_reference(
+    const soc_parallel_tile_bin* bin,
+    const soc_parallel_tile_reference_arena* arena
+)
+{
+    return bin->count <= SOC_PARALLEL_TILE_BIN_INLINE_REFERENCE_COUNT
+        ? bin->payload[bin->count - 1u]
+        : arena->chunks[bin->payload[1]].prepared_indices[
+            (bin->count - 1u) %
+                SOC_PARALLEL_TILE_REFERENCE_CHUNK_CAPACITY
+        ];
+}
+
+SOC_PIPELINE_FORCE_INLINE float parallel_tile_depth_sort_key(
+    const soc_raster_prepared_triangle* prepared,
+    const soc_raster_prepared_region* tile_region
+)
+{
+    const uint32_t minimum_x =
+        prepared->bounds.minimum_x > tile_region->minimum_x
+        ? prepared->bounds.minimum_x
+        : tile_region->minimum_x;
+    const uint32_t minimum_y =
+        prepared->bounds.minimum_y > tile_region->minimum_y
+        ? prepared->bounds.minimum_y
+        : tile_region->minimum_y;
+    const uint32_t end_x = prepared->bounds.end_x < tile_region->end_x
+        ? prepared->bounds.end_x
+        : tile_region->end_x;
+    const uint32_t end_y = prepared->bounds.end_y < tile_region->end_y
+        ? prepared->bounds.end_y
+        : tile_region->end_y;
+    const uint32_t farthest_x = prepared->depth_step_x >= 0.0f
+        ? minimum_x : end_x - 1u;
+    const uint32_t farthest_y = prepared->depth_step_y >= 0.0f
+        ? minimum_y : end_y - 1u;
+    float depth;
+
+    if (prepared->depth_step_x == 0.0f &&
+        prepared->depth_step_y == 0.0f) {
+        depth = prepared->depth_sample_origin;
+    } else {
+        depth = fmaf(
+            prepared->depth_step_x,
+            (float)farthest_x,
+            prepared->depth_sample_origin
+        );
+        depth = fmaf(
+            prepared->depth_step_y,
+            (float)farthest_y,
+            depth
+        );
+    }
+    if (depth < 0.0f) {
+        return 0.0f;
+    }
+    return depth > 1.0f ? 1.0f : depth;
+}
+
+static void rasterize_parallel_tile_bin_in_order(
+    const soc_parallel_tile_bin* bin,
+    const soc_parallel_tile_reference_arena* arena,
+    const soc_raster_prepared_list* prepared_list,
+    soc_rasterizer* rasterizer,
+    const soc_raster_prepared_region* region
+)
+{
+    soc_parallel_tile_bin_iterator iterator;
+
+    initialize_parallel_tile_bin_iterator(
+        &iterator,
+        bin,
+        arena,
+        0u,
+        bin->count
+    );
+    while (iterator.remaining != 0u) {
+        const uint32_t prepared_index =
+            next_parallel_tile_bin_reference(&iterator);
+
+        soc_rasterizer_rasterize_prepared_region_unchecked(
+            rasterizer,
+            &prepared_list->data[prepared_index],
+            region
+        );
+    }
+}
+
+SOC_PIPELINE_FORCE_INLINE soc_bool
+parallel_normal_tile_requires_front_to_back_sort(
+    const soc_parallel_tile_state* state,
+    size_t tile_index,
+    uint32_t lane_mask
+)
+{
+    const soc_raster_prepared_triangle* first_prepared = NULL;
+    const soc_raster_prepared_triangle* last_prepared = NULL;
+    uint32_t source_lane = 0u;
+
+    while (lane_mask != 0u) {
+        const soc_parallel_tile_bin* bin;
+        const soc_parallel_tile_reference_arena* arena;
+        const soc_raster_prepared_list* prepared_list;
+        uint32_t prepared_index;
+
+        while ((lane_mask & UINT32_C(1)) == 0u) {
+            lane_mask >>= 1u;
+            ++source_lane;
+        }
+        bin = &state->tile_bins[
+            (size_t)source_lane * state->tile_count + tile_index
+        ];
+        arena = &state->tile_reference_arenas[source_lane];
+        prepared_list = &state->prepared_lists[source_lane];
+        prepared_index = first_parallel_tile_bin_reference(
+            bin,
+            arena
+        );
+        if (first_prepared == NULL) {
+            first_prepared = &prepared_list->data[prepared_index];
+        }
+        prepared_index = last_parallel_tile_bin_reference(
+            bin,
+            arena
+        );
+        last_prepared = &prepared_list->data[prepared_index];
+        lane_mask >>= 1u;
+        ++source_lane;
+    }
+    return last_prepared->depth_sample_origin -
+            first_prepared->depth_sample_origin >=
+        SOC_PARALLEL_TILE_SORT_MINIMUM_DEPTH_SPAN
+        ? SOC_TRUE
+        : SOC_FALSE;
+}
+
+static SOC_PIPELINE_NOINLINE void
+rasterize_parallel_normal_tile_front_to_back(
+    const soc_parallel_tile_state* state,
+    soc_rasterizer* rasterizer,
+    size_t tile_index,
+    size_t reference_count,
+    uint32_t lane_mask,
+    const soc_raster_prepared_region* region
+)
+{
+    const soc_raster_prepared_triangle* references[
+        SOC_PARALLEL_TILE_SORT_MAXIMUM_REFERENCES
+    ];
+    float depth_keys[SOC_PARALLEL_TILE_SORT_MAXIMUM_REFERENCES];
+    size_t reference_index = 0u;
+    uint32_t source_lane = 0u;
+
+    while (lane_mask != 0u) {
+        const soc_parallel_tile_bin* bin;
+        const soc_raster_prepared_list* prepared_list;
+        soc_parallel_tile_bin_iterator iterator;
+
+        while ((lane_mask & UINT32_C(1)) == 0u) {
+            lane_mask >>= 1u;
+            ++source_lane;
+        }
+        bin = &state->tile_bins[
+            (size_t)source_lane * state->tile_count + tile_index
+        ];
+        prepared_list = &state->prepared_lists[source_lane];
+        initialize_parallel_tile_bin_iterator(
+            &iterator,
+            bin,
+            &state->tile_reference_arenas[source_lane],
+            0u,
+            bin->count
+        );
+        while (iterator.remaining != 0u) {
+            const uint32_t prepared_index =
+                next_parallel_tile_bin_reference(&iterator);
+            const soc_raster_prepared_triangle* prepared =
+                &prepared_list->data[prepared_index];
+
+            references[reference_index] = prepared;
+            depth_keys[reference_index] = parallel_tile_depth_sort_key(
+                prepared,
+                region
+            );
+            ++reference_index;
+        }
+        lane_mask >>= 1u;
+        ++source_lane;
+    }
+
+    for (reference_index = 1u;
+         reference_index < reference_count;
+         ++reference_index) {
+        const soc_raster_prepared_triangle* prepared =
+            references[reference_index];
+        const float depth = depth_keys[reference_index];
+        size_t insertion_index = reference_index;
+
+        while (insertion_index != 0u &&
+            depth > depth_keys[insertion_index - 1u]) {
+            references[insertion_index] =
+                references[insertion_index - 1u];
+            depth_keys[insertion_index] =
+                depth_keys[insertion_index - 1u];
+            --insertion_index;
+        }
+        references[insertion_index] = prepared;
+        depth_keys[insertion_index] = depth;
+    }
+
+    for (reference_index = 0u;
+         reference_index < reference_count;
+         ++reference_index) {
+        soc_rasterizer_rasterize_prepared_region_unchecked(
+            rasterizer,
+            references[reference_index],
+            region
+        );
+    }
+}
+
 static soc_bool prepare_parallel_work_item_range(
     soc_parallel_prepare_state* state,
     uint32_t worker_index,
@@ -1194,25 +1435,13 @@ static void rasterize_parallel_normal_tile(
             &state->tile_bins[bin_index];
         const soc_raster_prepared_list* prepared_list =
             &state->prepared_lists[source_lane];
-        soc_parallel_tile_bin_iterator iterator;
-        uint32_t prepared_index;
-
-        initialize_parallel_tile_bin_iterator(
-            &iterator,
+        rasterize_parallel_tile_bin_in_order(
             bin,
             &state->tile_reference_arenas[source_lane],
-            0u,
-            bin->count
+            prepared_list,
+            rasterizer,
+            region
         );
-        while (iterator.remaining != 0u) {
-            prepared_index =
-                next_parallel_tile_bin_reference(&iterator);
-            soc_rasterizer_rasterize_prepared_region_unchecked(
-                rasterizer,
-                &prepared_list->data[prepared_index],
-                region
-            );
-        }
         lane_mask >>= 1u;
         ++source_lane;
     }
@@ -1390,13 +1619,32 @@ static void parallel_rasterize_dense_tiles(
             &region
         );
 
-        rasterize_parallel_normal_tile(
-            state,
-            rasterizer,
-            tile_index,
-            tile_job->lane_mask,
-            &region
-        );
+        if (tile_job->reference_count >=
+                (size_t)SOC_PARALLEL_TILE_SORT_MINIMUM_REFERENCES &&
+            tile_job->reference_count <=
+                (size_t)SOC_PARALLEL_TILE_SORT_MAXIMUM_REFERENCES &&
+            parallel_normal_tile_requires_front_to_back_sort(
+                state,
+                tile_index,
+                tile_job->lane_mask
+            ) == SOC_TRUE) {
+            rasterize_parallel_normal_tile_front_to_back(
+                state,
+                rasterizer,
+                tile_index,
+                tile_job->reference_count,
+                tile_job->lane_mask,
+                &region
+            );
+        } else {
+            rasterize_parallel_normal_tile(
+                state,
+                rasterizer,
+                tile_index,
+                tile_job->lane_mask,
+                &region
+            );
+        }
 
         {
             const size_t tile_row =

@@ -890,7 +890,7 @@ static int test_clipped_oversized_triangle(void)
     );
     CHECK(check_layout(&capture, TEST_WIDTH, TEST_HEIGHT) == 0);
     CHECK(check_all_depth(&capture, TEST_PIXEL_COUNT, 0.40f) == 0);
-    CHECK(check_stats(&capture, 4u, 1u, 1u, 2u) == 0);
+    CHECK(check_stats(&capture, 4u, 1u, 1u, 1u) == 0);
 
     CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
     soc_context_destroy(context);
@@ -1169,7 +1169,7 @@ static int test_clip_outcode_partial_active_plane(void)
         SOC_RESULT_OK
     );
 
-    CHECK(check_stats(&source_capture, 4u, 1u, 1u, 2u) == 0);
+    CHECK(check_stats(&source_capture, 4u, 1u, 1u, 1u) == 0);
     CHECK(check_stats(&reference_capture, 4u, 2u, 0u, 2u) == 0);
     for (pixel = 0u; pixel < TEST_PIXEL_COUNT; ++pixel) {
         if (!depth_equal(
@@ -1191,6 +1191,149 @@ static int test_clip_outcode_partial_active_plane(void)
     CHECK_RESULT(soc_mesh_destroy(reference_first_mesh), SOC_RESULT_OK);
     CHECK_RESULT(soc_mesh_destroy(reference_second_mesh), SOC_RESULT_OK);
     soc_context_destroy(context);
+    return 0;
+}
+
+static int check_guard_band_lateral_and_near_clip(
+    soc_clip_depth_range depth_range
+)
+{
+    const uint16_t indices[] = {0u, 1u, 2u};
+    const float source_near_depth =
+        depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE ? -0.25f : -1.50f;
+    const float boundary_depth =
+        depth_range == SOC_CLIP_DEPTH_ZERO_TO_ONE ? 0.125f : -0.50f;
+    const float source_positions[] = {
+        -2.0f,  0.00f, source_near_depth,
+         0.0f, -0.50f, 0.50f,
+         0.0f,  0.50f, 0.50f,
+    };
+    const float reference_first_positions[] = {
+        -1.0f,  0.25f, boundary_depth,
+        -1.0f, -0.25f, boundary_depth,
+         0.0f, -0.50f, 0.50f,
+    };
+    const float reference_second_positions[] = {
+        -1.0f,  0.25f, boundary_depth,
+         0.0f, -0.50f, 0.50f,
+         0.0f,  0.50f, 0.50f,
+    };
+    soc_frame_desc frame_desc = make_frame_desc();
+    soc_context* context = NULL;
+    soc_mesh* source_mesh = NULL;
+    soc_mesh* reference_first_mesh = NULL;
+    soc_mesh* reference_second_mesh = NULL;
+    soc_mesh* source_meshes[1];
+    soc_mesh* reference_meshes[2];
+    frame_capture source_capture;
+    frame_capture reference_capture;
+    uint32_t pixel;
+
+    frame_desc.clip_depth_range = depth_range;
+    CHECK_RESULT(
+        create_context(TEST_WIDTH, TEST_HEIGHT, &context),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        create_triangle_mesh(
+            context,
+            source_positions,
+            indices,
+            SOC_MESH_FLAG_TWO_SIDED,
+            &source_mesh
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        create_triangle_mesh(
+            context,
+            reference_first_positions,
+            indices,
+            SOC_MESH_FLAG_TWO_SIDED,
+            &reference_first_mesh
+        ),
+        SOC_RESULT_OK
+    );
+    CHECK_RESULT(
+        create_triangle_mesh(
+            context,
+            reference_second_positions,
+            indices,
+            SOC_MESH_FLAG_TWO_SIDED,
+            &reference_second_mesh
+        ),
+        SOC_RESULT_OK
+    );
+
+    source_meshes[0] = source_mesh;
+    CHECK_RESULT(
+        capture_frame_with_desc(
+            context,
+            &frame_desc,
+            source_meshes,
+            NULL,
+            NULL,
+            1u,
+            &source_capture
+        ),
+        SOC_RESULT_OK
+    );
+    reference_meshes[0] = reference_first_mesh;
+    reference_meshes[1] = reference_second_mesh;
+    CHECK_RESULT(
+        capture_frame_with_desc(
+            context,
+            &frame_desc,
+            reference_meshes,
+            NULL,
+            NULL,
+            2u,
+            &reference_capture
+        ),
+        SOC_RESULT_OK
+    );
+
+    CHECK(check_stats(&source_capture, 4u, 1u, 1u, 2u) == 0);
+    CHECK(check_stats(&reference_capture, 4u, 2u, 0u, 2u) == 0);
+    for (pixel = 0u; pixel < TEST_PIXEL_COUNT; ++pixel) {
+        const float source_depth = source_capture.depth[pixel];
+        const float reference_depth = reference_capture.depth[pixel];
+        const int source_covered = !depth_equal(source_depth, 0.0f);
+        const int reference_covered = !depth_equal(reference_depth, 0.0f);
+        float difference = source_depth - reference_depth;
+
+        if (difference < 0.0f) {
+            difference = -difference;
+        }
+        if (source_covered != reference_covered ||
+            (source_covered && difference > 0x1p-12f)) {
+            fprintf(
+                stderr,
+                "guard-band lateral+near clip changed pixel %u "
+                "from %.9g to %.9g\n",
+                pixel,
+                (double)reference_depth,
+                (double)source_depth
+            );
+            return 1;
+        }
+    }
+
+    CHECK_RESULT(soc_mesh_destroy(source_mesh), SOC_RESULT_OK);
+    CHECK_RESULT(soc_mesh_destroy(reference_first_mesh), SOC_RESULT_OK);
+    CHECK_RESULT(soc_mesh_destroy(reference_second_mesh), SOC_RESULT_OK);
+    soc_context_destroy(context);
+    return 0;
+}
+
+static int test_guard_band_lateral_and_near_clip(void)
+{
+    CHECK(check_guard_band_lateral_and_near_clip(
+        SOC_CLIP_DEPTH_ZERO_TO_ONE
+    ) == 0);
+    CHECK(check_guard_band_lateral_and_near_clip(
+        SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE
+    ) == 0);
     return 0;
 }
 
@@ -1421,7 +1564,7 @@ static int test_clip_outcode_multi_instance_stats(void)
         ),
         SOC_RESULT_OK
     );
-    CHECK(check_stats(&capture, 4u, 3u, 2u, 3u) == 0);
+    CHECK(check_stats(&capture, 4u, 3u, 2u, 2u) == 0);
 
     CHECK_RESULT(soc_mesh_destroy(mesh), SOC_RESULT_OK);
     soc_context_destroy(context);
@@ -1741,6 +1884,9 @@ int main(void)
         return 1;
     }
     if (test_clip_outcode_partial_active_plane() != 0) {
+        return 1;
+    }
+    if (test_guard_band_lateral_and_near_clip() != 0) {
         return 1;
     }
     if (test_negative_one_to_one_near_outcodes() != 0) {

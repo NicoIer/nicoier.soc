@@ -111,7 +111,8 @@ typedef enum geometry_pattern {
     GEOMETRY_DEGENERATE,
     GEOMETRY_OUTSIDE,
     GEOMETRY_SHARED_GRID,
-    GEOMETRY_SHARED_GRID_OUTSIDE
+    GEOMETRY_SHARED_GRID_OUTSIDE,
+    GEOMETRY_TILED_OVERDRAW
 } geometry_pattern;
 
 typedef enum query_pattern {
@@ -263,6 +264,17 @@ static const bench_case g_cases[] = {
      .triangle_count = 16384u, .instance_count = 1u,
      .geometry_pattern = GEOMETRY_SHARED_GRID_OUTSIDE,
      .index_type = SOC_INDEX_UINT16},
+    {.name = "geometry.tiled_overdraw.16x.front_to_back",
+     .description = "Replay sixteen full-screen tiled layers near-to-far",
+     .kind = BENCH_GEOMETRY, .tier = 1u, .width = 640u, .height = 360u,
+     .triangle_count = 2049u, .instance_count = 1u,
+     .geometry_pattern = GEOMETRY_TILED_OVERDRAW},
+    {.name = "geometry.tiled_overdraw.16x.back_to_front",
+     .description = "Replay sixteen full-screen tiled layers far-to-near",
+     .kind = BENCH_GEOMETRY, .tier = 1u, .width = 640u, .height = 360u,
+     .triangle_count = 2049u, .instance_count = 1u,
+     .geometry_pattern = GEOMETRY_TILED_OVERDRAW,
+     .reverse_order = SOC_TRUE},
     {.name = "geometry.near_clip.16384",
      .description = "Clip 16384 triangles crossing the near plane",
      .kind = BENCH_GEOMETRY, .tier = 1u, .width = 640u, .height = 360u,
@@ -912,6 +924,92 @@ static int create_shared_grid_mesh(workload* work)
     return result == SOC_RESULT_OK ? 0 : 1;
 }
 
+static int create_tiled_overdraw_mesh(workload* work)
+{
+    const bench_case* definition = work->definition;
+    const uint32_t triangle_count = definition->triangle_count;
+    const uint32_t layer_count = 16u;
+    const uint32_t visible_triangle_count = layer_count * 2u;
+    float* vertices;
+    uint32_t* indices;
+    uint32_t triangle;
+    size_t vertex_bytes;
+    size_t index_bytes;
+    soc_result result;
+
+    if (triangle_count < visible_triangle_count ||
+        triangle_count > UINT32_MAX / 3u ||
+        !checked_size_multiply(
+            (size_t)triangle_count,
+            9u * sizeof(float),
+            &vertex_bytes
+        ) ||
+        !checked_size_multiply(
+            (size_t)triangle_count,
+            3u * sizeof(uint32_t),
+            &index_bytes
+        )) {
+        return 1;
+    }
+    vertices = (float*)malloc(vertex_bytes);
+    indices = (uint32_t*)malloc(index_bytes);
+    if (vertices == NULL || indices == NULL) {
+        free(vertices);
+        free(indices);
+        return 1;
+    }
+
+    for (triangle = 0u; triangle < triangle_count; ++triangle) {
+        float* vertex = &vertices[(size_t)triangle * 9u];
+        float depth = 0.5f;
+
+        if (triangle < visible_triangle_count) {
+            const uint32_t layer = triangle / 2u;
+            const uint32_t depth_layer =
+                definition->reverse_order == SOC_TRUE
+                ? layer_count - 1u - layer
+                : layer;
+            const float fraction = (float)depth_layer /
+                (float)(layer_count - 1u);
+            const float front = case_visible_depth(definition);
+            const float back = case_occluded_depth(definition);
+
+            depth = front + (back - front) * fraction;
+            vertex[0] = -1.0f; vertex[1] = -1.0f;
+            if ((triangle & 1u) == 0u) {
+                vertex[3] = 1.0f;  vertex[4] = -1.0f;
+                vertex[6] = 1.0f;  vertex[7] = 1.0f;
+            } else {
+                vertex[3] = 1.0f;  vertex[4] = 1.0f;
+                vertex[6] = -1.0f; vertex[7] = 1.0f;
+            }
+        } else {
+            vertex[0] = 2.0f; vertex[1] = -1.0f;
+            vertex[3] = 4.0f; vertex[4] = -1.0f;
+            vertex[6] = 2.0f; vertex[7] = 3.0f;
+        }
+        vertex[2] = depth;
+        vertex[5] = depth;
+        vertex[8] = depth;
+        indices[(size_t)triangle * 3u + 0u] = triangle * 3u + 0u;
+        indices[(size_t)triangle * 3u + 1u] = triangle * 3u + 1u;
+        indices[(size_t)triangle * 3u + 2u] = triangle * 3u + 2u;
+    }
+    result = create_mesh(
+        work->context,
+        vertices,
+        triangle_count * 3u,
+        indices,
+        triangle_count * 3u,
+        SOC_INDEX_UINT32,
+        SOC_MESH_FLAG_TWO_SIDED,
+        &work->mesh
+    );
+    free(vertices);
+    free(indices);
+    return result == SOC_RESULT_OK ? 0 : 1;
+}
+
 static int create_geometry_mesh(workload* work)
 {
     const bench_case* definition = work->definition;
@@ -927,6 +1025,9 @@ static int create_geometry_mesh(workload* work)
     if (definition->geometry_pattern == GEOMETRY_SHARED_GRID ||
         definition->geometry_pattern == GEOMETRY_SHARED_GRID_OUTSIDE) {
         return create_shared_grid_mesh(work);
+    }
+    if (definition->geometry_pattern == GEOMETRY_TILED_OVERDRAW) {
+        return create_tiled_overdraw_mesh(work);
     }
     if (triangle_count == 0u ||
         triangle_count > UINT32_MAX / 3u ||
@@ -1766,6 +1867,18 @@ static int workload_validate(const workload* work)
             fprintf(stderr,
                 "%s: outside shared grid counters failed validation\n",
                 definition->name);
+            return 1;
+        }
+        if (definition->geometry_pattern == GEOMETRY_TILED_OVERDRAW &&
+            (work->build_stats.clipped_triangle_count !=
+                 definition->triangle_count - 32u ||
+             work->build_stats.rasterized_triangle_count != 32u)) {
+            fprintf(stderr,
+                "%s: tiled overdraw counters failed validation "
+                "(clipped=%" PRIu64 ", rasterized=%" PRIu64 ")\n",
+                definition->name,
+                work->build_stats.clipped_triangle_count,
+                work->build_stats.rasterized_triangle_count);
             return 1;
         }
         if (definition->geometry_pattern == GEOMETRY_INSIDE &&

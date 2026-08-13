@@ -26,6 +26,9 @@
 #endif
 
 #define SOC_CLIP_PLANE_COUNT 6u
+#define SOC_CLIP_LATERAL_PLANE_MASK UINT8_C(0x0f)
+#define SOC_CLIP_DEPTH_PLANE_MASK UINT8_C(0x30)
+#define SOC_CLIP_GUARD_BAND_SCALE 4.0f
 #define SOC_MAX_CLIPPED_VERTICES 12u
 #define SOC_RASTER_SUBPIXEL_BITS 8u
 #define SOC_RASTER_SUBPIXEL_SCALE \
@@ -105,6 +108,13 @@ typedef struct soc_tile_edge {
     float step_x;
     float step_y;
 } soc_tile_edge;
+
+typedef struct soc_raster_block_edge_cursor {
+    soc_tile_edge edges[3];
+    int64_t values[3];
+    int64_t first_block_increments[3];
+    int64_t full_block_increments[3];
+} soc_raster_block_edge_cursor;
 
 typedef enum soc_raster_setup_result {
     SOC_RASTER_SETUP_REJECTED = 0,
@@ -508,6 +518,31 @@ static float clip_plane_distance(
     }
 }
 
+SOC_RASTER_FORCE_INLINE soc_bool triangle_inside_clip_guard_band(
+    const soc_clip_vertex vertices[3],
+    soc_clip_outcode active_planes
+)
+{
+    uint32_t index;
+
+    for (index = 0u; index < 3u; ++index) {
+        const float guard_w =
+            vertices[index].w * SOC_CLIP_GUARD_BAND_SCALE;
+
+        if (((active_planes & (UINT8_C(1) << 0u)) != 0u &&
+                vertices[index].x + guard_w < 0.0f) ||
+            ((active_planes & (UINT8_C(1) << 1u)) != 0u &&
+                guard_w - vertices[index].x < 0.0f) ||
+            ((active_planes & (UINT8_C(1) << 2u)) != 0u &&
+                vertices[index].y + guard_w < 0.0f) ||
+            ((active_planes & (UINT8_C(1) << 3u)) != 0u &&
+                guard_w - vertices[index].y < 0.0f)) {
+            return SOC_FALSE;
+        }
+    }
+    return SOC_TRUE;
+}
+
 static void initialize_post_transform_cache(soc_post_transform_cache* cache)
 {
     uint32_t entry;
@@ -848,6 +883,16 @@ static int64_t quantize_screen_coordinate(float coordinate)
     return (int64_t)(scaled + 0.5f);
 }
 
+static int64_t quantize_guard_band_screen_coordinate(float coordinate)
+{
+    const float scaled =
+        coordinate * (float)SOC_RASTER_SUBPIXEL_SCALE;
+
+    return scaled >= 0.0f
+        ? (int64_t)(scaled + 0.5f)
+        : -(int64_t)(-scaled + 0.5f);
+}
+
 static int64_t fixed_edge_value_at_pixel(
     const soc_edge_equation* edge,
     uint32_t pixel_x,
@@ -878,6 +923,75 @@ static void make_tile_edges(
         );
         out_edges[edge_index].step_x = (float)edge->step_x;
         out_edges[edge_index].step_y = (float)edge->step_y;
+    }
+}
+
+SOC_RASTER_FORCE_INLINE void initialize_raster_block_edge_cursor(
+    const soc_raster_triangle_setup* setup,
+    uint32_t first_pixel_x,
+    soc_raster_block_edge_cursor* cursor
+)
+{
+    const uint32_t first_block_advance = SOC_RASTER_BLOCK_SIZE -
+        (first_pixel_x & (SOC_RASTER_BLOCK_SIZE - 1u));
+    uint32_t edge_index;
+
+    for (edge_index = 0u; edge_index < 3u; ++edge_index) {
+        const soc_edge_equation* edge = &setup->edges[edge_index];
+
+        cursor->edges[edge_index].step_x = (float)edge->step_x;
+        cursor->edges[edge_index].step_y = (float)edge->step_y;
+        cursor->first_block_increments[edge_index] =
+            edge->step_x * (int64_t)first_block_advance;
+        cursor->full_block_increments[edge_index] =
+            edge->step_x * (int64_t)SOC_RASTER_BLOCK_SIZE;
+    }
+}
+
+SOC_RASTER_FORCE_INLINE void reset_raster_block_edge_cursor_row(
+    const soc_raster_triangle_setup* setup,
+    uint32_t pixel_x,
+    uint32_t pixel_y,
+    soc_raster_block_edge_cursor* cursor
+)
+{
+    uint32_t edge_index;
+
+    for (edge_index = 0u; edge_index < 3u; ++edge_index) {
+        cursor->values[edge_index] = fixed_edge_value_at_pixel(
+            &setup->edges[edge_index],
+            pixel_x,
+            pixel_y
+        );
+    }
+}
+
+SOC_RASTER_FORCE_INLINE const soc_tile_edge*
+materialize_raster_block_edge_cursor(
+    soc_raster_block_edge_cursor* cursor
+)
+{
+    uint32_t edge_index;
+
+    for (edge_index = 0u; edge_index < 3u; ++edge_index) {
+        cursor->edges[edge_index].value =
+            (float)cursor->values[edge_index];
+    }
+    return cursor->edges;
+}
+
+SOC_RASTER_FORCE_INLINE void advance_raster_block_edge_cursor(
+    soc_raster_block_edge_cursor* cursor,
+    soc_bool first_block
+)
+{
+    const int64_t* increments = first_block == SOC_TRUE
+        ? cursor->first_block_increments
+        : cursor->full_block_increments;
+    uint32_t edge_index;
+
+    for (edge_index = 0u; edge_index < 3u; ++edge_index) {
+        cursor->values[edge_index] += increments[edge_index];
     }
 }
 
@@ -1035,6 +1149,79 @@ static soc_raster_setup_result prepare_screen_triangle(
             fmaf(ndc_y, -0.5f, 0.5f) * (float)rasterizer->height;
         screen[index].fixed_x = quantize_screen_coordinate(screen[index].x);
         screen[index].fixed_y = quantize_screen_coordinate(screen[index].y);
+    }
+
+    fixed_area =
+        (screen[1].fixed_x - screen[0].fixed_x) *
+            (screen[2].fixed_y - screen[0].fixed_y) -
+        (screen[1].fixed_y - screen[0].fixed_y) *
+            (screen[2].fixed_x - screen[0].fixed_x);
+    if (fixed_area == 0) {
+        return SOC_RASTER_SETUP_REJECTED;
+    }
+    if (two_sided != SOC_TRUE) {
+        const soc_bool front_facing =
+            rasterizer->frame.front_face == SOC_FRONT_FACE_CCW
+                ? (fixed_area < 0 ? SOC_TRUE : SOC_FALSE)
+                : (fixed_area > 0 ? SOC_TRUE : SOC_FALSE);
+
+        if (front_facing != SOC_TRUE) {
+            return SOC_RASTER_SETUP_REJECTED;
+        }
+    }
+
+    for (index = 0u; index < 3u; ++index) {
+        float depth = clip_vertices[index]->z * inverse_w[index];
+
+        if (rasterizer->frame.clip_depth_range ==
+            SOC_CLIP_DEPTH_NEGATIVE_ONE_TO_ONE) {
+            depth = fmaf(depth, 0.5f, 0.5f);
+        }
+        screen[index].depth = clamp_float(depth, 0.0f, 1.0f);
+    }
+    if (fixed_area < 0) {
+        swap_screen_vertices(&screen[1], &screen[2]);
+    }
+    return SOC_RASTER_SETUP_READY;
+}
+
+static soc_raster_setup_result prepare_guard_band_screen_triangle(
+    const soc_rasterizer* rasterizer,
+    const soc_clip_vertex* clip0,
+    const soc_clip_vertex* clip1,
+    const soc_clip_vertex* clip2,
+    soc_bool two_sided,
+    soc_screen_vertex screen[3]
+)
+{
+    const soc_clip_vertex* clip_vertices[3] = {clip0, clip1, clip2};
+    float inverse_w[3];
+    int64_t fixed_area;
+    uint32_t index;
+
+    for (index = 0u; index < 3u; ++index) {
+        if (clip_vertices[index]->w <= 0.0f) {
+            return SOC_RASTER_SETUP_REJECTED;
+        }
+    }
+    reciprocal3_f32(
+        clip_vertices[0]->w,
+        clip_vertices[1]->w,
+        clip_vertices[2]->w,
+        inverse_w
+    );
+    for (index = 0u; index < 3u; ++index) {
+        const float ndc_x = clip_vertices[index]->x * inverse_w[index];
+        const float ndc_y = clip_vertices[index]->y * inverse_w[index];
+
+        screen[index].x =
+            fmaf(ndc_x, 0.5f, 0.5f) * (float)rasterizer->width;
+        screen[index].y =
+            fmaf(ndc_y, -0.5f, 0.5f) * (float)rasterizer->height;
+        screen[index].fixed_x =
+            quantize_guard_band_screen_coordinate(screen[index].x);
+        screen[index].fixed_y =
+            quantize_guard_band_screen_coordinate(screen[index].y);
     }
 
     fixed_area =
@@ -2708,9 +2895,17 @@ static void rasterize_triangle_blocks_fine(
     const soc_raster_region* region
 )
 {
+    const uint32_t first_aligned_x = region->minimum_x &
+        ~(SOC_RASTER_BLOCK_SIZE - 1u);
+    soc_raster_block_edge_cursor edge_cursor;
     uint32_t aligned_y = region->minimum_y &
         ~(SOC_RASTER_BLOCK_SIZE - 1u);
 
+    initialize_raster_block_edge_cursor(
+        setup,
+        region->minimum_x,
+        &edge_cursor
+    );
     for (; aligned_y < region->end_y;
          aligned_y += SOC_RASTER_BLOCK_SIZE) {
         const uint32_t block_y = aligned_y < region->minimum_y
@@ -2722,8 +2917,14 @@ static void rasterize_triangle_blocks_fine(
             ? aligned_end_y
             : region->end_y;
         const uint32_t block_height = block_end_y - block_y;
-        uint32_t aligned_x = region->minimum_x &
-            ~(SOC_RASTER_BLOCK_SIZE - 1u);
+        uint32_t aligned_x = first_aligned_x;
+
+        reset_raster_block_edge_cursor_row(
+            setup,
+            region->minimum_x,
+            block_y,
+            &edge_cursor
+        );
 
         for (; aligned_x < region->end_x;
              aligned_x += SOC_RASTER_BLOCK_SIZE) {
@@ -2746,20 +2947,20 @@ static void rasterize_triangle_blocks_fine(
                 : rasterizer->height;
             const uint32_t physical_width = physical_end_x - aligned_x;
             const uint32_t physical_height = physical_end_y - aligned_y;
-            soc_tile_edge tile_edges[3];
+            const soc_tile_edge* tile_edges =
+                materialize_raster_block_edge_cursor(&edge_cursor);
             soc_raster_block_classification classification;
             size_t early_z_index;
             soc_raster_depth_block_candidate depth_candidate;
             uint64_t coverage_mask;
             uint64_t cell_coverage_mask;
-            make_tile_edges(setup, block_x, block_y, tile_edges);
             classification = classify_raster_block(
                 tile_edges,
                 block_width,
                 block_height
             );
             if (classification == SOC_RASTER_BLOCK_OUTSIDE) {
-                continue;
+                goto advance_fine_block;
             }
             if (rasterizer->mode == SOC_RASTERIZER_MODE_MASKED) {
                 coverage_mask = make_raster_block_mask(
@@ -2787,7 +2988,7 @@ static void rasterize_triangle_blocks_fine(
                         cell_coverage_mask
                     );
                 }
-                continue;
+                goto advance_fine_block;
             }
             early_z_index = find_early_z_block_index(
                 rasterizer,
@@ -2806,7 +3007,7 @@ static void rasterize_triangle_blocks_fine(
                     &depth_candidate,
                     rasterizer->early_z_farthest_depths[early_z_index]
                 ) == SOC_TRUE) {
-                continue;
+                goto advance_fine_block;
             }
             coverage_mask = make_raster_block_mask(
                 tile_edges,
@@ -2847,6 +3048,11 @@ static void rasterize_triangle_blocks_fine(
                     }
                 }
             }
+advance_fine_block:
+            advance_raster_block_edge_cursor(
+                &edge_cursor,
+                aligned_x == first_aligned_x ? SOC_TRUE : SOC_FALSE
+            );
         }
     }
 }
@@ -3027,9 +3233,17 @@ static void rasterize_triangle_blocks_to_target(
 {
     const uint32_t target_end_x = target->origin_x + target->width;
     const uint32_t target_end_y = target->origin_y + target->height;
+    const uint32_t first_aligned_x = region->minimum_x &
+        ~(SOC_RASTER_BLOCK_SIZE - 1u);
+    soc_raster_block_edge_cursor edge_cursor;
     uint32_t aligned_y = region->minimum_y &
         ~(SOC_RASTER_BLOCK_SIZE - 1u);
 
+    initialize_raster_block_edge_cursor(
+        setup,
+        region->minimum_x,
+        &edge_cursor
+    );
     for (; aligned_y < region->end_y;
          aligned_y += SOC_RASTER_BLOCK_SIZE) {
         const uint32_t block_y = aligned_y < region->minimum_y
@@ -3041,8 +3255,14 @@ static void rasterize_triangle_blocks_to_target(
             ? aligned_end_y
             : region->end_y;
         const uint32_t block_height = block_end_y - block_y;
-        uint32_t aligned_x = region->minimum_x &
-            ~(SOC_RASTER_BLOCK_SIZE - 1u);
+        uint32_t aligned_x = first_aligned_x;
+
+        reset_raster_block_edge_cursor_row(
+            setup,
+            region->minimum_x,
+            block_y,
+            &edge_cursor
+        );
 
         for (; aligned_x < region->end_x;
              aligned_x += SOC_RASTER_BLOCK_SIZE) {
@@ -3063,20 +3283,20 @@ static void rasterize_triangle_blocks_to_target(
                 : target_end_y;
             const uint32_t physical_width = physical_end_x - aligned_x;
             const uint32_t physical_height = physical_end_y - aligned_y;
-            soc_tile_edge tile_edges[3];
+            const soc_tile_edge* tile_edges =
+                materialize_raster_block_edge_cursor(&edge_cursor);
             soc_raster_block_classification classification;
             size_t early_z_index;
             soc_raster_depth_block_candidate depth_candidate;
             uint64_t coverage_mask;
             uint64_t cell_coverage_mask;
-            make_tile_edges(setup, block_x, block_y, tile_edges);
             classification = classify_raster_block(
                 tile_edges,
                 block_width,
                 block_height
             );
             if (classification == SOC_RASTER_BLOCK_OUTSIDE) {
-                continue;
+                goto advance_target_block;
             }
             early_z_index = find_target_early_z_block_index(
                 target,
@@ -3095,7 +3315,7 @@ static void rasterize_triangle_blocks_to_target(
                     &depth_candidate,
                     target->early_z_farthest_depths[early_z_index]
                 ) == SOC_TRUE) {
-                continue;
+                goto advance_target_block;
             }
             coverage_mask = make_raster_block_mask(
                 tile_edges,
@@ -3132,6 +3352,11 @@ static void rasterize_triangle_blocks_to_target(
                     physical_height
                 );
             }
+advance_target_block:
+            advance_raster_block_edge_cursor(
+                &edge_cursor,
+                aligned_x == first_aligned_x ? SOC_TRUE : SOC_FALSE
+            );
         }
     }
 }
@@ -3378,6 +3603,40 @@ static soc_result process_clip_triangle(
         two_sided,
         screen
     );
+
+    *out_rasterized = SOC_FALSE;
+    if (setup_result == SOC_RASTER_SETUP_REJECTED) {
+        return SOC_RESULT_OK;
+    }
+    return process_screen_triangle(
+        rasterizer,
+        screen,
+        NULL,
+        prepared,
+        out_rasterized
+    );
+}
+
+static soc_result process_guard_band_clip_triangle(
+    soc_rasterizer* rasterizer,
+    const soc_clip_vertex* clip0,
+    const soc_clip_vertex* clip1,
+    const soc_clip_vertex* clip2,
+    soc_bool two_sided,
+    soc_raster_prepared_list* prepared,
+    soc_bool* out_rasterized
+)
+{
+    soc_screen_vertex screen[3];
+    const soc_raster_setup_result setup_result =
+        prepare_guard_band_screen_triangle(
+            rasterizer,
+            clip0,
+            clip1,
+            clip2,
+            two_sided,
+            screen
+        );
 
     *out_rasterized = SOC_FALSE;
     if (setup_result == SOC_RASTER_SETUP_REJECTED) {
@@ -3892,6 +4151,7 @@ static SOC_NOINLINE soc_result process_occluder_triangles_cached(
         soc_clip_outcode active_planes;
         soc_clip_classification clip_classification;
         soc_kernel_clip_metadata clip_metadata;
+        soc_bool uses_guard_band = SOC_FALSE;
         uint32_t clipped_vertex_count;
         uint32_t fan_index;
         const uint32_t mesh_indices[3] = {
@@ -3957,6 +4217,37 @@ static SOC_NOINLINE soc_result process_occluder_triangles_cached(
         }
 
         ++rasterizer->clipped_triangle_count;
+        if ((active_planes & SOC_CLIP_LATERAL_PLANE_MASK) != 0u &&
+            triangle_inside_clip_guard_band(
+                clip_triangle_vertices,
+                active_planes
+            ) == SOC_TRUE) {
+            uses_guard_band = SOC_TRUE;
+            active_planes = (soc_clip_outcode)(
+                active_planes & SOC_CLIP_DEPTH_PLANE_MASK
+            );
+            if (active_planes == 0u) {
+                soc_bool was_rasterized;
+                const soc_result result =
+                    process_guard_band_clip_triangle(
+                        rasterizer,
+                        &clip_triangle_vertices[0],
+                        &clip_triangle_vertices[1],
+                        &clip_triangle_vertices[2],
+                        two_sided,
+                        prepared,
+                        &was_rasterized
+                    );
+
+                if (result != SOC_RESULT_OK) {
+                    return result;
+                }
+                if (was_rasterized == SOC_TRUE) {
+                    ++rasterizer->rasterized_triangle_count;
+                }
+                continue;
+            }
+        }
         clipped_vertex_count = clip_triangle(
             rasterizer,
             clip_triangle_vertices,
@@ -3972,7 +4263,16 @@ static SOC_NOINLINE soc_result process_occluder_triangles_cached(
              ++fan_index) {
             soc_screen_vertex screen[3];
             const soc_raster_setup_result setup_result =
-                prepare_screen_triangle(
+                uses_guard_band == SOC_TRUE
+                ? prepare_guard_band_screen_triangle(
+                    rasterizer,
+                    &clipped_polygon[0],
+                    &clipped_polygon[fan_index],
+                    &clipped_polygon[fan_index + 1u],
+                    two_sided,
+                    screen
+                )
+                : prepare_screen_triangle(
                     rasterizer,
                     &clipped_polygon[0],
                     &clipped_polygon[fan_index],
@@ -4068,6 +4368,7 @@ static soc_result process_occluder_triangles(
         soc_clip_outcode active_planes;
         soc_clip_classification clip_classification;
         soc_kernel_clip_metadata clip_metadata;
+        soc_bool uses_guard_band = SOC_FALSE;
         uint32_t clipped_vertex_count;
         uint32_t fan_index;
         const uint32_t mesh_index0 = read_mesh_index(
@@ -4127,6 +4428,37 @@ static soc_result process_occluder_triangles(
         }
 
         ++rasterizer->clipped_triangle_count;
+        if ((active_planes & SOC_CLIP_LATERAL_PLANE_MASK) != 0u &&
+            triangle_inside_clip_guard_band(
+                clip_triangle_vertices,
+                active_planes
+            ) == SOC_TRUE) {
+            uses_guard_band = SOC_TRUE;
+            active_planes = (soc_clip_outcode)(
+                active_planes & SOC_CLIP_DEPTH_PLANE_MASK
+            );
+            if (active_planes == 0u) {
+                soc_bool was_rasterized;
+                const soc_result result =
+                    process_guard_band_clip_triangle(
+                        rasterizer,
+                        &clip_triangle_vertices[0],
+                        &clip_triangle_vertices[1],
+                        &clip_triangle_vertices[2],
+                        two_sided,
+                        prepared,
+                        &was_rasterized
+                    );
+
+                if (result != SOC_RESULT_OK) {
+                    return result;
+                }
+                if (was_rasterized == SOC_TRUE) {
+                    ++rasterizer->rasterized_triangle_count;
+                }
+                continue;
+            }
+        }
         clipped_vertex_count = clip_triangle(
             rasterizer,
             clip_triangle_vertices,
@@ -4142,7 +4474,16 @@ static soc_result process_occluder_triangles(
              ++fan_index) {
             soc_screen_vertex screen[3];
             const soc_raster_setup_result setup_result =
-                prepare_screen_triangle(
+                uses_guard_band == SOC_TRUE
+                ? prepare_guard_band_screen_triangle(
+                    rasterizer,
+                    &clipped_polygon[0],
+                    &clipped_polygon[fan_index],
+                    &clipped_polygon[fan_index + 1u],
+                    two_sided,
+                    screen
+                )
+                : prepare_screen_triangle(
                     rasterizer,
                     &clipped_polygon[0],
                     &clipped_polygon[fan_index],

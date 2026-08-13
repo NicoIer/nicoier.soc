@@ -1571,14 +1571,23 @@ static int test_clipped_polygon_fans_have_no_cracks(void)
          1.2f,  0.8f, 0.375f,
         -1.8f,  2.0f, 0.375f,
     };
+    static const float beyond_guard_band[9] = {
+        -4.25f, -0.5f, 0.375f,
+         0.80f, -0.8f, 0.375f,
+         0.80f,  0.8f, 0.375f,
+    };
 
     CHECK(check_clipped_fan_coverage(
         clipped_quad,
-        2u
+        1u
     ) == 0);
     CHECK(check_clipped_fan_coverage(
         clipped_pentagon,
-        3u
+        1u
+    ) == 0);
+    CHECK(check_clipped_fan_coverage(
+        beyond_guard_band,
+        2u
     ) == 0);
     return 0;
 }
@@ -1963,7 +1972,7 @@ static int test_triangle_range_submission_matches_full_mesh(void)
     soc_rasterizer_shutdown(&rasterizer);
 
     CHECK(full_capture.clipped_triangle_count == 2u);
-    CHECK(full_capture.rasterized_triangle_count == 4u);
+    CHECK(full_capture.rasterized_triangle_count == 3u);
     CHECK(range_capture.clipped_triangle_count ==
         full_capture.clipped_triangle_count);
     CHECK(range_capture.rasterized_triangle_count ==
@@ -1998,9 +2007,9 @@ static int test_post_transform_cache_matches_uncached_path(void)
          1.6f,  0.0f, 0.50f,
          1.2f,  0.6f, 0.50f,
 
-         0.4f, -0.6f, 0.25f,
-         1.4f,  0.0f, 0.50f,
-         0.4f,  0.6f, 0.75f,
+        -2.0f,  0.0f, -1.50f,
+        -1.2f, -0.6f,  0.50f,
+         0.4f,  0.6f,  0.75f,
     };
     uint32_t indices32[INDEX_COUNT];
     uint16_t indices16[INDEX_COUNT];
@@ -2093,8 +2102,9 @@ static int test_post_transform_cache_matches_uncached_path(void)
 
             CHECK(uncached_immediate.clipped_triangle_count == 16u);
             CHECK(uncached_immediate.rasterized_triangle_count > 16u);
-            CHECK(uncached_prepared_count ==
+            CHECK(uncached_prepared_count <=
                 uncached_prepared.rasterized_triangle_count);
+            CHECK(uncached_prepared_count > 16u);
             CHECK(cached_prepared_count == uncached_prepared_count);
             CHECK(cached_immediate.clipped_triangle_count ==
                 uncached_immediate.clipped_triangle_count);
@@ -2338,8 +2348,8 @@ static int check_prepared_replay_matches_immediate(void)
     ) == 0);
 
     CHECK(immediate.clipped_triangle_count == 2u);
-    CHECK(immediate.rasterized_triangle_count == 5u);
-    CHECK(prepared_count == 4u);
+    CHECK(immediate.rasterized_triangle_count == 3u);
+    CHECK(prepared_count == 2u);
     CHECK(replayed.clipped_triangle_count ==
         immediate.clipped_triangle_count);
     CHECK(replayed.rasterized_triangle_count ==
