@@ -47,6 +47,17 @@ SOC_API soc_bool SOC_CALL soc_device_is_supported(void);
  * config->worker_count is the total execution lane count, including the
  * thread which calls build. Zero selects the online logical CPU count (clamped
  * to 1..SOC_MAX_WORKER_COUNT); one keeps build execution serial.
+ * SOC_CONFIG_FLAG_PREFER_PERFORMANCE_CPUS asks supported platforms to confine
+ * a multi-lane build team to the highest-ranked CPUs available to the
+ * context-creation thread (capacity first, maximum frequency as fallback).
+ * It is a best-effort hint and silently preserves the operating-system policy
+ * when topology discovery or affinity changes are unavailable. On Android,
+ * an affinity-enabled context must be created, used for every build, and
+ * destroyed by one long-lived thread. That thread must not own another live
+ * affinity-enabled context. Context creation confines that thread, helper
+ * threads remain confined for their lifetime, and context destruction
+ * restores the caller's original affinity. A single-lane context keeps the
+ * operating-system policy.
  */
 SOC_API soc_result SOC_CALL soc_context_create(
     const soc_config* config,

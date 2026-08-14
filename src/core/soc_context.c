@@ -77,7 +77,7 @@ static soc_result create_context(
     }
 
     if (config->worker_count > SOC_MAX_WORKER_COUNT ||
-        config->flags != SOC_CONFIG_FLAG_NONE) {
+        (config->flags & ~SOC_CONFIG_FLAG_PREFER_PERFORMANCE_CPUS) != 0u) {
         return SOC_RESULT_UNSUPPORTED;
     }
 
@@ -100,9 +100,14 @@ static soc_result create_context(
         return SOC_RESULT_INTERNAL_ERROR;
     }
 
+    soc_bool prefer_performance_cpus =
+        (config->flags & SOC_CONFIG_FLAG_PREFER_PERFORMANCE_CPUS) != 0u
+            ? SOC_TRUE
+            : SOC_FALSE;
     result = soc_thread_pool_initialize(
         &context->thread_pool,
-        context->worker_count
+        context->worker_count,
+        prefer_performance_cpus
     );
     if (result != SOC_RESULT_OK) {
         free(context);

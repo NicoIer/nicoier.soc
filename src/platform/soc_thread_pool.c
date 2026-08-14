@@ -1,9 +1,28 @@
+#if defined(__ANDROID__)
+    #define SOC_THREAD_POOL_USE_ANDROID_AFFINITY 1
+    /* Bionic exposes cpu_set_t and sched_setaffinity under __USE_GNU. */
+    #if !defined(_GNU_SOURCE)
+        #define _GNU_SOURCE 1
+    #endif
+#else
+    #define SOC_THREAD_POOL_USE_ANDROID_AFFINITY 0
+#endif
+
 #include "platform/soc_thread_pool.h"
 
 #include <assert.h>
+#include <inttypes.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+#if SOC_THREAD_POOL_USE_ANDROID_AFFINITY
+    #include <fcntl.h>
+    #include <sched.h>
+    #include <unistd.h>
+#endif
 
 #if defined(_WIN32)
     #if !defined(WIN32_LEAN_AND_MEAN)
@@ -37,6 +56,12 @@ struct soc_thread_pool_implementation {
     uint32_t remaining_helpers;
     soc_bool stopping;
 
+#if SOC_THREAD_POOL_USE_ANDROID_AFFINITY
+    cpu_set_t performance_cpu_set;
+    cpu_set_t caller_original_cpu_set;
+    soc_bool performance_affinity_enabled;
+    soc_bool caller_affinity_changed;
+#endif
     soc_thread_pool_worker* workers;
 #if defined(_WIN32)
     HANDLE* threads;
@@ -52,6 +77,199 @@ struct soc_thread_pool_implementation {
     pthread_cond_t work_complete;
 #endif
 };
+
+uint32_t soc_thread_pool_select_performance_cpus(
+    const uint64_t* scores,
+    uint32_t cpu_count,
+    uint32_t worker_count,
+    soc_bool* out_selected
+)
+{
+    uint32_t selected_count = 0u;
+    uint32_t cpu_index;
+
+    if (scores == NULL || out_selected == NULL || cpu_count == 0u ||
+        worker_count == 0u) {
+        return 0u;
+    }
+    for (cpu_index = 0u; cpu_index < cpu_count; ++cpu_index) {
+        out_selected[cpu_index] = SOC_FALSE;
+    }
+
+    while (selected_count < worker_count && selected_count < cpu_count) {
+        uint64_t highest_score = 0u;
+        uint64_t lowest_score = UINT64_MAX;
+
+        for (cpu_index = 0u; cpu_index < cpu_count; ++cpu_index) {
+            if (out_selected[cpu_index] != SOC_TRUE &&
+                scores[cpu_index] > highest_score) {
+                highest_score = scores[cpu_index];
+            }
+            if (out_selected[cpu_index] != SOC_TRUE &&
+                scores[cpu_index] < lowest_score) {
+                lowest_score = scores[cpu_index];
+            }
+        }
+        if (selected_count == 0u && highest_score == lowest_score) {
+            for (cpu_index = 0u; cpu_index < cpu_count; ++cpu_index) {
+                out_selected[cpu_index] = SOC_TRUE;
+            }
+            return cpu_count;
+        }
+        for (cpu_index = 0u; cpu_index < cpu_count; ++cpu_index) {
+            if (out_selected[cpu_index] != SOC_TRUE &&
+                scores[cpu_index] == highest_score) {
+                out_selected[cpu_index] = SOC_TRUE;
+                ++selected_count;
+                if (selected_count == worker_count) {
+                    break;
+                }
+            }
+        }
+    }
+    return selected_count;
+}
+
+#if SOC_THREAD_POOL_USE_ANDROID_AFFINITY
+
+static soc_bool read_positive_uint64_file(
+    const char* path,
+    uint64_t* out_value
+)
+{
+    char buffer[32];
+    uint64_t value = 0u;
+    ssize_t length;
+    size_t index = 0u;
+    int descriptor;
+
+    descriptor = open(path, O_RDONLY | O_CLOEXEC);
+    if (descriptor < 0) {
+        return SOC_FALSE;
+    }
+    length = read(descriptor, buffer, sizeof(buffer));
+    (void)close(descriptor);
+    if (length <= 0) {
+        return SOC_FALSE;
+    }
+    while (index < (size_t)length &&
+        buffer[index] >= '0' && buffer[index] <= '9') {
+        value = value * UINT64_C(10) +
+            (uint64_t)(buffer[index] - '0');
+        ++index;
+    }
+    if (index == 0u || value == 0u) {
+        return SOC_FALSE;
+    }
+    *out_value = value;
+    return SOC_TRUE;
+}
+
+static soc_bool read_cpu_scores(
+    const uint32_t* cpu_indices,
+    uint32_t cpu_count,
+    const char* attribute,
+    uint64_t* out_scores
+)
+{
+    char path[128];
+    uint32_t index;
+
+    for (index = 0u; index < cpu_count; ++index) {
+        const int length = snprintf(
+            path,
+            sizeof(path),
+            "/sys/devices/system/cpu/cpu%" PRIu32 "/%s",
+            cpu_indices[index],
+            attribute
+        );
+
+        if (length <= 0 || (size_t)length >= sizeof(path) ||
+            read_positive_uint64_file(path, &out_scores[index]) != SOC_TRUE) {
+            return SOC_FALSE;
+        }
+    }
+    return SOC_TRUE;
+}
+
+static void discover_performance_cpu_set(
+    soc_thread_pool_implementation* implementation,
+    uint32_t worker_count
+)
+{
+    static const char capacity_attribute[] = "cpu_capacity";
+    static const char frequency_attribute[] =
+        "cpufreq/cpuinfo_max_freq";
+    cpu_set_t allowed_cpu_set;
+    uint32_t cpu_indices[CPU_SETSIZE];
+    uint64_t scores[CPU_SETSIZE];
+    soc_bool selected[CPU_SETSIZE];
+    uint32_t allowed_count = 0u;
+    uint32_t selected_count;
+    uint32_t cpu_index;
+
+    if (sched_getaffinity(0, sizeof(allowed_cpu_set), &allowed_cpu_set) != 0) {
+        return;
+    }
+    for (cpu_index = 0u; cpu_index < CPU_SETSIZE; ++cpu_index) {
+        if (CPU_ISSET(cpu_index, &allowed_cpu_set)) {
+            cpu_indices[allowed_count++] = cpu_index;
+        }
+    }
+    if (allowed_count <= worker_count) {
+        return;
+    }
+
+    if (read_cpu_scores(
+            cpu_indices,
+            allowed_count,
+            capacity_attribute,
+            scores
+        ) != SOC_TRUE &&
+        read_cpu_scores(
+            cpu_indices,
+            allowed_count,
+            frequency_attribute,
+            scores
+        ) != SOC_TRUE) {
+        return;
+    }
+    selected_count = soc_thread_pool_select_performance_cpus(
+        scores,
+        allowed_count,
+        worker_count,
+        selected
+    );
+    if (selected_count < worker_count || selected_count >= allowed_count) {
+        return;
+    }
+
+    CPU_ZERO(&implementation->performance_cpu_set);
+    for (cpu_index = 0u; cpu_index < allowed_count; ++cpu_index) {
+        if (selected[cpu_index] == SOC_TRUE) {
+            CPU_SET(
+                cpu_indices[cpu_index],
+                &implementation->performance_cpu_set
+            );
+        }
+    }
+    implementation->performance_affinity_enabled = SOC_TRUE;
+}
+
+static soc_bool pin_current_thread_to_performance_cpus(
+    const soc_thread_pool_implementation* implementation
+)
+{
+    return sched_setaffinity(
+        0,
+        sizeof(implementation->performance_cpu_set),
+        &implementation->performance_cpu_set
+    ) == 0
+        ? SOC_TRUE
+        : SOC_FALSE;
+}
+
+#endif
 
 #if defined(_WIN32)
 
@@ -274,7 +492,18 @@ static void join_worker_thread(
 
 static void* worker_entry(void* user_data)
 {
-    worker_run((soc_thread_pool_worker*)user_data);
+    soc_thread_pool_worker* worker = (soc_thread_pool_worker*)user_data;
+
+#if SOC_THREAD_POOL_USE_ANDROID_AFFINITY
+    if (worker->implementation->performance_affinity_enabled) {
+        /* One attempt during worker initialization; never retry in a run. */
+        (void)pin_current_thread_to_performance_cpus(
+            worker->implementation
+        );
+    }
+#endif
+
+    worker_run(worker);
     return NULL;
 }
 
@@ -328,7 +557,8 @@ static void stop_and_join_created_workers(
 
 soc_result soc_thread_pool_initialize(
     soc_thread_pool* thread_pool,
-    uint32_t worker_count
+    uint32_t worker_count,
+    soc_bool prefer_performance_cpus
 )
 {
     soc_thread_pool_implementation* implementation;
@@ -356,6 +586,13 @@ soc_result soc_thread_pool_initialize(
         return SOC_RESULT_OUT_OF_MEMORY;
     }
     implementation->helper_count = worker_count - 1u;
+#if SOC_THREAD_POOL_USE_ANDROID_AFFINITY
+    if (prefer_performance_cpus == SOC_TRUE) {
+        discover_performance_cpu_set(implementation, worker_count);
+    }
+#else
+    (void)prefer_performance_cpus;
+#endif
     implementation->workers = calloc(
         implementation->helper_count,
         sizeof(*implementation->workers)
@@ -407,6 +644,22 @@ soc_result soc_thread_pool_initialize(
         ++implementation->created_helper_count;
     }
 
+#if SOC_THREAD_POOL_USE_ANDROID_AFFINITY
+    if (implementation->performance_affinity_enabled == SOC_TRUE &&
+        sched_getaffinity(
+            0,
+            sizeof(implementation->caller_original_cpu_set),
+            &implementation->caller_original_cpu_set
+        ) == 0 &&
+        !CPU_EQUAL(
+            &implementation->caller_original_cpu_set,
+            &implementation->performance_cpu_set
+        )) {
+        implementation->caller_affinity_changed =
+            pin_current_thread_to_performance_cpus(implementation);
+    }
+#endif
+
     thread_pool->implementation = implementation;
     thread_pool->worker_count = worker_count;
     return SOC_RESULT_OK;
@@ -454,6 +707,16 @@ void soc_thread_pool_shutdown(soc_thread_pool* thread_pool)
 
     implementation = thread_pool->implementation;
     if (implementation != NULL) {
+#if SOC_THREAD_POOL_USE_ANDROID_AFFINITY
+        if (implementation->caller_affinity_changed == SOC_TRUE) {
+            (void)sched_setaffinity(
+                0,
+                sizeof(implementation->caller_original_cpu_set),
+                &implementation->caller_original_cpu_set
+            );
+            implementation->caller_affinity_changed = SOC_FALSE;
+        }
+#endif
 #if defined(_WIN32)
         AcquireSRWLockExclusive(&implementation->run_lock);
 #else

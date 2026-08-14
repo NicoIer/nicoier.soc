@@ -38,6 +38,7 @@
 #define SOC_RASTER_BLOCK_SIZE SOC_KERNEL_RASTER_BLOCK_SIZE
 #define SOC_RASTER_SUBTILE_HEIGHT (SOC_RASTER_BLOCK_SIZE / 2u)
 #define SOC_RASTER_UNTRACKED_TRIANGLE_SIZE UINT32_C(16)
+#define SOC_RASTER_ARM32_FUSED_TRIANGLE_SIZE UINT32_C(3)
 #define SOC_POST_TRANSFORM_CACHE_ENTRY_COUNT \
     SOC_MESH_POST_TRANSFORM_CACHE_ENTRY_COUNT
 #define SOC_POST_TRANSFORM_CACHE_MINIMUM_TRIANGLES UINT32_C(32)
@@ -876,11 +877,65 @@ static void swap_screen_vertices(
     *right = temporary;
 }
 
+/*
+ * AArch32 has a hardware signed-int32-to-float conversion, but Clang lowers
+ * signed-int64-to-float to __aeabi_l2f.  Edge values for small screen-space
+ * triangles normally fit int32, while the public maximum raster dimensions
+ * still require the exact int64 fallback for large edges and areas.
+ */
+#if defined(SOC_BUILD_AARCH32_NEON_FMA)
+static SOC_NOINLINE float fixed_i64_to_f32_wide_arm32(int64_t value)
+{
+    return (float)value;
+}
+#endif
+
+SOC_RASTER_FORCE_INLINE float fixed_i64_to_f32(int64_t value)
+{
+#if defined(SOC_BUILD_AARCH32_NEON_FMA)
+    if (__builtin_expect(
+            value >= INT32_MIN && value <= INT32_MAX,
+            1
+        )) {
+        return (float)(int32_t)value;
+    }
+    /* Keep the compiler from speculating __aeabi_l2f before the range test. */
+    return fixed_i64_to_f32_wide_arm32(value);
+#else
+    return (float)value;
+#endif
+}
+
+/*
+ * An accepted guard-band vertex spans at most [-1.5, 2.5] raster extents;
+ * therefore both a coordinate and the difference of two coordinates fit a
+ * signed int32 under SOC_MAX_RASTER_DIMENSION.  Keep the int64 representation
+ * for exact edge arithmetic, but avoid a conversion helper on AArch32.
+ */
+SOC_RASTER_FORCE_INLINE float screen_fixed_i64_to_f32(int64_t value)
+{
+#if defined(SOC_BUILD_AARCH32_NEON_FMA)
+    return (float)(int32_t)value;
+#else
+    return (float)value;
+#endif
+}
+
+_Static_assert(
+    SOC_MAX_RASTER_DIMENSION <=
+        INT32_MAX / (SOC_RASTER_SUBPIXEL_SCALE * INT64_C(4)),
+    "guard-band fixed coordinate deltas must fit int32"
+);
+
 static int64_t quantize_screen_coordinate(float coordinate)
 {
     const float scaled =
         coordinate * (float)SOC_RASTER_SUBPIXEL_SCALE;
+#if defined(SOC_BUILD_AARCH32_NEON_FMA)
+    return (int64_t)(int32_t)(scaled + 0.5f);
+#else
     return (int64_t)(scaled + 0.5f);
+#endif
 }
 
 static int64_t quantize_guard_band_screen_coordinate(float coordinate)
@@ -888,9 +943,15 @@ static int64_t quantize_guard_band_screen_coordinate(float coordinate)
     const float scaled =
         coordinate * (float)SOC_RASTER_SUBPIXEL_SCALE;
 
+#if defined(SOC_BUILD_AARCH32_NEON_FMA)
+    return scaled >= 0.0f
+        ? (int64_t)(int32_t)(scaled + 0.5f)
+        : -(int64_t)(int32_t)(-scaled + 0.5f);
+#else
     return scaled >= 0.0f
         ? (int64_t)(scaled + 0.5f)
         : -(int64_t)(-scaled + 0.5f);
+#endif
 }
 
 static int64_t fixed_edge_value_at_pixel(
@@ -916,13 +977,11 @@ static void make_tile_edges(
     for (edge_index = 0u; edge_index < 3u; ++edge_index) {
         const soc_edge_equation* edge = &setup->edges[edge_index];
 
-        out_edges[edge_index].value = (float)fixed_edge_value_at_pixel(
-            edge,
-            pixel_x,
-            pixel_y
+        out_edges[edge_index].value = fixed_i64_to_f32(
+            fixed_edge_value_at_pixel(edge, pixel_x, pixel_y)
         );
-        out_edges[edge_index].step_x = (float)edge->step_x;
-        out_edges[edge_index].step_y = (float)edge->step_y;
+        out_edges[edge_index].step_x = fixed_i64_to_f32(edge->step_x);
+        out_edges[edge_index].step_y = fixed_i64_to_f32(edge->step_y);
     }
 }
 
@@ -939,8 +998,10 @@ SOC_RASTER_FORCE_INLINE void initialize_raster_block_edge_cursor(
     for (edge_index = 0u; edge_index < 3u; ++edge_index) {
         const soc_edge_equation* edge = &setup->edges[edge_index];
 
-        cursor->edges[edge_index].step_x = (float)edge->step_x;
-        cursor->edges[edge_index].step_y = (float)edge->step_y;
+        cursor->edges[edge_index].step_x =
+            fixed_i64_to_f32(edge->step_x);
+        cursor->edges[edge_index].step_y =
+            fixed_i64_to_f32(edge->step_y);
         cursor->first_block_increments[edge_index] =
             edge->step_x * (int64_t)first_block_advance;
         cursor->full_block_increments[edge_index] =
@@ -975,7 +1036,7 @@ materialize_raster_block_edge_cursor(
 
     for (edge_index = 0u; edge_index < 3u; ++edge_index) {
         cursor->edges[edge_index].value =
-            (float)cursor->values[edge_index];
+            fixed_i64_to_f32(cursor->values[edge_index]);
     }
     return cursor->edges;
 }
@@ -1026,24 +1087,28 @@ static void configure_snapped_depth_plane(
 {
     const float inverse_subpixel_scale =
         1.0f / (float)SOC_RASTER_SUBPIXEL_SCALE;
-    const float delta_x10 =
-        (float)(screen[1].fixed_x - screen[0].fixed_x) *
+    const float delta_x10 = screen_fixed_i64_to_f32(
+        screen[1].fixed_x - screen[0].fixed_x
+    ) *
         inverse_subpixel_scale;
-    const float delta_y10 =
-        (float)(screen[1].fixed_y - screen[0].fixed_y) *
+    const float delta_y10 = screen_fixed_i64_to_f32(
+        screen[1].fixed_y - screen[0].fixed_y
+    ) *
         inverse_subpixel_scale;
-    const float delta_x20 =
-        (float)(screen[2].fixed_x - screen[0].fixed_x) *
+    const float delta_x20 = screen_fixed_i64_to_f32(
+        screen[2].fixed_x - screen[0].fixed_x
+    ) *
         inverse_subpixel_scale;
-    const float delta_y20 =
-        (float)(screen[2].fixed_y - screen[0].fixed_y) *
+    const float delta_y20 = screen_fixed_i64_to_f32(
+        screen[2].fixed_y - screen[0].fixed_y
+    ) *
         inverse_subpixel_scale;
     const float delta_depth10 = screen[1].depth - screen[0].depth;
     const float delta_depth20 = screen[2].depth - screen[0].depth;
     const float fixed_area_scale =
         (float)SOC_RASTER_SUBPIXEL_SCALE *
         (float)SOC_RASTER_SUBPIXEL_SCALE;
-    const float area = (float)fixed_area / fixed_area_scale;
+    const float area = fixed_i64_to_f32(fixed_area) / fixed_area_scale;
     const float inverse_area = reciprocal_f32(area);
     const float numerator_x = fmaf(
         -delta_depth20,
@@ -1089,10 +1154,10 @@ static void configure_depth_plane(
 )
 {
     soc_raster_depth_plane plane;
-    const float anchor_x =
-        (float)screen[0].fixed_x / (float)SOC_RASTER_SUBPIXEL_SCALE;
-    const float anchor_y =
-        (float)screen[0].fixed_y / (float)SOC_RASTER_SUBPIXEL_SCALE;
+    const float anchor_x = screen_fixed_i64_to_f32(screen[0].fixed_x) /
+        (float)SOC_RASTER_SUBPIXEL_SCALE;
+    const float anchor_y = screen_fixed_i64_to_f32(screen[0].fixed_y) /
+        (float)SOC_RASTER_SUBPIXEL_SCALE;
 
     plane.anchor_x = anchor_x;
     plane.anchor_y = anchor_y;
@@ -1372,11 +1437,13 @@ static void configure_shared_fan_depth_plane(
             (plane_triangle[2].fixed_y - plane_triangle[0].fixed_y) -
         (plane_triangle[1].fixed_y - plane_triangle[0].fixed_y) *
             (plane_triangle[2].fixed_x - plane_triangle[0].fixed_x);
-    out_plane->anchor_x =
-        (float)plane_triangle[0].fixed_x /
+    out_plane->anchor_x = screen_fixed_i64_to_f32(
+        plane_triangle[0].fixed_x
+    ) /
         (float)SOC_RASTER_SUBPIXEL_SCALE;
-    out_plane->anchor_y =
-        (float)plane_triangle[0].fixed_y /
+    out_plane->anchor_y = screen_fixed_i64_to_f32(
+        plane_triangle[0].fixed_y
+    ) /
         (float)SOC_RASTER_SUBPIXEL_SCALE;
     out_plane->anchor = plane_triangle[0].depth;
     configure_snapped_depth_plane(
@@ -1867,6 +1934,133 @@ static void rasterize_depth_block(
     uint64_t coverage_mask
 );
 
+#if defined(SOC_BUILD_AARCH32_NEON_FMA)
+SOC_RASTER_FORCE_INLINE soc_bool fixed_edges_cover_sample_arm32(
+    int64_t edge0,
+    int64_t edge1,
+    int64_t edge2
+)
+{
+    const uint64_t sign_bits =
+        (uint64_t)edge0 | (uint64_t)edge1 | (uint64_t)edge2;
+
+    return (sign_bits >> 63u) == 0u ? SOC_TRUE : SOC_FALSE;
+}
+
+/*
+ * Tiny varying triangles do not amortize a float edge materialization, a
+ * 64-bit coverage mask and an indirect 8x8 kernel call.  Keep coverage in
+ * exact Q8 fixed point, but preserve the depth kernel's row/column FMA order.
+ */
+static SOC_NOINLINE void rasterize_tiny_plane_triangle_fused_arm32(
+    soc_rasterizer* rasterizer,
+    const soc_raster_triangle_setup* setup
+)
+{
+    static const float lane_offsets_values[4] = {
+        0.0f, 1.0f, 2.0f, 3.0f,
+    };
+    const soc_raster_region* region = &setup->bounds;
+    const uint32_t block_width = region->end_x - region->minimum_x;
+    const uint32_t block_height = region->end_y - region->minimum_y;
+    const float32x4_t lane_offsets = vld1q_f32(lane_offsets_values);
+    const float32x4_t zero = vdupq_n_f32(0.0f);
+    const float32x4_t one = vdupq_n_f32(1.0f);
+    const float depth_origin = make_depth_plane_block_origin(
+        setup,
+        region->minimum_x,
+        region->minimum_y
+    );
+    int64_t row_edge0 = fixed_edge_value_at_pixel(
+        &setup->edges[0],
+        region->minimum_x,
+        region->minimum_y
+    );
+    int64_t row_edge1 = fixed_edge_value_at_pixel(
+        &setup->edges[1],
+        region->minimum_x,
+        region->minimum_y
+    );
+    int64_t row_edge2 = fixed_edge_value_at_pixel(
+        &setup->edges[2],
+        region->minimum_x,
+        region->minimum_y
+    );
+    float* destination_row = rasterizer->depth +
+        (size_t)region->minimum_y * rasterizer->width + region->minimum_x;
+    uint32_t row;
+
+    for (row = 0u; row < block_height; ++row) {
+        int64_t edge0 = row_edge0;
+        int64_t edge1 = row_edge1;
+        int64_t edge2 = row_edge2;
+        const soc_bool inside0 = fixed_edges_cover_sample_arm32(
+            edge0,
+            edge1,
+            edge2
+        );
+        soc_bool inside1 = SOC_FALSE;
+        soc_bool inside2 = SOC_FALSE;
+
+        if (block_width >= 2u) {
+            edge0 += setup->edges[0].step_x;
+            edge1 += setup->edges[1].step_x;
+            edge2 += setup->edges[2].step_x;
+            inside1 = fixed_edges_cover_sample_arm32(edge0, edge1, edge2);
+        }
+        if (block_width >= 3u) {
+            edge0 += setup->edges[0].step_x;
+            edge1 += setup->edges[1].step_x;
+            edge2 += setup->edges[2].step_x;
+            inside2 = fixed_edges_cover_sample_arm32(edge0, edge1, edge2);
+        }
+
+        if (inside0 == SOC_TRUE || inside1 == SOC_TRUE ||
+            inside2 == SOC_TRUE) {
+            const float row_depth = fmaf(
+                setup->depth_step_y,
+                (float)row,
+                depth_origin
+            );
+            float32x4_t candidates = vfmaq_n_f32(
+                vdupq_n_f32(row_depth),
+                lane_offsets,
+                setup->depth_step_x
+            );
+
+            candidates = vmaxq_f32(candidates, zero);
+            candidates = vminq_f32(candidates, one);
+            if (inside0 == SOC_TRUE) {
+                const float candidate = vgetq_lane_f32(candidates, 0);
+
+                if (candidate > destination_row[0]) {
+                    destination_row[0] = candidate;
+                }
+            }
+            if (inside1 == SOC_TRUE) {
+                const float candidate = vgetq_lane_f32(candidates, 1);
+
+                if (candidate > destination_row[1]) {
+                    destination_row[1] = candidate;
+                }
+            }
+            if (inside2 == SOC_TRUE) {
+                const float candidate = vgetq_lane_f32(candidates, 2);
+
+                if (candidate > destination_row[2]) {
+                    destination_row[2] = candidate;
+                }
+            }
+        }
+
+        row_edge0 += setup->edges[0].step_y;
+        row_edge1 += setup->edges[1].step_y;
+        row_edge2 += setup->edges[2].step_y;
+        destination_row += rasterizer->width;
+    }
+}
+#endif
+
 /* A <=8x8 varying triangle is cheaper as one rectangular kernel call. */
 static void rasterize_small_plane_triangle_untracked(
     soc_rasterizer* rasterizer,
@@ -1879,6 +2073,14 @@ static void rasterize_small_plane_triangle_untracked(
     soc_tile_edge tile_edges[3];
     soc_raster_depth_block_candidate depth_candidate;
     uint64_t coverage_mask;
+
+#if defined(SOC_BUILD_AARCH32_NEON_FMA)
+    if (block_width <= SOC_RASTER_ARM32_FUSED_TRIANGLE_SIZE &&
+        block_height <= SOC_RASTER_ARM32_FUSED_TRIANGLE_SIZE) {
+        rasterize_tiny_plane_triangle_fused_arm32(rasterizer, setup);
+        return;
+    }
+#endif
 
     make_tile_edges(
         setup,
@@ -2044,6 +2246,65 @@ static float make_masked_farthest_depth(
     depth = fmaf(setup->depth_step_y, (float)farthest_y, depth);
     return clamp_depth(depth);
 }
+
+#if defined(SOC_BUILD_AARCH32_NEON_FMA)
+/*
+ * A tiny block is cheaper to cover directly in Q8 fixed point than to
+ * convert three 64-bit edges to float, classify four corners, and construct
+ * the same mask through the general SIMD path.  Keeping every edge test in
+ * fixed point also preserves the exact top-left bias from make_edge_equation.
+ */
+SOC_RASTER_FORCE_INLINE uint32_t
+make_masked_tiny_fixed_coverage_arm32(
+    const soc_raster_triangle_setup* setup,
+    uint32_t block_x,
+    uint32_t block_y,
+    uint32_t block_width,
+    uint32_t block_height
+)
+{
+    int64_t row_edge0 = fixed_edge_value_at_pixel(
+        &setup->edges[0],
+        block_x,
+        block_y
+    );
+    int64_t row_edge1 = fixed_edge_value_at_pixel(
+        &setup->edges[1],
+        block_x,
+        block_y
+    );
+    int64_t row_edge2 = fixed_edge_value_at_pixel(
+        &setup->edges[2],
+        block_x,
+        block_y
+    );
+    uint32_t coverage = 0u;
+    uint32_t row;
+
+    for (row = 0u; row < block_height; ++row) {
+        int64_t edge0 = row_edge0;
+        int64_t edge1 = row_edge1;
+        int64_t edge2 = row_edge2;
+        uint32_t row_coverage = 0u;
+        uint32_t column;
+
+        for (column = 0u; column < block_width; ++column) {
+            if (fixed_edges_cover_sample_arm32(edge0, edge1, edge2) ==
+                SOC_TRUE) {
+                row_coverage |= UINT32_C(1) << column;
+            }
+            edge0 += setup->edges[0].step_x;
+            edge1 += setup->edges[1].step_x;
+            edge2 += setup->edges[2].step_x;
+        }
+        coverage |= row_coverage << (row * SOC_RASTER_BLOCK_SIZE);
+        row_edge0 += setup->edges[0].step_y;
+        row_edge1 += setup->edges[1].step_y;
+        row_edge2 += setup->edges[2].step_y;
+    }
+    return coverage;
+}
+#endif
 
 static void update_masked_quick_subtile(
     soc_rasterizer* rasterizer,
@@ -2249,26 +2510,43 @@ static soc_bool try_rasterize_masked_single_subtile(
         return SOC_FALSE;
     }
 
-    make_tile_edges(
-        setup,
-        region->minimum_x,
-        region->minimum_y,
-        tile_edges
-    );
-    classification = classify_raster_block(
-        tile_edges,
-        block_width,
-        block_height
-    );
-    if (classification == SOC_RASTER_BLOCK_OUTSIDE) {
+#if defined(SOC_BUILD_AARCH32_NEON_FMA)
+    if (block_width <= SOC_RASTER_ARM32_FUSED_TRIANGLE_SIZE &&
+        block_height <= SOC_RASTER_ARM32_FUSED_TRIANGLE_SIZE) {
+        coverage = make_masked_tiny_fixed_coverage_arm32(
+            setup,
+            region->minimum_x,
+            region->minimum_y,
+            block_width,
+            block_height
+        );
+    } else
+#endif
+    {
+        make_tile_edges(
+            setup,
+            region->minimum_x,
+            region->minimum_y,
+            tile_edges
+        );
+        classification = classify_raster_block(
+            tile_edges,
+            block_width,
+            block_height
+        );
+        if (classification == SOC_RASTER_BLOCK_OUTSIDE) {
+            return SOC_TRUE;
+        }
+        coverage = make_raster_block_mask(
+            tile_edges,
+            block_width,
+            block_height,
+            classification
+        );
+    }
+    if (coverage == 0u) {
         return SOC_TRUE;
     }
-    coverage = make_raster_block_mask(
-        tile_edges,
-        block_width,
-        block_height,
-        classification
-    );
     coverage <<=
         (region->minimum_y - aligned_y) * SOC_RASTER_BLOCK_SIZE +
         region->minimum_x - aligned_x;
@@ -2350,21 +2628,38 @@ static void rasterize_triangle_masked_subtiles(
                     continue;
                 }
             }
-            make_tile_edges(setup, block_x, block_y, tile_edges);
-            classification = classify_raster_block(
-                tile_edges,
-                block_width,
-                block_height
-            );
-            if (classification == SOC_RASTER_BLOCK_OUTSIDE) {
+#if defined(SOC_BUILD_AARCH32_NEON_FMA)
+            if (block_width <= SOC_RASTER_ARM32_FUSED_TRIANGLE_SIZE &&
+                block_height <= SOC_RASTER_ARM32_FUSED_TRIANGLE_SIZE) {
+                coverage = make_masked_tiny_fixed_coverage_arm32(
+                    setup,
+                    block_x,
+                    block_y,
+                    block_width,
+                    block_height
+                );
+            } else
+#endif
+            {
+                make_tile_edges(setup, block_x, block_y, tile_edges);
+                classification = classify_raster_block(
+                    tile_edges,
+                    block_width,
+                    block_height
+                );
+                if (classification == SOC_RASTER_BLOCK_OUTSIDE) {
+                    continue;
+                }
+                coverage = make_raster_block_mask(
+                    tile_edges,
+                    block_width,
+                    block_height,
+                    classification
+                );
+            }
+            if (coverage == 0u) {
                 continue;
             }
-            coverage = make_raster_block_mask(
-                tile_edges,
-                block_width,
-                block_height,
-                classification
-            );
             coverage <<=
                 (block_y - aligned_y) * SOC_RASTER_BLOCK_SIZE +
                 block_x - aligned_x;

@@ -24,7 +24,8 @@ typedef struct soc_thread_pool {
 
 soc_result soc_thread_pool_initialize(
     soc_thread_pool* thread_pool,
-    uint32_t worker_count
+    uint32_t worker_count,
+    soc_bool prefer_performance_cpus
 );
 
 void soc_thread_pool_shutdown(soc_thread_pool* thread_pool);
@@ -50,6 +51,14 @@ void soc_thread_pool_run_active(
     uint32_t active_worker_count,
     soc_thread_pool_callback callback,
     void* user_data
+);
+
+/* Pure tier selector shared by Android topology discovery and unit tests. */
+uint32_t soc_thread_pool_select_performance_cpus(
+    const uint64_t* scores,
+    uint32_t cpu_count,
+    uint32_t worker_count,
+    soc_bool* out_selected
 );
 
 uint32_t soc_thread_pool_worker_count(const soc_thread_pool* thread_pool);

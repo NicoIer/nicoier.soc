@@ -96,7 +96,7 @@ _Static_assert(
     "SOC_ABI_VERSION encoding changed"
 );
 _Static_assert(SOC_ABI_VERSION_MAJOR == 3u, "unexpected ABI major version");
-_Static_assert(SOC_ABI_VERSION_MINOR == 1u, "unexpected ABI minor version");
+_Static_assert(SOC_ABI_VERSION_MINOR == 2u, "unexpected ABI minor version");
 
 int main(void)
 {

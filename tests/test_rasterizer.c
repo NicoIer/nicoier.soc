@@ -4643,7 +4643,8 @@ static int check_shared_tile_locks_match_serial(
     CHECK(tile_locks.lock_count == 9u);
     CHECK(soc_thread_pool_initialize(
         &thread_pool,
-        RASTERIZER_COUNT
+        RASTERIZER_COUNT,
+        SOC_FALSE
     ) == SOC_RESULT_OK);
 
     for (pixel = 0u; pixel < pixel_count; ++pixel) {

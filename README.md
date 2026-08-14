@@ -72,6 +72,32 @@ adb shell /data/local/tmp/soc_bench \
 adb pull /data/local/tmp/soc-bench.json ./soc-bench-android.json
 ```
 
+32 位 Android 使用标准 `android-armeabi-v7a` preset。下面以 OBJ benchmark
+为例显式请求通用的性能 CPU 偏好；库不会根据设备型号、输入文件名或
+worker 数隐式开启 CPU 亲和性：
+
+```sh
+cmake --preset android-armeabi-v7a \
+  -DSOC_BUILD_SHARED=OFF \
+  -DSOC_BUILD_BENCHMARKS=ON
+cmake --build --preset android-armeabi-v7a \
+  --target soc_obj_bench --parallel
+
+adb push build/platform/android-armeabi-v7a/benchmarks/soc_obj_bench \
+  /data/local/tmp/soc_obj_bench
+adb push examples/test002.obj /data/local/tmp/test002.obj
+adb shell 'cd /data/local/tmp && ./soc_obj_bench \
+  --input ./test002.obj --latency-count 10000 --workers 4 \
+  --prefer-performance-cpus'
+```
+
+`SOC_CONFIG_FLAG_PREFER_PERFORMANCE_CPUS` 会从 context 创建线程允许的 CPU
+中优先读取 `cpu_capacity`，否则读取 `cpuinfo_max_freq`，再选择足以承载
+全部 lanes 的最高性能候选；检测或设置失败时保持系统调度策略。该偏好
+只在 `worker_count > 1` 时生效。context 的创建、所有 build 和销毁必须由
+同一个长期存活的线程完成，且该线程不能同时持有另一个已请求该偏好的
+context；单 worker 仍使用系统调度策略。
+
 ## 参考
 
 https://www.intel.com/content/www/us/en/developer/articles/technical/masked-software-occlusion-culling.html

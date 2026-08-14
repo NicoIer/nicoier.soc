@@ -142,7 +142,14 @@ static int test_invalid_arguments(void)
         .width = 320u,
         .height = 180u,
         .worker_count = 0u,
-        .flags = 1u,
+        .flags = UINT32_C(1) << 31u,
+    };
+    const soc_config performance_cpu_config = {
+        .struct_size = sizeof(soc_config),
+        .width = 320u,
+        .height = 180u,
+        .worker_count = 2u,
+        .flags = SOC_CONFIG_FLAG_PREFER_PERFORMANCE_CPUS,
     };
     const soc_config single_worker_config = {
         .struct_size = sizeof(soc_config),
@@ -212,6 +219,14 @@ static int test_invalid_arguments(void)
         return 1;
     }
 
+    soc_context_destroy(context);
+    context = NULL;
+    if (soc_context_create(&performance_cpu_config, &context) !=
+            SOC_RESULT_OK ||
+        context == NULL) {
+        soc_context_destroy(context);
+        return 1;
+    }
     soc_context_destroy(context);
     context = NULL;
     if (soc_context_create(&two_worker_config, &context) != SOC_RESULT_OK ||

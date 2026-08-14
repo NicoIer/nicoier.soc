@@ -47,7 +47,9 @@ typedef struct options {
     const char* input_path;
     uint32_t sample_count;
     uint32_t sample_ms;
+    uint32_t latency_count;
     uint32_t worker_count;
+    soc_bool prefer_performance_cpus;
 } options;
 
 typedef struct validation_result {
@@ -61,10 +63,15 @@ static void print_usage(FILE* stream, const char* executable)
     (void)fprintf(
         stream,
         "Usage: %s --input benchmark.obj [--samples N] [--sample-ms N] "
-        "[--workers N]\n"
+        "[--latency-count N] [--workers N] "
+        "[--prefer-performance-cpus]\n"
         "\n"
         "Omitting --workers uses the online logical CPU count; 1 is serial.\n"
         "The worker count includes the thread which calls the build.\n"
+        "--prefer-performance-cpus requests best-effort confinement to the\n"
+        "highest-performance CPUs; unsupported platforms keep OS policy.\n"
+        "--latency-count records N individual build latencies and reports\n"
+        "nearest-rank percentiles instead of throughput samples.\n"
         "The OBJ must contain the '# SOC benchmark OBJ v2' metadata header.\n"
         "Its camera matrix must use reversed Z (near = 1; far = 0 for ZO\n"
         "or -1 for negative-one-to-one clip depth).\n"
@@ -129,12 +136,22 @@ static int parse_options(
                 !parse_uint32(argv[argument], &out_options->sample_ms)) {
                 return 0;
             }
+        } else if (strcmp(argv[argument], "--latency-count") == 0) {
+            if (++argument >= argc ||
+                !parse_uint32(argv[argument], &out_options->latency_count)) {
+                return 0;
+            }
         } else if (strcmp(argv[argument], "--workers") == 0) {
             if (++argument >= argc ||
                 !parse_uint32(argv[argument], &out_options->worker_count) ||
                 out_options->worker_count > SOC_MAX_WORKER_COUNT) {
                 return 0;
             }
+        } else if (strcmp(
+                       argv[argument],
+                       "--prefer-performance-cpus"
+                   ) == 0) {
+            out_options->prefer_performance_cpus = SOC_TRUE;
         } else {
             return 0;
         }
@@ -609,6 +626,21 @@ static uint64_t calculate_median(uint64_t* values, uint32_t count)
          (values[count / 2u] & 1u)) / 2u;
 }
 
+static uint64_t nearest_rank_percentile(
+    const uint64_t* sorted_values,
+    uint32_t count,
+    uint32_t percentile_numerator,
+    uint32_t percentile_denominator
+)
+{
+    const uint64_t rank =
+        ((uint64_t)count * percentile_numerator +
+         percentile_denominator - 1u) /
+        percentile_denominator;
+
+    return sorted_values[rank - 1u];
+}
+
 static int validation_matches(
     const validation_result* left,
     const validation_result* right
@@ -639,6 +671,7 @@ int main(int argc, char** argv)
     validation_result validation_after;
     uint64_t* samples = NULL;
     uint64_t* deviations = NULL;
+    uint64_t* latencies = NULL;
     uint64_t median_ns;
     uint64_t mad_ns;
     uint64_t ignored_iterations;
@@ -647,6 +680,7 @@ int main(int argc, char** argv)
     size_t pixel_count;
     char error[512];
     uint32_t sample;
+    uint32_t latency;
     int parse_result;
     int exit_code = EXIT_FAILURE;
 
@@ -687,7 +721,9 @@ int main(int argc, char** argv)
         .width = metadata.width,
         .height = metadata.height,
         .worker_count = opts.worker_count,
-        .flags = SOC_CONFIG_FLAG_NONE,
+        .flags = opts.prefer_performance_cpus == SOC_TRUE
+            ? SOC_CONFIG_FLAG_PREFER_PERFORMANCE_CPUS
+            : SOC_CONFIG_FLAG_NONE,
     };
     if (soc_context_create(&config, &context) != SOC_RESULT_OK) {
         fprintf(stderr, "soc_obj_bench: context creation failed\n");
@@ -747,36 +783,62 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
-    samples = (uint64_t*)calloc(opts.sample_count, sizeof(*samples));
-    deviations = (uint64_t*)calloc(opts.sample_count, sizeof(*deviations));
-    if (samples == NULL || deviations == NULL) {
-        fprintf(stderr, "soc_obj_bench: sample allocation failed\n");
-        goto cleanup;
-    }
-    sample_target_ns = (uint64_t)opts.sample_ms * UINT64_C(1000000);
-    for (sample = 0u; sample < opts.sample_count; ++sample) {
-        uint64_t iterations;
-
-        if (!run_series(
-                context,
-                mesh,
-                &frame_desc,
-                &object_to_world,
-                sample_target_ns,
-                1u,
-                &samples[sample],
-                &iterations
-            )) {
-            fprintf(stderr, "soc_obj_bench: sample failed\n");
+    if (opts.latency_count != 0u) {
+        latencies = (uint64_t*)calloc(
+            opts.latency_count,
+            sizeof(*latencies)
+        );
+        if (latencies == NULL) {
+            fprintf(stderr, "soc_obj_bench: latency allocation failed\n");
             goto cleanup;
         }
-        printf(
-            "sample_%02" PRIu32 "_ns=%" PRIu64
-            " iterations=%" PRIu64 "\n",
-            sample + 1u,
-            samples[sample],
-            iterations
+        for (latency = 0u; latency < opts.latency_count; ++latency) {
+            if (!run_snapshot_build(
+                    context,
+                    mesh,
+                    &frame_desc,
+                    &object_to_world,
+                    &latencies[latency]
+                )) {
+                fprintf(stderr, "soc_obj_bench: latency sample failed\n");
+                goto cleanup;
+            }
+        }
+    } else {
+        samples = (uint64_t*)calloc(opts.sample_count, sizeof(*samples));
+        deviations = (uint64_t*)calloc(
+            opts.sample_count,
+            sizeof(*deviations)
         );
+        if (samples == NULL || deviations == NULL) {
+            fprintf(stderr, "soc_obj_bench: sample allocation failed\n");
+            goto cleanup;
+        }
+        sample_target_ns = (uint64_t)opts.sample_ms * UINT64_C(1000000);
+        for (sample = 0u; sample < opts.sample_count; ++sample) {
+            uint64_t iterations;
+
+            if (!run_series(
+                    context,
+                    mesh,
+                    &frame_desc,
+                    &object_to_world,
+                    sample_target_ns,
+                    1u,
+                    &samples[sample],
+                    &iterations
+                )) {
+                fprintf(stderr, "soc_obj_bench: sample failed\n");
+                goto cleanup;
+            }
+            printf(
+                "sample_%02" PRIu32 "_ns=%" PRIu64
+                " iterations=%" PRIu64 "\n",
+                sample + 1u,
+                samples[sample],
+                iterations
+            );
+        }
     }
     if (!capture_validation(
             context,
@@ -787,29 +849,56 @@ int main(int argc, char** argv)
             &validation_after
         ) ||
         !validation_matches(&validation_before, &validation_after)) {
-        fprintf(stderr, "soc_obj_bench: post-sampling validation changed\n");
+        fprintf(
+            stderr,
+            opts.latency_count != 0u
+                ? "soc_obj_bench: post-latency validation changed\n"
+                : "soc_obj_bench: post-sampling validation changed\n"
+        );
         goto cleanup;
     }
 
-    median_ns = calculate_median(samples, opts.sample_count);
-    for (sample = 0u; sample < opts.sample_count; ++sample) {
-        deviations[sample] = samples[sample] >= median_ns
-            ? samples[sample] - median_ns
-            : median_ns - samples[sample];
+    if (opts.latency_count != 0u) {
+        qsort(
+            latencies,
+            opts.latency_count,
+            sizeof(latencies[0]),
+            compare_u64
+        );
+        printf(
+            "latency_count=%" PRIu32 " percentile_method=nearest-rank"
+            " p50_ns=%" PRIu64 " p95_ns=%" PRIu64
+            " p99_ns=%" PRIu64 " p99_9_ns=%" PRIu64
+            " max_ns=%" PRIu64 "\n",
+            opts.latency_count,
+            nearest_rank_percentile(latencies, opts.latency_count, 50u, 100u),
+            nearest_rank_percentile(latencies, opts.latency_count, 95u, 100u),
+            nearest_rank_percentile(latencies, opts.latency_count, 99u, 100u),
+            nearest_rank_percentile(latencies, opts.latency_count, 999u, 1000u),
+            latencies[opts.latency_count - 1u]
+        );
+    } else {
+        median_ns = calculate_median(samples, opts.sample_count);
+        for (sample = 0u; sample < opts.sample_count; ++sample) {
+            deviations[sample] = samples[sample] >= median_ns
+                ? samples[sample] - median_ns
+                : median_ns - samples[sample];
+        }
+        mad_ns = calculate_median(deviations, opts.sample_count);
+        printf(
+            "median_ns=%" PRIu64 " p95_ns=%" PRIu64
+            " mad_ns=%" PRIu64 " min_ns=%" PRIu64
+            " max_ns=%" PRIu64 "\n",
+            median_ns,
+            samples[((uint64_t)opts.sample_count * 95u + 99u) / 100u - 1u],
+            mad_ns,
+            samples[0],
+            samples[opts.sample_count - 1u]
+        );
     }
-    mad_ns = calculate_median(deviations, opts.sample_count);
-    printf(
-        "median_ns=%" PRIu64 " p95_ns=%" PRIu64
-        " mad_ns=%" PRIu64 " min_ns=%" PRIu64
-        " max_ns=%" PRIu64 "\n",
-        median_ns,
-        samples[((uint64_t)opts.sample_count * 95u + 99u) / 100u - 1u],
-        mad_ns,
-        samples[0],
-        samples[opts.sample_count - 1u]
-    );
     printf(
         "workers=%" PRIu32 " backend=%s "
+        "prefer_performance_cpus=%s "
         "size=%" PRIu32 "x%" PRIu32
         " vertices=%" PRIu32 " triangles=%" PRIu32
         " clipped=%" PRIu64 " rasterized=%" PRIu64
@@ -818,6 +907,7 @@ int main(int argc, char** argv)
         runtime_info.execution_backend == SOC_EXECUTION_BACKEND_NEON
             ? "neon"
             : "scalar",
+        opts.prefer_performance_cpus == SOC_TRUE ? "requested" : "off",
         metadata.width,
         metadata.height,
         object.vertex_count,
@@ -830,6 +920,7 @@ int main(int argc, char** argv)
     exit_code = EXIT_SUCCESS;
 
 cleanup:
+    free(latencies);
     free(deviations);
     free(samples);
     if (mesh != NULL) {

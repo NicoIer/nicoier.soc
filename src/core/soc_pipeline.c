@@ -29,7 +29,10 @@
     #define SOC_PIPELINE_NOINLINE
 #endif
 
-#define SOC_PARALLEL_TILED_TRIANGLES_PER_WORK_ITEM UINT32_C(1024)
+#define SOC_PARALLEL_TILED_DENSE_MAX_TRIANGLES_PER_WORK_ITEM UINT32_C(1024)
+#define SOC_PARALLEL_TILED_DENSE_MIN_TRIANGLES_PER_WORK_ITEM UINT32_C(128)
+#define SOC_PARALLEL_TILED_DENSE_TARGET_WORK_ITEMS_PER_LANE UINT64_C(4)
+#define SOC_PARALLEL_TILED_MASKED_TRIANGLES_PER_WORK_ITEM UINT32_C(1024)
 #define SOC_PARALLEL_PRIVATE_TRIANGLES_PER_WORK_ITEM UINT32_C(256)
 #define SOC_PARALLEL_DIRECT_REFERENCE_LIMIT ((size_t)256u)
 #define SOC_PARALLEL_HOT_TILE_MINIMUM_REFERENCES ((size_t)1024u)
@@ -64,7 +67,7 @@
 #define SOC_PARALLEL_PRIVATE_MIN_WORK_ITEMS_PER_LANE UINT64_C(4)
 #define SOC_PARALLEL_FUSED_HIZ_TARGET_ELEMENTS_PER_LANE ((size_t)393216u)
 #define SOC_PARALLEL_FUSED_HIZ_MAX_LANE_COUNT UINT32_C(8)
-/* Measured crossover: 2048-triangle core cases win; 2068-triangle OBJ loses. */
+/* Measured crossover on the primary Apple ARM64 workloads. */
 #define SOC_MASKED_DIRECT_TRIANGLE_LIMIT UINT64_C(2049)
 #define SOC_MASKED_PARALLEL_MIN_TRIANGLE_COUNT UINT64_C(4096)
 #define SOC_MASKED_PARALLEL_MAX_LANE_COUNT UINT32_C(8)
@@ -2026,6 +2029,8 @@ static soc_bool try_rasterize_occluders_tiled_dense(
             SOC_PARALLEL_TILED_MAX_LANE_COUNT
         ? context->worker_count
         : SOC_PARALLEL_TILED_MAX_LANE_COUNT;
+    uint32_t triangles_per_work_item =
+        SOC_PARALLEL_TILED_DENSE_MAX_TRIANGLES_PER_WORK_ITEM;
     uint32_t prepare_lane_count;
     uint32_t raster_lane_count = 0u;
     uint32_t lane;
@@ -2049,13 +2054,33 @@ static soc_bool try_rasterize_occluders_tiled_dense(
     uint32_t group_index;
 
     *out_lower_hiz_built = SOC_FALSE;
-    if (configured_lane_count <= 1u ||
-        !calculate_parallel_work_item_count(
+    if (configured_lane_count <= 1u) {
+        return SOC_FALSE;
+    }
+    if (!calculate_parallel_work_item_count(
             desc,
-            SOC_PARALLEL_TILED_TRIANGLES_PER_WORK_ITEM,
+            triangles_per_work_item,
             &work_item_count_u64
-        ) ||
-        work_item_count_u64 == 0u ||
+        )) {
+        return SOC_FALSE;
+    }
+#if defined(SOC_BUILD_AARCH32_NEON_FMA)
+    while (work_item_count_u64 <
+                (uint64_t)configured_lane_count *
+                    SOC_PARALLEL_TILED_DENSE_TARGET_WORK_ITEMS_PER_LANE &&
+        triangles_per_work_item >
+            SOC_PARALLEL_TILED_DENSE_MIN_TRIANGLES_PER_WORK_ITEM) {
+        triangles_per_work_item /= 2u;
+        if (!calculate_parallel_work_item_count(
+                desc,
+                triangles_per_work_item,
+                &work_item_count_u64
+            )) {
+            return SOC_FALSE;
+        }
+    }
+#endif
+    if (work_item_count_u64 == 0u ||
         work_item_count_u64 > (uint64_t)SIZE_MAX) {
         return SOC_FALSE;
     }
@@ -2195,10 +2220,9 @@ static soc_bool try_rasterize_occluders_tiled_dense(
                 const uint32_t remaining =
                     triangle_count - triangle_begin;
                 const uint32_t item_triangle_count =
-                    remaining <
-                        SOC_PARALLEL_TILED_TRIANGLES_PER_WORK_ITEM
+                    remaining < triangles_per_work_item
                         ? remaining
-                        : SOC_PARALLEL_TILED_TRIANGLES_PER_WORK_ITEM;
+                        : triangles_per_work_item;
                 soc_parallel_work_item* work_item;
 
                 if (work_item_index >= work_item_count) {
@@ -2272,7 +2296,7 @@ static soc_bool try_rasterize_occluders_tiled_dense(
         }
         if (!checked_size_add(
                 prepared_reserve_count,
-                (size_t)SOC_PARALLEL_TILED_TRIANGLES_PER_WORK_ITEM,
+                (size_t)triangles_per_work_item,
                 &prepared_reserve_count
             )) {
             result = SOC_RESULT_OUT_OF_MEMORY;
@@ -2727,7 +2751,7 @@ static soc_bool try_rasterize_occluders_tiled_masked(
     }
     if (!calculate_parallel_work_item_count(
             desc,
-            SOC_PARALLEL_TILED_TRIANGLES_PER_WORK_ITEM,
+            SOC_PARALLEL_TILED_MASKED_TRIANGLES_PER_WORK_ITEM,
             &work_item_count_u64
         ) ||
         work_item_count_u64 == 0u ||
@@ -2875,9 +2899,9 @@ static soc_bool try_rasterize_occluders_tiled_masked(
                     triangle_count - triangle_begin;
                 const uint32_t item_triangle_count =
                     remaining <
-                        SOC_PARALLEL_TILED_TRIANGLES_PER_WORK_ITEM
+                        SOC_PARALLEL_TILED_MASKED_TRIANGLES_PER_WORK_ITEM
                         ? remaining
-                        : SOC_PARALLEL_TILED_TRIANGLES_PER_WORK_ITEM;
+                        : SOC_PARALLEL_TILED_MASKED_TRIANGLES_PER_WORK_ITEM;
                 soc_parallel_work_item* work_item;
 
                 if (work_item_index >= work_item_count) {
@@ -2968,7 +2992,7 @@ static soc_bool try_rasterize_occluders_tiled_masked(
         }
         if (!checked_size_add(
                 prepared_reserve_count,
-                (size_t)SOC_PARALLEL_TILED_TRIANGLES_PER_WORK_ITEM,
+                (size_t)SOC_PARALLEL_TILED_MASKED_TRIANGLES_PER_WORK_ITEM,
                 &prepared_reserve_count
             )) {
             result = SOC_RESULT_OUT_OF_MEMORY;

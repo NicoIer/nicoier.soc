@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define SOC_ABI_VERSION_MAJOR 3u
-#define SOC_ABI_VERSION_MINOR 1u
+#define SOC_ABI_VERSION_MINOR 2u
 #define SOC_ABI_VERSION \
     ((SOC_ABI_VERSION_MAJOR << 16u) | SOC_ABI_VERSION_MINOR)
 
@@ -126,6 +126,7 @@ typedef uint32_t soc_front_face;
 #define SOC_FRONT_FACE_CW ((soc_front_face)1u)
 
 #define SOC_CONFIG_FLAG_NONE 0u
+#define SOC_CONFIG_FLAG_PREFER_PERFORMANCE_CPUS (UINT32_C(1) << 0u)
 #define SOC_MAX_WORKER_COUNT UINT32_C(256)
 
 typedef struct soc_config {

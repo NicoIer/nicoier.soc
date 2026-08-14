@@ -871,11 +871,11 @@ static int test_parallel_build_matches_serial(void)
     size_t shape_index;
 
     CHECK_RESULT(
-        soc_thread_pool_initialize(&parallel_pool, 4u),
+        soc_thread_pool_initialize(&parallel_pool, 4u, SOC_FALSE),
         SOC_RESULT_OK
     );
     CHECK_RESULT(
-        soc_thread_pool_initialize(&serial_pool, 1u),
+        soc_thread_pool_initialize(&serial_pool, 1u, SOC_FALSE),
         SOC_RESULT_OK
     );
 
