@@ -8,6 +8,8 @@
 `soc` 是一个使用 C17 编写的 CPU Hi-Z 遮挡剔除库。它提供稳定的 C ABI，
 可供原生程序调用，也支持与 Unity/C# 互操作。
 
+![soc 在 Unity/Android 真机中的运行效果](docs/images/unity-android-demo.jpg)
+
 深度契约固定为 Reverse Z：近裁剪面映射到 `1`，远裁剪面趋近 `0`，
 深度缓冲清除为 `0`，光栅化使用严格的 `GREATER` 比较。调用方必须直接
 提供 Reverse-Z 投影矩阵
